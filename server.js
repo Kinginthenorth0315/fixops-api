@@ -136,12 +136,9 @@ app.get('/audit/status/:id', async (req, res) => {
 async function runFullAudit(token, auditId, meta) {
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 25000 });
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
-  // Track progress in memory, save to DB non-blocking
-  const progressData = { status:'running', progress:5, currentTask:'Starting...' };
+  // Track progress in memory only - no DB writes during audit
+  // Final result is saved once at the end with a blocking await
   const up = (pct, msg) => {
-    progressData.progress = pct;
-    progressData.currentTask = msg;
-    saveResult(auditId, { ...progressData }).catch(()=>{}); // non-blocking
     console.log(`[${auditId}] ${pct}% — ${msg}`);
   };
 
@@ -513,9 +510,7 @@ async function runFullAudit(token, auditId, meta) {
     });
   }
 
-  up(97, 'Calculating scores and generating your report…');
 
-    up(97, 'Calculating scores and generating your report…');
 
   // ── SCORES ──────────────────────────────────────────────────
   const scores = {
@@ -535,14 +530,19 @@ async function runFullAudit(token, auditId, meta) {
   const infoCount     = issues.filter(i=>i.severity==='info').length;
   const monthlyWaste  = Math.round((dupes*0.38)+(stalled.length*18)+(deadWf.length*10)+(inactiveUsers.length*75)+(noEmail.length*0.5));
 
-  console.log(`✅ Audit complete: ${auditId} | Score: ${overallScore} | ${criticalCount} critical | ${issues.length} total issues`);
-  return {
+  const finalResult = {
     status:'complete', auditId,
     portalInfo:{company:meta.company||'Your Portal',email:meta.email,plan:meta.plan,auditDate:new Date().toISOString(),
       portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length}},
     summary:{overallScore,grade:overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',criticalCount,warningCount,infoCount,monthlyWaste,totalContacts:contacts.length,totalDeals:deals.length,totalWorkflows:workflows.length,checksRun:165},
     scores, issues
   };
+
+  // Wait 2 seconds for any pending async progress saves to finish, then save final result
+  await new Promise(r => setTimeout(r, 2000));
+  await saveResult(auditId, finalResult);
+  console.log(`✅ Audit saved: ${auditId} | Score: ${overallScore} | ${criticalCount} critical | ${issues.length} total issues`);
+  return finalResult;
 }
 
 // ── Emails ────────────────────────────────────────────────────
