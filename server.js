@@ -1,15 +1,11 @@
 // ============================================================
-// FIXOPS.IO — v4 
-// Uses Railway PostgreSQL for result storage
-// No URL length limits, no memory issues, no polling failures
+// FIXOPS.IO API v4 — PostgreSQL Storage + Full Audit Engine
 // ============================================================
-
 const express = require('express');
 const axios   = require('axios');
 const crypto  = require('crypto');
-const fs      = require('fs');
-const path    = require('path');
 const { Resend } = require('resend');
+const { Pool }   = require('pg');
 
 const app = express();
 app.use(express.json());
@@ -25,43 +21,44 @@ app.use((req, res, next) => {
 
 const {
   HUBSPOT_CLIENT_ID, HUBSPOT_CLIENT_SECRET, HUBSPOT_REDIRECT_URI,
-  RESEND_API_KEY, FIXOPS_NOTIFY_EMAIL, FRONTEND_URL, PORT
+  RESEND_API_KEY, FIXOPS_NOTIFY_EMAIL, FRONTEND_URL, DATABASE_URL, PORT
 } = process.env;
 
 const resend = new Resend(RESEND_API_KEY);
 const pendingAudits = new Map();
 
-// File-based storage — works reliably on Railway single instance
-// Results stored in /tmp/fixops/ — persists for the lifetime of the deployment
-const STORE = path.join('/tmp', 'fixops_store');
-if (!fs.existsSync(STORE)) fs.mkdirSync(STORE, { recursive: true });
+// PostgreSQL
+const db = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-function initDB() {
-  console.log('File storage ready at', STORE);
-  return Promise.resolve();
+async function initDB() {
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS audit_results (id VARCHAR(24) PRIMARY KEY, data JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW())`);
+    await db.query(`DELETE FROM audit_results WHERE created_at < NOW() - INTERVAL '7 days'`);
+    console.log('Database ready');
+  } catch(e) { console.error('DB init error:', e.message); }
 }
 
 async function saveResult(id, data) {
   try {
-    fs.writeFileSync(path.join(STORE, `${id}.json`), JSON.stringify(data), 'utf8');
-  } catch(e) { console.error('Save error:', e.message); }
+    await db.query('INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2', [id, JSON.stringify(data)]);
+  } catch(e) { console.error('DB save error:', e.message); }
 }
 
 async function getResult(id) {
   try {
-    const f = path.join(STORE, `${id}.json`);
-    if (!fs.existsSync(f)) return null;
-    return JSON.parse(fs.readFileSync(f, 'utf8'));
+    const r = await db.query('SELECT data FROM audit_results WHERE id = $1', [id]);
+    return r.rows[0]?.data || null;
   } catch(e) { return null; }
 }
 
-// ── Health ────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  const files = fs.existsSync(STORE) ? fs.readdirSync(STORE).length : 0;
-  res.json({ status: 'ok', service: 'FixOps API', version: '4.0.0', storedAudits: files, uptime: Math.round(process.uptime()) + 's' });
+// Health
+app.get('/health', async (req, res) => {
+  let dbOk = false;
+  try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
+  res.json({ status: 'ok', service: 'FixOps API', version: '4.0.0', db: dbOk ? 'connected' : 'error', uptime: Math.round(process.uptime()) + 's' });
 });
 
-// ── Auth URL ──────────────────────────────────────────────────
+// Auth URL
 app.get('/auth/url', (req, res) => {
   try {
     const { email='', company='', plan='free' } = req.query;
@@ -75,12 +72,12 @@ app.get('/auth/url', (req, res) => {
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', codeChallenge);
     url.searchParams.set('code_challenge_method', 'S256');
-    console.log(`Auth URL: ${email}`);
+    console.log('Auth URL:', email);
     res.json({ url: url.toString(), state });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Callback ──────────────────────────────────────────────────
+// Callback
 app.get('/auth/callback', async (req, res) => {
   const { code, state, error } = req.query;
   if (error) return res.redirect(`${FRONTEND_URL}?audit_error=${encodeURIComponent(error)}`);
@@ -101,42 +98,41 @@ app.get('/auth/callback', async (req, res) => {
     let tokenRes;
     try {
       tokenRes = await axios.post('https://mcp.hubspot.com/oauth/v3/token', body, { headers });
+      console.log('MCP token success');
     } catch(e) {
+      console.log('MCP failed, trying standard...');
       tokenRes = await axios.post('https://api.hubapi.com/oauth/v1/token', body, { headers });
+      console.log('Standard token success');
     }
 
-    // Redirect immediately to "check your email" confirmation page
+    // Save running status + redirect immediately
+    await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
     res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}`);
 
-    // Run audit in background after redirect
+    // Run audit in background
     try {
       const result = await runFullAudit(tokenRes.data.access_token, auditId, pending);
       await saveResult(auditId, result);
-      // Send emails with direct link to results
       if (pending.email) sendClientEmail(pending.email, result, auditId).catch(e => console.error('Email:', e.message));
       if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result, auditId).catch(e => console.error('Notify:', e.message));
     } catch(e) {
-      console.error('Background audit error:', e.message);
+      console.error('Audit error:', e.message);
+      await saveResult(auditId, { status: 'error', message: 'Audit encountered an error. Matthew has been notified.' });
     }
 
   } catch(err) {
     console.error('Callback error:', err.response?.data || err.message);
-    await saveResult(auditId, { status: 'error', message: 'Audit failed. Matthew has been notified and will follow up shortly.' });
-    // If we haven't redirected yet, redirect with error
-    if (!res.headersSent) {
-      res.redirect(`${FRONTEND_URL}/scanning.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email||'')}`);
-    }
+    if (!res.headersSent) res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email||'')}&id=${auditId}`);
   }
 });
 
-// ── Status polling ────────────────────────────────────────────
+// Status polling
 app.get('/audit/status/:id', async (req, res) => {
   const result = await getResult(req.params.id);
   if (!result) return res.status(404).json({ error: 'Audit not found', id: req.params.id });
   res.json(result);
 });
 
-// ── FULL AUDIT ENGINE ─────────────────────────────────────────
 async function runFullAudit(token, auditId, meta) {
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 25000 });
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
