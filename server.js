@@ -7,8 +7,9 @@
 const express = require('express');
 const axios   = require('axios');
 const crypto  = require('crypto');
+const fs      = require('fs');
+const path    = require('path');
 const { Resend } = require('resend');
-const { Pool }   = require('pg');
 
 const app = express();
 app.use(express.json());
@@ -24,62 +25,40 @@ app.use((req, res, next) => {
 
 const {
   HUBSPOT_CLIENT_ID, HUBSPOT_CLIENT_SECRET, HUBSPOT_REDIRECT_URI,
-  RESEND_API_KEY, FIXOPS_NOTIFY_EMAIL, FRONTEND_URL, DATABASE_URL, PORT
+  RESEND_API_KEY, FIXOPS_NOTIFY_EMAIL, FRONTEND_URL, PORT
 } = process.env;
 
 const resend = new Resend(RESEND_API_KEY);
 const pendingAudits = new Map();
 
-// PostgreSQL connection
-const db = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// File-based storage — works reliably on Railway single instance
+// Results stored in /tmp/fixops/ — persists for the lifetime of the deployment
+const STORE = path.join('/tmp', 'fixops_store');
+if (!fs.existsSync(STORE)) fs.mkdirSync(STORE, { recursive: true });
 
-// Initialize DB table
-async function initDB() {
-  try {
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS audit_results (
-        id VARCHAR(24) PRIMARY KEY,
-        data JSONB NOT NULL,
-        created_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    // Clean up results older than 7 days
-    await db.query(`DELETE FROM audit_results WHERE created_at < NOW() - INTERVAL '7 days'`);
-    console.log('Database ready');
-  } catch (e) {
-    console.error('DB init error:', e.message);
-  }
+function initDB() {
+  console.log('File storage ready at', STORE);
+  return Promise.resolve();
 }
 
 async function saveResult(id, data) {
   try {
-    await db.query(
-      'INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
-      [id, JSON.stringify(data)]
-    );
-  } catch (e) {
-    console.error('DB save error:', e.message);
-  }
+    fs.writeFileSync(path.join(STORE, `${id}.json`), JSON.stringify(data), 'utf8');
+  } catch(e) { console.error('Save error:', e.message); }
 }
 
 async function getResult(id) {
   try {
-    const r = await db.query('SELECT data FROM audit_results WHERE id = $1', [id]);
-    return r.rows[0]?.data || null;
-  } catch (e) {
-    console.error('DB get error:', e.message);
-    return null;
-  }
+    const f = path.join(STORE, `${id}.json`);
+    if (!fs.existsSync(f)) return null;
+    return JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch(e) { return null; }
 }
 
 // ── Health ────────────────────────────────────────────────────
-app.get('/health', async (req, res) => {
-  let dbOk = false;
-  try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
-  res.json({ status: 'ok', service: 'FixOps API', version: '4.0.0', db: dbOk ? 'connected' : 'error', uptime: Math.round(process.uptime()) + 's' });
+app.get('/health', (req, res) => {
+  const files = fs.existsSync(STORE) ? fs.readdirSync(STORE).length : 0;
+  res.json({ status: 'ok', service: 'FixOps API', version: '4.0.0', storedAudits: files, uptime: Math.round(process.uptime()) + 's' });
 });
 
 // ── Auth URL ──────────────────────────────────────────────────
@@ -126,23 +105,23 @@ app.get('/auth/callback', async (req, res) => {
       tokenRes = await axios.post('https://api.hubapi.com/oauth/v1/token', body, { headers });
     }
 
-    // Save "running" status first so polling shows progress
-    await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot…' });
+    // Redirect immediately to "check your email" confirmation page
+    res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}`);
 
-    // Redirect to scanning page immediately
-    res.redirect(`${FRONTEND_URL}/scanning.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email)}`);
-
-    // Run audit in background
-    const result = await runFullAudit(tokenRes.data.access_token, auditId, pending);
-    await saveResult(auditId, result);
-
-    // Send emails
-    if (pending.email) sendClientEmail(pending.email, result).catch(e => console.error('Email:', e.message));
-    if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result).catch(e => console.error('Notify:', e.message));
+    // Run audit in background after redirect
+    try {
+      const result = await runFullAudit(tokenRes.data.access_token, auditId, pending);
+      await saveResult(auditId, result);
+      // Send emails with direct link to results
+      if (pending.email) sendClientEmail(pending.email, result, auditId).catch(e => console.error('Email:', e.message));
+      if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result, auditId).catch(e => console.error('Notify:', e.message));
+    } catch(e) {
+      console.error('Background audit error:', e.message);
+    }
 
   } catch(err) {
     console.error('Callback error:', err.response?.data || err.message);
-    await saveResult(auditId, { status: 'error', message: 'Audit failed. Matthew has been notified and will follow up within 24 hours.' });
+    await saveResult(auditId, { status: 'error', message: 'Audit failed. Matthew has been notified and will follow up shortly.' });
     // If we haven't redirected yet, redirect with error
     if (!res.headersSent) {
       res.redirect(`${FRONTEND_URL}/scanning.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email||'')}`);
@@ -295,7 +274,7 @@ async function runFullAudit(token, auditId, meta) {
   const zeroDeal = openDeals.filter(d=>!d.properties?.amount||parseFloat(d.properties.amount)===0);
   if(zeroDeal.length>openDeals.length*0.15&&openDeals.length>3){
     pipelineScore-=14;
-    issues.push({severity:'warning',title:`${zeroDeal.length} deals show $0 value — pipeline massively understated to leadership`,description:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of active pipeline has no dollar value. Every board deck, pipeline review, and revenue forecast is showing a significantly lower number than your team\'s actual opportunity.`,detail:`This is the most common and most damaging HubSpot reporting problem. Leadership makes headcount, budget, and strategy decisions based on a pipeline number that doesn\'t reflect reality.`,impact:`Pipeline understated · board reports inaccurate · rep quota calculations wrong`,dimension:'Pipeline Integrity',autoFixable:false,guide:['Require Amount on deal creation: Settings → Properties → Amount → Required','Export $0 deals, add realistic values based on product pricing, reimport same day','Workflow: Deal created AND amount unknown → task to rep to fill in within 24 hours']});
+    issues.push({severity:'warning',title:`${zeroDeal.length} deals show $0 value — pipeline massively understated to leadership`,description:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of active pipeline has no dollar value. Every board deck, pipeline review, and revenue forecast is showing a significantly lower number than your team\'s actual opportunity.`,detail:`This is the most common and most damaging HubSpot reporting problem. Leadership makes headcount, budget, and strategy decisions based on a pipeline number that doesn\'t reflect reality.`,impact:`Pipeline understated · board reports inaccurate · rep quota calculations wrong`,dimension:'Pipeline Integrity',autoFixable:false,guide:['Require Amount on deal creation: Settings → Properties → Amount → Required','Export $0 deals, add realistic values based on product pricing, reimport same day','Workflow: Deal created AND amount unknown → task to rep to fill in amount same day']});
   }
 
   const overdueTasks = tasks.filter(t=>{
@@ -367,7 +346,177 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'warning',title:`No meetings or calls logged — sales activity is completely dark`,description:`Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. This means you have zero visibility into rep activity, can\'t measure call volume, can\'t review meeting outcomes, and can\'t build any rep performance reports.`,detail:`The fix is a 5-minute calendar connection. Once Google Calendar or Outlook is connected, meetings log automatically with one click. Call logging via the HubSpot mobile app takes 10 seconds.`,impact:`Rep activity invisible · performance coaching impossible · activity-based reports all show zero`,dimension:'Team Adoption',autoFixable:false,guide:['Connect HubSpot to Google Calendar or Outlook: Settings → Integrations → Email & Calendar','Install HubSpot Sales Chrome Extension for one-click Gmail/Outlook logging','Create a weekly activity dashboard: calls made, emails sent, meetings booked — visibility drives adoption','FixOps sets up the full sales activity tracking stack in one 30-minute session']});
   }
 
+
+  // ════════════════════════════════════════════════════
+  // BONUS: HIGH-IMPACT WOW CHECKS
+  // ════════════════════════════════════════════════════
+
+  // 1. BILLING TIER PROJECTION
+  // Calculate contacts added per month and project when they'll hit the next tier
+  const contactsThisMonth = contacts.filter(c => {
+    const created = new Date(c.properties?.createdate||0).getTime();
+    return (now - created) / DAY < 30;
+  }).length;
+  const monthlyGrowthRate = contactsThisMonth;
+
+  // HubSpot billing tiers (Marketing Hub)
+  const tiers = [1000, 2000, 5000, 10000, 25000, 50000, 100000, 200000];
+  const currentCount = contacts.length;
+  const nextTier = tiers.find(t => t > currentCount);
+  if (nextTier && monthlyGrowthRate > 0) {
+    const contactsToNextTier = nextTier - currentCount;
+    const daysToNextTier = Math.round((contactsToNextTier / monthlyGrowthRate) * 30);
+    if (daysToNextTier < 120) {
+      dataScore -= 10;
+      issues.push({
+        severity: daysToNextTier < 30 ? 'critical' : 'warning',
+        title: `At current growth rate you'll hit the ${nextTier.toLocaleString()} contact billing tier in ~${daysToNextTier} days`,
+        description: `You currently have ${currentCount.toLocaleString()} contacts and added ~${monthlyGrowthRate} this month. HubSpot's next billing tier is ${nextTier.toLocaleString()} contacts. At this rate you'll be paying for the next tier in under ${Math.ceil(daysToNextTier/30)} month${daysToNextTier>30?'s':''}. If ${Math.round(dupes/Math.max(currentCount,1)*100)}% are duplicates, you're accelerating toward that tier unnecessarily.`,
+        detail: `HubSpot charges by contact tier, not exact count. Crossing ${nextTier.toLocaleString()} triggers an automatic upgrade regardless of whether you need it. Cleaning duplicates and archiving cold contacts now is always cheaper than the tier jump.`,
+        impact: `Billing tier upgrade imminent · proactive cleanup saves $100–$400/mo`,
+        dimension: 'Data Integrity',
+        autoFixable: true,
+        guide: [
+          `You need to stay below ${nextTier.toLocaleString()} contacts — you currently have ${contactsToNextTier.toLocaleString()} to go`,
+          'Run a duplicate cleanup now to reduce count: merge fuzzy duplicates that shouldn't be separate records',
+          'Archive contacts with no email, no activity, and created more than 12 months ago — they have zero pipeline value',
+          'FixOps Data CleanUp can reduce your contact count by identifying and merging all non-unique records this week'
+        ]
+      });
+    }
+  }
+
+  // 2. KEY PERSON PIPELINE RISK
+  // Check if one rep owns a dangerous % of pipeline
+  if (deals.length > 5 && owners.length > 1) {
+    const dealsByOwner = {};
+    let totalDealValue = 0;
+    openDeals.forEach(d => {
+      const ownerId = d.properties?.hubspot_owner_id || 'unowned';
+      const amount  = parseFloat(d.properties?.amount || 0);
+      dealsByOwner[ownerId] = (dealsByOwner[ownerId] || 0) + amount;
+      totalDealValue += amount;
+    });
+
+    if (totalDealValue > 0) {
+      const topOwner = Object.entries(dealsByOwner).sort((a,b) => b[1]-a[1])[0];
+      if (topOwner) {
+        const topPct = Math.round((topOwner[1] / totalDealValue) * 100);
+        if (topPct > 55) {
+          pipelineScore -= 14;
+          const ownerInfo = owners.find(o => o.id === topOwner[0]);
+          const ownerName = ownerInfo ? `${ownerInfo.firstName || ''} ${ownerInfo.lastName || ''}`.trim() : 'One rep';
+          issues.push({
+            severity: topPct > 70 ? 'critical' : 'warning',
+            title: `${ownerName || 'One rep'} owns ${topPct}% of pipeline value — dangerous key person risk`,
+            description: `When a single rep controls the majority of your pipeline, you have a critical business risk: if they leave, get sick, or go on vacation, your revenue forecast collapses. This is one of the first things investors and acquirers flag as a red flag in a revenue due diligence.`,
+            detail: `Healthy pipeline distribution: no single rep should own more than 35-40% of total pipeline value. Above 55% is a warning. Above 70% is critical. Beyond the risk of losing the rep, concentrated pipelines also indicate CRM adoption problems across the rest of the team.`,
+            impact: `$${topOwner[1].toLocaleString()} concentrated with one person · business continuity and valuation risk`,
+            dimension: 'Pipeline Integrity',
+            autoFixable: false,
+            guide: [
+              'Immediately: ensure deal notes, contact history, and next steps are documented for ALL deals in this rep's pipeline',
+              'Implement mandatory deal documentation: a "Key contacts" and "Next steps" required property on every open deal',
+              'Review whether other reps are logging deals in HubSpot or tracking them elsewhere (spreadsheets, email)',
+              'FixOps can build a pipeline distribution dashboard that tracks concentration risk over time and alerts when one rep exceeds 40%'
+            ]
+          });
+        }
+      }
+    }
+  }
+
+  // 3. PROPERTY JUNK DETECTION
+  // Find contacts where key fields are filled with junk values
+  const junkValues = ['.', '-', 'n/a', 'na', 'none', 'test', 'unknown', '0', 'null', 'tbd', '123', 'xxx'];
+  const junkPhone  = contacts.filter(c => {
+    const phone = (c.properties?.phone || '').toLowerCase().trim();
+    return phone.length > 0 && (junkValues.includes(phone) || phone.replace(/[^0-9]/g,'').length < 7);
+  });
+  const junkCompany = contacts.filter(c => {
+    const co = (c.properties?.company || '').toLowerCase().trim();
+    return co.length > 0 && junkValues.includes(co);
+  });
+  const totalJunk = junkPhone.length + junkCompany.length;
+
+  if (totalJunk > 10) {
+    dataScore -= Math.min(12, totalJunk / 5);
+    issues.push({
+      severity: totalJunk > 50 ? 'warning' : 'info',
+      title: `${totalJunk} contacts have junk data in key fields (".", "N/A", "test", invalid phones)`,
+      description: `Your team is entering placeholder values to bypass required fields — a classic sign of form friction or rep shortcuts. Junk data is worse than blank data: it looks complete in reports but breaks segmentation, workflows, and enrichment tools that rely on these fields being real.`,
+      detail: `When phone numbers contain "." or "0000000", call tools break. When company contains "N/A", company-based workflows and ABM lists fail silently. Junk data is invisible in normal HubSpot views but destroys data quality at scale.`,
+      impact: `${totalJunk} records with fake data breaking segmentation, workflows, and enrichment`,
+      dimension: 'Data Integrity',
+      autoFixable: true,
+      guide: [
+        'Export contacts filtered by phone = "." or company = "n/a" and correct or blank the field',
+        'If reps are entering junk to bypass required fields, reduce required fields to only the truly essential ones',
+        'Add field validation using HubSpot's property validation rules: minimum length, format requirements (phone: 10 digits minimum)',
+        'FixOps Data CleanUp identifies and blanks all junk values across your portal with a preview before touching anything'
+      ]
+    });
+  }
+
+  // 4. REP RESPONSE TIME RISK
+  // Check deals where there's been no rep activity since the deal was created
+  const newDealsNoActivity = openDeals.filter(d => {
+    const created  = new Date(d.properties?.createdate||0).getTime();
+    const lastMod  = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
+    const ageHours = (now - created) / (1000 * 60 * 60);
+    const modDiff  = Math.abs(lastMod - created) / (1000 * 60 * 60);
+    // Deal created more than 24 hours ago, never meaningfully modified
+    return ageHours > 24 && modDiff < 2;
+  });
+  if (newDealsNoActivity.length > 3) {
+    pipelineScore -= Math.min(12, newDealsNoActivity.length * 2);
+    issues.push({
+      severity: newDealsNoActivity.length > 8 ? 'critical' : 'warning',
+      title: `${newDealsNoActivity.length} deals created but never touched by a rep — leads going cold`,
+      description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
+      detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep doesn't know the deal exists.`,
+      impact: `${newDealsNoActivity.length} leads assigned but never followed up — qualification rate dropping rapidly`,
+      dimension: 'Pipeline Integrity',
+      autoFixable: false,
+      guide: [
+        'Create a workflow: Deal is created → immediately create a "New deal — first contact required" task for the owner with a 2-hour due date',
+        'Add a Slack notification when a new deal is created so reps see it in real time, not just in HubSpot',
+        'Review your lead routing: are deals being assigned to reps who aren't checking HubSpot regularly?',
+        'FixOps can build the automated new-deal notification and first-contact task system in one session'
+      ]
+    });
+  }
+
+  // 5. EMAIL MARKETING HEALTH CHECK (if we have email data)
+  // Check for marketing email performance issues via marketing emails API
+  const highBounceRisk = contacts.filter(c => {
+    // Look for bounced email indicators in contact properties
+    const emailBounced = c.properties?.hs_email_hard_bounce_reason;
+    return !!emailBounced;
+  }).length;
+
+  if (highBounceRisk > contacts.length * 0.02) {
+    marketingScore -= 12;
+    issues.push({
+      severity: highBounceRisk > contacts.length * 0.05 ? 'critical' : 'warning',
+      title: `${highBounceRisk} contacts have hard email bounces — your sender reputation is at risk`,
+      description: `Hard bounced emails mean these addresses definitively don't exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
+      detail: `Email deliverability is invisible until it breaks catastrophically. Industry best practice: hard bounce rate above 2% triggers spam filter escalation. Above 5% can result in your sending domain being blacklisted.`,
+      impact: `${highBounceRisk} hard bounces · sender reputation damage · emails landing in spam for entire list`,
+      dimension: 'Marketing Health',
+      autoFixable: true,
+      guide: [
+        'Immediately: HubSpot auto-suppresses hard bounces from future sends — verify this is working in Marketing → Email → Bounced',
+        'Export hard bounced contacts and permanently remove or archive them from your active database',
+        'Run an email validation tool (NeverBounce, ZeroBounce) on your full list to identify risky addresses before sending',
+        'FixOps can clean your bounced contacts and set up automatic suppression workflows to protect deliverability going forward'
+      ]
+    });
+  }
+
   await up(97, 'Calculating scores and generating your report…');
+
+    await up(97, 'Calculating scores and generating your report…');
 
   // ── SCORES ──────────────────────────────────────────────────
   const scores = {
@@ -397,7 +546,7 @@ async function runFullAudit(token, auditId, meta) {
 }
 
 // ── Emails ────────────────────────────────────────────────────
-async function sendClientEmail(to, data) {
+async function sendClientEmail(to, data, auditId) {
   const {summary,issues,portalInfo} = data;
   const col = summary.overallScore>=85?'#10b981':summary.overallScore>=70?'#10b981':summary.overallScore>=55?'#f59e0b':'#f43f5e';
   const top = issues.slice(0,4);
@@ -494,15 +643,16 @@ async function sendClientEmail(to, data) {
 <!-- CTA Box -->
 <tr><td style="background:linear-gradient(135deg,rgba(124,58,237,0.2),rgba(91,33,182,0.1));border:1px solid rgba(124,58,237,0.3);border-radius:16px;padding:32px;text-align:center">
   <p style="margin:0 0 8px;font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.5px">Ready to fix these issues?</p>
-  <p style="margin:0 0 24px;font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6">Matthew will personally review your audit and send a prioritized fix plan with transparent pricing within 24 hours. Or book a call to go through it together.</p>
+  <p style="margin:0 0 24px;font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6">Matthew will personally review your audit and send a prioritized fix plan with transparent flat-rate pricing. Or book a call to go through it together.</p>
   <table cellpadding="0" cellspacing="0" align="center">
     <tr>
-      <td style="background:#7c3aed;border-radius:10px;padding:14px 28px">
-        <a href="https://calendly.com/matthew-fixops/30min" style="color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;display:block">📅 Book a Free Strategy Call ↗</a>
+      <td style="background:#7c3aed;border-radius:10px;padding:14px 28px;text-align:center">
+        <a href="${process.env.FRONTEND_URL||"https://fixops.io"}/results.html?id=${auditId}" style="color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;display:block">🔍 View Your Full Results ↗</a>
       </td>
     </tr>
   </table>
-  <p style="margin:16px 0 0;font-size:12px;color:rgba(255,255,255,0.25)">Or reply to this email · matthew@fixops.io</p>
+  <p style="margin:12px 0 0;font-size:12px;color:rgba(255,255,255,0.3)">Or book a free strategy call: <a href="https://calendly.com/matthew-fixops/30min" style="color:#a78bfa">calendly.com/matthew-fixops/30min</a></p>
+  <p style="margin:8px 0 0;font-size:12px;color:rgba(255,255,255,0.25)">matthew@fixops.io · fixops.io</p>
 </td></tr>
 
 <!-- Footer -->
@@ -518,7 +668,7 @@ async function sendClientEmail(to, data) {
   console.log(`Client email sent: ${to}`);
 }
 
-async function notifyMatthew(data) {
+async function notifyMatthew(data, auditId) {
   const {summary,portalInfo} = data;
   await resend.emails.send({
     from:'FixOps Alerts <onboarding@resend.dev>', to:FIXOPS_NOTIFY_EMAIL,
@@ -535,8 +685,9 @@ async function notifyMatthew(data) {
 <tr><td style="color:rgba(255,255,255,.5)">Portal Size</td><td style="color:rgba(255,255,255,.7);padding-left:16px">${summary.totalContacts} contacts · ${summary.totalDeals} deals · ${summary.totalWorkflows} workflows</td></tr>
 </table>
 <div style="margin:20px 0;height:1px;background:#333"></div>
-<p style="color:#f59e0b;margin:0 0 12px">⚡ Follow up within 24 hours — this is a hot lead.</p>
-<a href="https://calendly.com/matthew-fixops/30min" style="display:inline-block;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700">Book Follow-Up Call →</a>
+<p style="color:#f59e0b;margin:0 0 12px">⚡ Follow up within a few hours — this is a hot lead.</p>
+<a href="${process.env.FRONTEND_URL||'https://fixops.io'}/results.html?id=${auditId}" style="display:inline-block;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-right:8px">View Results →</a>
+<a href="https://calendly.com/matthew-fixops/30min" style="display:inline-block;background:#333;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700">Book Call →</a>
 </div>`
   });
   console.log('Matthew notified');
