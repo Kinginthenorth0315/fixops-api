@@ -202,7 +202,7 @@ async function runFullAudit(token, auditId, meta) {
   const dupes = Object.values(nameMap).filter(v=>v>1).reduce((a,b)=>a+b,0);
   if(dupes>0){
     dataScore-=Math.min(22,dupes/4);
-    issues.push({severity:dupes>15?'critical':'warning',title:`${dupes} potential duplicate contacts — missed by HubSpot's native dedup`,description:`HubSpot only deduplicates on exact email matches. These ${dupes} contacts share the same name but different email formats or sources. They\'re receiving duplicate sequences, corrupting attribution, and inflating your billing tier.`,detail:`HubSpot\'s native "Manage Duplicates" tool would miss all of these. They only match on exact email. FixOps matches on name + phone + company — the way humans spot duplicates.`,impact:`~$${Math.round(dupes*0.38)}/mo excess billing · duplicated outreach to real people · corrupted attribution data`,dimension:'Data Integrity',autoFixable:true,guide:['Go to Contacts → Actions → Manage Duplicates to clear HubSpot\'s exact-match suggestions first','For fuzzy duplicates: export contacts, sort by Last Name, identify and merge name-matched groups','FixOps Data CleanUp runs full fuzzy-match dedup with a merge preview — you approve before anything changes','Every merge preserves full activity history — no data is ever lost']});
+    issues.push({severity:dupes>15?'critical':'warning',title:`${dupes} potential duplicate contacts — missed by HubSpot native dedup`,description:`HubSpot only deduplicates on exact email matches. These ${dupes} contacts share the same name but different email formats or sources. They\'re receiving duplicate sequences, corrupting attribution, and inflating your billing tier.`,detail:`HubSpot\'s native "Manage Duplicates" tool would miss all of these. They only match on exact email. FixOps matches on name + phone + company — the way humans spot duplicates.`,impact:`~$${Math.round(dupes*0.38)}/mo excess billing · duplicated outreach to real people · corrupted attribution data`,dimension:'Data Integrity',autoFixable:true,guide:['Go to Contacts → Actions → Manage Duplicates to clear HubSpot\'s exact-match suggestions first','For fuzzy duplicates: export contacts, sort by Last Name, identify and merge name-matched groups','FixOps Data CleanUp runs full fuzzy-match dedup with a merge preview — you approve before anything changes','Every merge preserves full activity history — no data is ever lost']});
   }
 
   const noEmail = contacts.filter(c=>!c.properties?.email);
@@ -371,14 +371,14 @@ async function runFullAudit(token, auditId, meta) {
       issues.push({
         severity: daysToNextTier < 30 ? 'critical' : 'warning',
         title: `At current growth rate you'll hit the ${nextTier.toLocaleString()} contact billing tier in ~${daysToNextTier} days`,
-        description: `You currently have ${currentCount.toLocaleString()} contacts and added ~${monthlyGrowthRate} this month. HubSpot's next billing tier is ${nextTier.toLocaleString()} contacts. At this rate you'll be paying for the next tier in under ${Math.ceil(daysToNextTier/30)} month${daysToNextTier>30?'s':''}. If ${Math.round(dupes/Math.max(currentCount,1)*100)}% are duplicates, you're accelerating toward that tier unnecessarily.`,
+        description: `You currently have ${currentCount.toLocaleString()} contacts and added ~${monthlyGrowthRate} this month. HubSpot next billing tier is ${nextTier.toLocaleString()} contacts. At this rate you'll be paying for the next tier in under ${Math.ceil(daysToNextTier/30)} month${daysToNextTier>30?'s':''}. If ${Math.round(dupes/Math.max(currentCount,1)*100)}% are duplicates, you are accelerating toward that tier unnecessarily.`,
         detail: `HubSpot charges by contact tier, not exact count. Crossing ${nextTier.toLocaleString()} triggers an automatic upgrade regardless of whether you need it. Cleaning duplicates and archiving cold contacts now is always cheaper than the tier jump.`,
         impact: `Billing tier upgrade imminent · proactive cleanup saves $100–$400/mo`,
         dimension: 'Data Integrity',
         autoFixable: true,
         guide: [
           `You need to stay below ${nextTier.toLocaleString()} contacts — you currently have ${contactsToNextTier.toLocaleString()} to go`,
-          'Run a duplicate cleanup now to reduce count: merge fuzzy duplicates that shouldn't be separate records',
+          'Run a duplicate cleanup now to reduce count: merge fuzzy duplicates that should not be separate records',
           'Archive contacts with no email, no activity, and created more than 12 months ago — they have zero pipeline value',
           'FixOps Data CleanUp can reduce your contact count by identifying and merging all non-unique records this week'
         ]
@@ -415,7 +415,7 @@ async function runFullAudit(token, auditId, meta) {
             dimension: 'Pipeline Integrity',
             autoFixable: false,
             guide: [
-              'Immediately: ensure deal notes, contact history, and next steps are documented for ALL deals in this rep's pipeline',
+              'Immediately: ensure deal notes, contact history, and next steps are documented for ALL deals in this the rep\'s pipeline',
               'Implement mandatory deal documentation: a "Key contacts" and "Next steps" required property on every open deal',
               'Review whether other reps are logging deals in HubSpot or tracking them elsewhere (spreadsheets, email)',
               'FixOps can build a pipeline distribution dashboard that tracks concentration risk over time and alerts when one rep exceeds 40%'
@@ -452,14 +452,14 @@ async function runFullAudit(token, auditId, meta) {
       guide: [
         'Export contacts filtered by phone = "." or company = "n/a" and correct or blank the field',
         'If reps are entering junk to bypass required fields, reduce required fields to only the truly essential ones',
-        'Add field validation using HubSpot's property validation rules: minimum length, format requirements (phone: 10 digits minimum)',
+        'Add field validation using HubSpot property validation rules: minimum length, format requirements (phone: 10 digits minimum)',
         'FixOps Data CleanUp identifies and blanks all junk values across your portal with a preview before touching anything'
       ]
     });
   }
 
   // 4. REP RESPONSE TIME RISK
-  // Check deals where there's been no rep activity since the deal was created
+  // Check deals where there is been no rep activity since the deal was created
   const newDealsNoActivity = openDeals.filter(d => {
     const created  = new Date(d.properties?.createdate||0).getTime();
     const lastMod  = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
@@ -474,14 +474,14 @@ async function runFullAudit(token, auditId, meta) {
       severity: newDealsNoActivity.length > 8 ? 'critical' : 'warning',
       title: `${newDealsNoActivity.length} deals created but never touched by a rep — leads going cold`,
       description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
-      detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep doesn't know the deal exists.`,
+      detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep does not know the deal exists.`,
       impact: `${newDealsNoActivity.length} leads assigned but never followed up — qualification rate dropping rapidly`,
       dimension: 'Pipeline Integrity',
       autoFixable: false,
       guide: [
         'Create a workflow: Deal is created → immediately create a "New deal — first contact required" task for the owner with a 2-hour due date',
         'Add a Slack notification when a new deal is created so reps see it in real time, not just in HubSpot',
-        'Review your lead routing: are deals being assigned to reps who aren't checking HubSpot regularly?',
+        'Review your lead routing: are deals being assigned to reps who are not checking HubSpot regularly?',
         'FixOps can build the automated new-deal notification and first-contact task system in one session'
       ]
     });
@@ -500,7 +500,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({
       severity: highBounceRisk > contacts.length * 0.05 ? 'critical' : 'warning',
       title: `${highBounceRisk} contacts have hard email bounces — your sender reputation is at risk`,
-      description: `Hard bounced emails mean these addresses definitively don't exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
+      description: `Hard bounced emails mean these addresses definitively do not exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
       detail: `Email deliverability is invisible until it breaks catastrophically. Industry best practice: hard bounce rate above 2% triggers spam filter escalation. Above 5% can result in your sending domain being blacklisted.`,
       impact: `${highBounceRisk} hard bounces · sender reputation damage · emails landing in spam for entire list`,
       dimension: 'Marketing Health',
