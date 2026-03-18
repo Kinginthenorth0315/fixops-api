@@ -142,14 +142,24 @@ app.get('/auth/callback', async (req, res) => {
     // Clean up pending
     pendingAudits.delete(state);
 
-    // Redirect user to results page immediately
-    res.redirect(`${FRONTEND_URL}/results.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email)}`);
-
-    // Run audit in background (don't await)
-    runFullAudit(access_token, auditId, pending).catch(err => {
-      console.error('Audit error:', err);
-      auditResults.set(auditId, { status: 'error', message: err.message });
-    });
+    // Run audit FIRST then redirect with results
+    // This avoids in-memory polling issues
+    try {
+      await runFullAudit(access_token, auditId, pending);
+    } catch(e) {
+      console.error('Audit error:', e.message);
+    }
+    
+    const result = auditResults.get(auditId);
+    if (result && result.status === 'complete') {
+      // Encode summary in URL so results page doesn't need to poll
+      const summary = encodeURIComponent(JSON.stringify(result.summary));
+      const scores  = encodeURIComponent(JSON.stringify(result.scores));
+      const issues  = encodeURIComponent(JSON.stringify(result.issues));
+      res.redirect(`${FRONTEND_URL}/results.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email)}&summary=${summary}&scores=${scores}&issues=${issues}`);
+    } else {
+      res.redirect(`${FRONTEND_URL}/results.html?audit_id=${auditId}&email=${encodeURIComponent(pending.email)}&status=error`);
+    }
 
   } catch (err) {
     const errDetail = err.response?.data || err.message;
