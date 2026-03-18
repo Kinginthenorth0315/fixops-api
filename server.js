@@ -51,6 +51,39 @@ async function getResult(id) {
   } catch(e) { return null; }
 }
 
+// Fix It For Me endpoint
+app.post('/fix-request', async (req, res) => {
+  try {
+    const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, auditId } = req.body;
+    
+    await resend.emails.send({
+      from: 'FixOps Alerts <onboarding@resend.dev>',
+      to: FIXOPS_NOTIFY_EMAIL,
+      subject: `🛠 Fix It For Me — ${issueTitle?.substring(0,60)} — ${portalCompany}`,
+      html: `<div style="font-family:monospace;background:#000;color:#fff;padding:24px;border-radius:8px;max-width:600px">
+<h2 style="color:#a78bfa;margin:0 0 20px">🛠 Fix It For Me Request</h2>
+<table cellpadding="6" cellspacing="0">
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Company</td><td style="color:#fff;padding-left:16px">${portalCompany||'Unknown'}</td></tr>
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Email</td><td style="color:#fff;padding-left:16px">${portalEmail||'Unknown'}</td></tr>
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Audit ID</td><td style="color:rgba(255,255,255,.4);padding-left:16px;font-size:11px">${auditId||'Unknown'}</td></tr>
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Dimension</td><td style="color:#a78bfa;padding-left:16px">${issueDimension||'Unknown'}</td></tr>
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap;vertical-align:top">Issue</td><td style="color:#f43f5e;padding-left:16px;font-weight:700">${issueTitle||'Unknown'}</td></tr>
+<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap;vertical-align:top">Impact</td><td style="color:#f59e0b;padding-left:16px">${issueImpact||'Unknown'}</td></tr>
+</table>
+<div style="margin:20px 0;height:1px;background:#333"></div>
+<p style="color:#f59e0b;margin:0 0 12px">⚡ Reply to this email or book a call to scope and quote within 4 hours.</p>
+<a href="mailto:${portalEmail}" style="display:inline-block;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-right:8px">Reply to Client →</a>
+<a href="https://calendly.com/matthew-fixops/30min" style="display:inline-block;background:#333;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700">Book Call →</a>
+</div>`
+    });
+    
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Fix request error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Health
 app.get('/health', async (req, res) => {
   let dbOk = false;
