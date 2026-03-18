@@ -82,7 +82,7 @@ app.get('/auth/url', (req, res) => {
 
     // Build HubSpot OAuth 2.1 URL
     // MCP Auth App OAuth 2.1 - no scope parameter needed, HubSpot manages scopes
-    const authUrl = new URL('https://mcp-na2.hubspot.com/oauth/authorize/user');
+    const authUrl = new URL('https://mcp.hubspot.com/oauth/authorize');
     authUrl.searchParams.set('client_id',             HUBSPOT_CLIENT_ID);
     authUrl.searchParams.set('redirect_uri',          HUBSPOT_REDIRECT_URI);
     authUrl.searchParams.set('state',                 state);
@@ -114,21 +114,33 @@ app.get('/auth/callback', async (req, res) => {
   }
 
   try {
-    // Exchange code for access token (MCP Auth App OAuth 2.1)
-    const tokenRes = await axios.post(
-      'https://mcp-na2.hubspot.com/oauth/token',
-      new URLSearchParams({
-        grant_type:    'authorization_code',
-        client_id:     HUBSPOT_CLIENT_ID,
-        client_secret: HUBSPOT_CLIENT_SECRET,
-        redirect_uri:  HUBSPOT_REDIRECT_URI,
-        code,
-        code_verifier: pending.codeVerifier
-      }),
-      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
-    );
+    // Exchange code for access token
+    // Try MCP endpoint first, fall back to standard HubSpot endpoint
+    let tokenRes;
+    const tokenBody = new URLSearchParams({
+      grant_type:    'authorization_code',
+      client_id:     HUBSPOT_CLIENT_ID,
+      client_secret: HUBSPOT_CLIENT_SECRET,
+      redirect_uri:  HUBSPOT_REDIRECT_URI,
+      code,
+      code_verifier: pending.codeVerifier
+    });
+    const tokenHeaders = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+    try {
+      // Try MCP endpoint first
+      console.log('Trying MCP token endpoint...');
+      tokenRes = await axios.post('https://mcp.hubspot.com/oauth/v3/token', tokenBody, { headers: tokenHeaders });
+      console.log('MCP token success');
+    } catch (mcpErr) {
+      console.log('MCP token failed, trying standard endpoint...', mcpErr.response?.data || mcpErr.message);
+      // Fall back to standard HubSpot token endpoint
+      tokenRes = await axios.post('https://api.hubapi.com/oauth/v1/token', tokenBody, { headers: tokenHeaders });
+      console.log('Standard token success');
+    }
 
     const { access_token, refresh_token } = tokenRes.data;
+    console.log('Got access token, starting audit...');
 
     // Generate audit ID
     const auditId = crypto.randomBytes(12).toString('hex');
@@ -149,8 +161,12 @@ app.get('/auth/callback', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Token exchange error:', err.response?.data || err.message);
-    res.redirect(`${FRONTEND_URL}?audit_error=token_failed`);
+    const errDetail = err.response?.data || err.message;
+    console.error('Token exchange error FULL:', JSON.stringify(errDetail));
+    console.error('Code used:', code);
+    console.error('Redirect URI:', HUBSPOT_REDIRECT_URI);
+    console.error('Client ID:', HUBSPOT_CLIENT_ID);
+    res.redirect(`${FRONTEND_URL}?audit_error=${encodeURIComponent(JSON.stringify(errDetail))}`);
   }
 });
 
