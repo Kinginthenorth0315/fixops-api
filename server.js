@@ -38,10 +38,10 @@ app.use((req, res, next) => {
 const {
   HUBSPOT_CLIENT_ID,     // de951915-c8dc-404b-b5e1-585346509264
   HUBSPOT_CLIENT_SECRET, // your secret - set in Railway only
-  HUBSPOT_REDIRECT_URI,  // https://fixops-api.up.railway.app/auth/callback
+  HUBSPOT_REDIRECT_URI,  // https://fixops-api-production.up.railway.app/auth/callback
   RESEND_API_KEY,        // from resend.com
   FIXOPS_NOTIFY_EMAIL,   // matthew@fixops.io
-  BASE_URL,              // https://fixops-api.up.railway.app
+  BASE_URL,              // https://fixops-api-production.up.railway.app
   FRONTEND_URL,          // https://fixops.io
   PORT
 } = process.env;
