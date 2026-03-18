@@ -81,26 +81,10 @@ app.get('/auth/url', (req, res) => {
     });
 
     // Build HubSpot OAuth 2.1 URL
-    const scopes = [
-      'crm.objects.contacts.read',
-      'crm.objects.companies.read',
-      'crm.objects.deals.read',
-      'crm.objects.owners.read',
-      'crm.schemas.contacts.read',
-      'crm.schemas.companies.read',
-      'crm.schemas.deals.read',
-      'automation',
-      'forms',
-      'oauth',
-      'sales-email-read',
-      'timeline',
-      'integration-sync'
-    ].join(' ');
-
-    const authUrl = new URL('https://app.hubspot.com/oauth/authorize');
+    // MCP Auth App OAuth 2.1 - no scope parameter needed, HubSpot manages scopes
+    const authUrl = new URL('https://mcp-na2.hubspot.com/oauth/authorize/user');
     authUrl.searchParams.set('client_id',             HUBSPOT_CLIENT_ID);
     authUrl.searchParams.set('redirect_uri',          HUBSPOT_REDIRECT_URI);
-    authUrl.searchParams.set('scope',                 scopes);
     authUrl.searchParams.set('state',                 state);
     authUrl.searchParams.set('code_challenge',        codeChallenge);
     authUrl.searchParams.set('code_challenge_method', 'S256');
@@ -130,9 +114,9 @@ app.get('/auth/callback', async (req, res) => {
   }
 
   try {
-    // Exchange code for access token
+    // Exchange code for access token (MCP Auth App OAuth 2.1)
     const tokenRes = await axios.post(
-      'https://api.hubapi.com/oauth/v1/token',
+      'https://mcp-na2.hubspot.com/oauth/token',
       new URLSearchParams({
         grant_type:    'authorization_code',
         client_id:     HUBSPOT_CLIENT_ID,
