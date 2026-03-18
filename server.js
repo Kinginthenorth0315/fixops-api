@@ -16,18 +16,9 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS - allow your website to call this API
+// CORS - open to all origins (tighten after launch)
 app.use((req, res, next) => {
-  const allowed = [
-    'https://fixops.io',
-    'https://www.fixops.io',
-    'http://localhost:3000',
-    'http://127.0.0.1:5500'
-  ];
-  const origin = req.headers.origin;
-  if (allowed.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -796,7 +787,19 @@ function getValue(settled, fallback) {
 
 // ── Health check ─────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'FixOps API', version: '1.0.0' });
+  res.json({ 
+    status: 'ok', 
+    service: 'FixOps API', 
+    version: '1.0.0',
+    storedAudits: auditResults.size,
+    pendingAudits: pendingAudits.size
+  });
+});
+
+// Debug endpoint - list all stored audit IDs
+app.get('/audit/list', (req, res) => {
+  const ids = [...auditResults.keys()];
+  res.json({ count: ids.length, ids });
 });
 
 // ── Start server ─────────────────────────────────────────────
