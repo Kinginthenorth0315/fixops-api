@@ -136,13 +136,16 @@ app.get('/audit/status/:id', async (req, res) => {
 async function runFullAudit(token, auditId, meta) {
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 25000 });
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
-  const up = async (pct, msg) => {
-    const curr = await getResult(auditId) || {};
-    await saveResult(auditId, { ...curr, status:'running', progress:pct, currentTask:msg });
+  // Track progress in memory, save to DB non-blocking
+  const progressData = { status:'running', progress:5, currentTask:'Starting...' };
+  const up = (pct, msg) => {
+    progressData.progress = pct;
+    progressData.currentTask = msg;
+    saveResult(auditId, { ...progressData }).catch(()=>{}); // non-blocking
     console.log(`[${auditId}] ${pct}% — ${msg}`);
   };
 
-  await up(10, 'Reading contacts and companies…');
+  up(10, 'Reading contacts and companies…');
 
   const [
     contactsR, companiesR, dealsR, workflowsR, formsR, ownersR,
@@ -151,14 +154,14 @@ async function runFullAudit(token, auditId, meta) {
     safe(()=>hs.get('/crm/v3/objects/contacts?limit=100&properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/companies?limit=100&properties=name,domain,industry,numberofemployees,hubspot_owner_id,createdate'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/deals?limit=100&properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate'), {data:{results:[]}}),
-    safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{}}),
-    safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:[]}),
+    safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
+    safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/tickets?limit=50&properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id'), {data:{results:[]}}),
     safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/pipelines/deals'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
+    safe(()=>hs.get('/crm/v3/properties/contacts?limit=200'), {data:{results:[]}}),
+    safe(()=>hs.get('/crm/v3/properties/deals?limit=200'), {data:{results:[]}}),
     safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
     safe(()=>hs.get('/crm/v3/objects/tasks?limit=100&properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/meetings?limit=50&properties=hs_meeting_title,hs_meeting_outcome'), {data:{results:[]}}),
@@ -169,7 +172,7 @@ async function runFullAudit(token, auditId, meta) {
   const companies = companiesR.data?.results||[];
   const deals     = dealsR.data?.results||[];
   const workflows = workflowsR.data?.workflows||workflowsR.data?.results||[];
-  const forms     = Array.isArray(formsR.data)?formsR.data:formsR.data?.results||[];
+  const forms     = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
   const owners    = ownersR.data?.results||[];
   const tickets   = ticketsR.data?.results||[];
   const users     = usersR.data?.results||[];
@@ -187,7 +190,7 @@ async function runFullAudit(token, auditId, meta) {
   let configScore=100, reportingScore=100, teamScore=100;
   const now = Date.now(), DAY = 86400000;
 
-  await up(28, `Analyzing ${contacts.length} contacts…`);
+  up(28, `Analyzing ${contacts.length} contacts…`);
 
   // ── DATA INTEGRITY ──────────────────────────────────────────
   const nameMap = {};
@@ -229,7 +232,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${neverContacted.length} contacts have never been contacted by anyone`,description:`These contacts entered your portal and have never received an email, call, or any engagement. They\'re aging in your database with zero pipeline value, and you\'re paying for them in your contact tier every month.`,detail:`Uncontacted contacts degrade your overall email deliverability by reducing your engagement rate. HubSpot\'s send reputation is calculated across your entire database — dead weight hurts active campaigns.`,impact:`${neverContacted.length} contacts generating billing cost with zero pipeline contribution`,dimension:'Data Integrity',autoFixable:false,guide:['Review the source of these contacts — old list imports, trade shows, or discontinued campaigns?','Run a one-time re-engagement campaign before writing them off completely','Contacts with no engagement after 6 months should be evaluated for archival to protect deliverability','Set a quarterly data hygiene calendar reminder to review cold contacts before they become a billing problem']});
   }
 
-  await up(45, `Checking ${workflows.length} workflows…`);
+  up(45, `Checking ${workflows.length} workflows…`);
 
   // ── AUTOMATION HEALTH ───────────────────────────────────────
   const activeWf = workflows.filter(w=>w.enabled||w.isEnabled);
@@ -250,7 +253,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'warning',title:`${contacts.length.toLocaleString()} contacts but only ${activeWf.length} active automations — severe manual work overload`,description:`You have a significant contact database but almost no automation working against it. Every follow-up, task creation, lifecycle update, and nurture sequence is being done manually by your team — work that should be running automatically while they sleep.`,detail:`Benchmark: healthy HubSpot portals have 1 active workflow per 150-200 contacts. At your ratio, your team is doing 10x more manual work than necessary.`,impact:`Hundreds of hours per year in manual rep work that should be automated`,dimension:'Automation Health',autoFixable:false,guide:['The 3 workflows every portal needs: new lead assignment, demo request follow-up, closed-lost re-engagement','Map your customer journey from first contact to closed won — every manual step is an automation waiting to be built','FixOps Workflow Repair builds your core automation stack with documentation and conflict checking']});
   }
 
-  await up(60, `Analyzing ${deals.length} deals in pipeline…`);
+  up(60, `Analyzing ${deals.length} deals in pipeline…`);
 
   // ── PIPELINE INTEGRITY ──────────────────────────────────────
   const openDeals = deals.filter(d=>!['closedwon','closedlost'].includes(d.properties?.dealstage));
@@ -282,7 +285,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact:`${overdueTasks.length} missed rep commitments · pipeline going cold without manager visibility`,dimension:'Pipeline Integrity',autoFixable:false,guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
   }
 
-  await up(73, 'Reviewing forms and marketing…');
+  up(73, 'Reviewing forms and marketing…');
 
   // ── MARKETING HEALTH ────────────────────────────────────────
   const deadForms = forms.filter(f=>(f.submissionCounts?.total||f.totalSubmissions||0)===0);
@@ -297,7 +300,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact:`${deadLists.length} empty lists adding portal complexity and suppression risk`,dimension:'Marketing Health',autoFixable:true,guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
   }
 
-  await up(83, 'Checking configuration and security…');
+  up(83, 'Checking configuration and security…');
 
   // ── CONFIGURATION ───────────────────────────────────────────
   const superAdmins = users.filter(u=>u.superAdmin);
@@ -322,7 +325,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration',autoFixable:false,guide:['Settings → Properties → filter Custom → add description to each: what does it track, where is it populated, who uses it?','Identify unused properties (0 records updated) and archive them','FixOps AutoDoc automatically documents every custom property and exports a full Property Bible PDF']});
   }
 
-  await up(90, 'Checking reporting quality…');
+  up(90, 'Checking reporting quality…');
 
   // ── REPORTING QUALITY ───────────────────────────────────────
   if(zeroDeal.length>openDeals.length*0.3&&openDeals.length>3){
@@ -335,7 +338,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`No support tickets in HubSpot — customer health is a blind spot`,description:`If your team handles support but tickets aren\'t in HubSpot, you can\'t see which customers have open issues, there\'s no link between support history and deal records, and churn prediction is impossible because you have no signal.`,impact:`Customer health invisible · churn signals absent · no support-to-revenue correlation`,dimension:'Reporting Quality',autoFixable:false,guide:['HubSpot has native integrations for Zendesk, Intercom, and Freshdesk to sync ticket data','Even a basic ticket pipeline (New → In Progress → Resolved) dramatically improves customer health visibility','Connect tickets to company records for full account health view — critical for renewal conversations']});
   }
 
-  await up(93, 'Checking team adoption…');
+  up(93, 'Checking team adoption…');
 
   // ── TEAM ADOPTION ───────────────────────────────────────────
   if(meetings.length===0&&calls.length===0&&tasks.length>0&&users.length>2){
@@ -510,9 +513,9 @@ async function runFullAudit(token, auditId, meta) {
     });
   }
 
-  await up(97, 'Calculating scores and generating your report…');
+  up(97, 'Calculating scores and generating your report…');
 
-    await up(97, 'Calculating scores and generating your report…');
+    up(97, 'Calculating scores and generating your report…');
 
   // ── SCORES ──────────────────────────────────────────────────
   const scores = {
@@ -532,6 +535,7 @@ async function runFullAudit(token, auditId, meta) {
   const infoCount     = issues.filter(i=>i.severity==='info').length;
   const monthlyWaste  = Math.round((dupes*0.38)+(stalled.length*18)+(deadWf.length*10)+(inactiveUsers.length*75)+(noEmail.length*0.5));
 
+  console.log(`✅ Audit complete: ${auditId} | Score: ${overallScore} | ${criticalCount} critical | ${issues.length} total issues`);
   return {
     status:'complete', auditId,
     portalInfo:{company:meta.company||'Your Portal',email:meta.email,plan:meta.plan,auditDate:new Date().toISOString(),
