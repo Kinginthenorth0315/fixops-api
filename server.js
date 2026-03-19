@@ -872,6 +872,71 @@ app.get('/auth/verify', async (req, res) => {
   }
 });
 
+
+// ── AI Report Builder proxy — browser can't call Anthropic directly (CORS) ───
+app.post('/ai/report', async (req, res) => {
+  try {
+    const { query, context } = req.body;
+    if (!query) return res.status(400).json({ error: 'query required' });
+    if (!context) return res.status(400).json({ error: 'context required' });
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: `You are a HubSpot revenue intelligence analyst. Analyze this HubSpot audit data and answer the user's question.
+
+AUDIT DATA:
+${context}
+
+USER QUESTION: ${query}
+
+Respond in this exact JSON format (no markdown, no backticks, no extra text):
+{
+  "title": "short report title under 8 words",
+  "summary": "2-3 sentence direct answer with specific numbers from the data",
+  "keyFindings": ["finding 1 with specific data point", "finding 2 with specific data point", "finding 3 with specific data point"],
+  "recommendation": "1-2 sentence actionable next step",
+  "chartData": {
+    "type": "bar or doughnut or none",
+    "labels": ["label1","label2","label3"],
+    "values": [10,20,30],
+    "colors": ["#3b82f6","#10b981","#f59e0b"]
+  },
+  "urgency": "critical or warning or info"
+}`
+      }]
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      }
+    });
+
+    const text = response.data.content?.map(b => b.text||'').join('') || '';
+    let parsed;
+    try {
+      parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+    } catch(e) {
+      parsed = {
+        title: query.substring(0,40),
+        summary: text.substring(0,400),
+        keyFindings: [],
+        recommendation: '',
+        urgency: 'info',
+        chartData: { type: 'none' }
+      };
+    }
+    res.json({ success: true, result: parsed });
+
+  } catch(e) {
+    console.error('AI report error:', e.response?.data || e.message);
+    res.status(500).json({ error: e.response?.data?.error?.message || e.message });
+  }
+});
+
 // ── Fix request email ─────────────────────────────────────────────────────────
 app.post('/fix-request', async (req, res) => {
   try {
