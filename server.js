@@ -579,6 +579,299 @@ app.get('/pulse/report', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+
+// ── On-demand refresh — customer triggers new audit from dashboard ────────────
+app.post('/auth/refresh', async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    // Verify magic link token
+    await db.query(`CREATE TABLE IF NOT EXISTS magic_links (id SERIAL PRIMARY KEY, email VARCHAR(255) NOT NULL, token VARCHAR(64) UNIQUE NOT NULL, expires_at TIMESTAMP NOT NULL, used_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())`).catch(()=>{});
+    const linkRes = await db.query('SELECT * FROM magic_links WHERE token = $1 AND expires_at > NOW()', [token]);
+    if (!linkRes.rows[0]) return res.status(401).json({ error: 'invalid_token' });
+
+    const email = linkRes.rows[0].email;
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    if (!custRes.rows[0]) return res.status(404).json({ error: 'customer not found' });
+
+    const cust = custRes.rows[0];
+
+    // Check if they have a stored portal token (MCP token — may be expired)
+    if (!cust.portal_token) {
+      return res.status(400).json({
+        error: 'no_token',
+        message: 'No HubSpot connection stored. Please reconnect your portal to refresh.',
+        requiresReconnect: true
+      });
+    }
+
+    // Check if already scanning (last audit started < 5 min ago)
+    const lastAudit = cust.last_audit_at ? new Date(cust.last_audit_at) : null;
+    if (lastAudit && (Date.now() - lastAudit.getTime()) < 5 * 60 * 1000) {
+      return res.status(429).json({
+        error: 'too_soon',
+        message: 'A scan was run less than 5 minutes ago. Please wait before refreshing.'
+      });
+    }
+
+    // Trigger a fresh audit using stored token
+    const auditId = crypto.randomBytes(12).toString('hex');
+    await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Starting refresh scan...' });
+
+    // Update customer record immediately so they know scan started
+    await db.query(
+      'UPDATE customers SET last_audit_id = $1, last_audit_at = NOW(), updated_at = NOW() WHERE id = $2',
+      [auditId, cust.id]
+    );
+
+    // Return immediately — scan runs in background
+    res.json({
+      success: true,
+      auditId,
+      message: 'Refresh started — results will be ready in 5–15 minutes',
+      confirmUrl: `${FRONTEND_URL}/confirm.html?id=${auditId}&email=${encodeURIComponent(email)}&plan=${cust.plan}&paid=0`
+    });
+
+    // Run audit in background
+    setImmediate(async () => {
+      console.log(`[${auditId}] Dashboard refresh for ${email}`);
+      try {
+        const meta = { email: cust.email, company: cust.company, plan: cust.plan };
+        const result = await runFullAudit(cust.portal_token, auditId, meta);
+
+        // Save to history
+        const prevHist = await db.query(
+          'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 5',
+          [cust.id]
+        ).catch(()=>({rows:[]}));
+
+        await db.query(
+          `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          [cust.id, auditId, cust.plan,
+           result.summary?.overallScore||0, result.summary?.criticalCount||0,
+           result.summary?.warningCount||0, result.summary?.infoCount||0,
+           result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
+           JSON.stringify(result.scores||{}),
+           JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
+           JSON.stringify(result.portalInfo?.portalStats||{})]
+        ).catch(e => console.error('History insert:', e.message));
+
+        // Send email for monthly plans
+        if (['pulse','pro','command'].includes(cust.plan)) {
+          await sendPulseEmail(cust.email, result, auditId, prevHist.rows, cust);
+        } else {
+          await sendClientEmail(cust.email, result, auditId);
+        }
+
+        await saveResult(auditId, { ...result, status: 'complete', plan: cust.plan });
+        console.log(`[${auditId}] ✅ Dashboard refresh complete for ${email}`);
+      } catch(e) {
+        console.error(`[${auditId}] Refresh error:`, e.message);
+
+        // Token likely expired
+        if (e.message?.includes('401') || e.response?.status === 401) {
+          await db.query('UPDATE customers SET portal_token = NULL WHERE id = $1', [cust.id]).catch(()=>{});
+          await saveResult(auditId, {
+            status: 'error',
+            message: 'HubSpot connection expired. Please reconnect from your dashboard.',
+            requiresReconnect: true
+          }).catch(()=>{});
+        } else {
+          await saveResult(auditId, { status: 'error', message: 'Refresh failed. Matthew has been notified.' }).catch(()=>{});
+        }
+      }
+    });
+
+  } catch(e) {
+    console.error('Refresh error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Magic Link Access System ──────────────────────────────────────────────────
+// Customers enter their email → get a 30-day magic link → access their dashboard
+// No password needed. Works for Pulse/Pro/Command subscribers.
+
+// Add magic_links table on startup (add to initDb)
+// ALTER TABLE is safe to run multiple times
+
+// ── Request magic link ────────────────────────────────────────────────────────
+app.post('/auth/magic-link', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    // Check if customer exists and is on a paid plan
+    const custRes = await db.query(
+      'SELECT * FROM customers WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+
+    // Always respond success to prevent email enumeration
+    // But only send email if customer exists
+    if (custRes.rows[0]) {
+      const cust = custRes.rows[0];
+      const isPaidPlan = ['pulse','pro','command','deep','pro-audit'].includes(cust.plan);
+
+      // Generate a secure 30-day token
+      const token = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+      // Store token in DB
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS magic_links (
+          id         SERIAL PRIMARY KEY,
+          email      VARCHAR(255) NOT NULL,
+          token      VARCHAR(64) UNIQUE NOT NULL,
+          expires_at TIMESTAMP NOT NULL,
+          used_at    TIMESTAMP,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `).catch(()=>{});
+
+      await db.query(
+        'INSERT INTO magic_links (email, token, expires_at) VALUES ($1, $2, $3)',
+        [email.toLowerCase().trim(), token, expires]
+      );
+
+      const dashUrl = `${FRONTEND_URL}/dashboard.html?token=${token}`;
+      const reportUrl = `${FRONTEND_URL}/reporting.html?token=${token}`;
+
+      // Send magic link email
+      await resend.emails.send({
+        from: 'FixOps <reports@fixops.io>',
+        to: email,
+        subject: `Your FixOps dashboard link — ${cust.company || 'Your Portal'}`,
+        html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
+<div style="max-width:520px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+  <div style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
+    <div style="font-size:20px;font-weight:800;color:#fff;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
+  </div>
+  <div style="padding:32px;">
+    <div style="font-size:22px;font-weight:800;color:#111;margin-bottom:10px;">Here's your dashboard link</div>
+    <p style="font-size:14px;color:#555;line-height:1.7;margin-bottom:24px;">
+      Click below to access your FixOps Intelligence Dashboard for <strong>${cust.company || 'your portal'}</strong>.
+      This link is valid for 30 days.
+    </p>
+    <div style="text-align:center;margin-bottom:24px;">
+      <a href="${dashUrl}" style="display:inline-block;padding:14px 32px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">
+        Open My Dashboard →
+      </a>
+    </div>
+    <div style="background:#f9f9f9;border-radius:8px;padding:14px 16px;font-size:12px;color:#888;line-height:1.6;">
+      <strong style="color:#555;">Your dashboard includes:</strong><br>
+      Pipeline health · Deal velocity · Lifecycle funnel · Contact intelligence ·
+      Product revenue · Service health · AI report builder
+    </div>
+    ${isPaidPlan ? `
+    <div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px 16px;font-size:12px;color:#6d28d9;">
+      <strong>Pulse active</strong> — Your portal is scanned every Monday at 9am ET.
+      Your next report arrives automatically.
+    </div>` : ''}
+  </div>
+  <div style="background:#f9f9f9;border-top:1px solid #eee;padding:16px 32px;text-align:center;font-size:11px;color:#aaa;">
+    This link was requested for ${email}. If you didn't request this, ignore it.
+    <br><a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;">fixops.io</a>
+  </div>
+</div></body></html>`
+      });
+
+      console.log(`Magic link sent to ${email} (${cust.plan})`);
+    }
+
+    // Always return success
+    res.json({ success: true, message: 'If that email is in our system, a link is on its way.' });
+
+  } catch(e) {
+    console.error('Magic link error:', e.message);
+    res.status(500).json({ error: 'Failed to send link' });
+  }
+});
+
+// ── Verify magic link token ───────────────────────────────────────────────────
+app.get('/auth/verify', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    // Ensure table exists
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS magic_links (
+        id         SERIAL PRIMARY KEY,
+        email      VARCHAR(255) NOT NULL,
+        token      VARCHAR(64) UNIQUE NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        used_at    TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `).catch(()=>{});
+
+    // Look up token
+    const linkRes = await db.query(
+      'SELECT * FROM magic_links WHERE token = $1 AND expires_at > NOW()',
+      [token]
+    );
+
+    if (!linkRes.rows[0]) {
+      return res.status(401).json({ error: 'invalid_or_expired', message: 'This link has expired. Request a new one.' });
+    }
+
+    const link = linkRes.rows[0];
+
+    // Get customer data
+    const custRes = await db.query(
+      'SELECT * FROM customers WHERE email = $1',
+      [link.email]
+    );
+
+    if (!custRes.rows[0]) {
+      return res.status(404).json({ error: 'not_found', message: 'Account not found.' });
+    }
+
+    const cust = custRes.rows[0];
+
+    // Get audit history
+    const histRes = await db.query(
+      'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 12',
+      [cust.id]
+    );
+
+    // Get latest audit result
+    const latestResult = cust.last_audit_id ? await getResult(cust.last_audit_id) : null;
+
+    // Update last used
+    await db.query(
+      'UPDATE magic_links SET used_at = NOW() WHERE id = $1',
+      [link.id]
+    ).catch(()=>{});
+
+    res.json({
+      valid: true,
+      customer: {
+        email: cust.email,
+        company: cust.company,
+        plan: cust.plan,
+        plan_status: cust.plan_status,
+        last_audit_at: cust.last_audit_at,
+        last_audit_id: cust.last_audit_id,
+        has_portal_token: !!cust.portal_token, // tells dashboard if refresh is available
+      },
+      history: histRes.rows,
+      latestAuditId: cust.last_audit_id,
+      latestResult,
+      // Pass token back so frontend can use it for subsequent API calls
+      token,
+    });
+
+  } catch(e) {
+    console.error('Verify error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Fix request email ─────────────────────────────────────────────────────────
 app.post('/fix-request', async (req, res) => {
   try {
