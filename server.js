@@ -560,6 +560,8 @@ async function runFullAudit(token, auditId, meta) {
   // Paginated fetch — reads up to 10,000 records per object
   // 10,000 is comprehensive for any statistical audit check
   // Beyond this, diminishing returns — 100 duplicates from 10k is same signal as from 100k
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
   const paginate = async (url, maxRecords) => {
     const results = [];
     let after = null;
@@ -579,7 +581,14 @@ async function runFullAudit(token, auditId, meta) {
         const nextAfter = res.data?.paging?.next?.after;
         if (!nextAfter || data.length < limit) break;
         after = nextAfter;
+        await sleep(200); // avoid 429s on large portals
       } catch(e) {
+        if (e.response?.status === 429) {
+          const wait = parseInt(e.response.headers?.['retry-after'] || '10') * 1000;
+          console.log(`  Rate limited on ${url}, retrying after ${wait}ms...`);
+          await sleep(wait);
+          continue; // retry same page
+        }
         console.log('Paginate skip:', e.message?.substring(0,50));
         break;
       }
@@ -611,21 +620,19 @@ async function runFullAudit(token, auditId, meta) {
   const plan = cfg.plan;
   console.log(`[${auditId}] Plan: ${plan} | contacts=${contactLimit} | storage=${storageDays}d | extended=${runExtended}`);
 
-  const [contactsR, dealsR, ticketsR] = await Promise.all([
-    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason', contactLimit),
-    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability', dealLimit),
-    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority', ticketLimit),
-  ]);
+  const [contactsR, dealsR, ticketsR] = [
+    await paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason', contactLimit),
+    await paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability', dealLimit),
+    await paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority', ticketLimit),
+  ];
 
   await up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
 
-  // Fetch everything else in parallel — smaller objects, fast
+  // Fetch everything else — small objects in parallel, large ones sequential
   const [
-    companiesR, ownersR, workflowsR, formsR, usersR, pipelinesR,
-    cPropsR, dPropsR, listsR, tasksR, meetingsR, callsR,
-    lineItemsR, quotesR, productsR
+    ownersR, workflowsR, formsR, usersR, pipelinesR,
+    cPropsR, dPropsR, listsR, quotesR, productsR
   ] = await Promise.all([
-    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate', companyLimit),
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
     safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
@@ -634,13 +641,16 @@ async function runFullAudit(token, auditId, meta) {
     safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
-    paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit),
-    paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit),
-    paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit),
-    paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id', smallLimit),
     safe(()=>hs.get('/crm/v3/objects/quotes?limit=100&properties=hs_title,hs_status,hs_expiration_date'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/products?limit=100&properties=name,price,hs_product_type'), {data:{results:[]}}),
   ]);
+
+  // Fetch large activity objects sequentially to avoid 429s
+  const companiesR  = await paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate', companyLimit);
+  const tasksR      = await paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit);
+  const meetingsR   = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
+  const callsR      = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
+  const lineItemsR  = await paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id', smallLimit);
 
   const contacts   = contactsR.data?.results||[];
   const companies  = companiesR.data?.results||[];
@@ -1159,4 +1169,8 @@ async function runFullAudit(token, auditId, meta) {
 // ── Emails ────────────────────────────────────────────────────
 
 // ── Start ────────────────────────────────────────────────────────────────────
-initDb().then(() => app.listen(PORT, () => console.log(`⚡ FixOps API v5 running on port ${PORT}`)));
+app.listen(PORT, () => console.log(`⚡ FixOps API v5 running on port ${PORT}`));
+
+initDb().catch((err) => {
+  console.error('❌ Database initialization failed:', err.message);
+});
