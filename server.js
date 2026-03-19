@@ -154,8 +154,12 @@ app.get('/auth/callback', async (req, res) => {
       console.log(`[${auditIdCopy}] Background audit starting (detached from HTTP request)...`);
       try {
         const result = await runFullAudit(accessToken, auditIdCopy, auditMeta);
-        await saveResult(auditIdCopy, result);
-        console.log(`[${auditIdCopy}] ✅ Saved to DB. Sending emails...`);
+        // Save running status while sending email
+        await db.query(
+          'INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
+          [auditIdCopy, JSON.stringify({ status: 'running', progress: 99, currentTask: 'Sending your report by email…' })]
+        ).catch(()=>{});
+
         if (auditMeta.email) {
           await sendClientEmail(auditMeta.email, result, auditIdCopy);
           console.log(`[${auditIdCopy}] ✅ Client email sent to ${auditMeta.email}`);
@@ -164,6 +168,10 @@ app.get('/auth/callback', async (req, res) => {
           await notifyMatthew(result, auditIdCopy);
           console.log(`[${auditIdCopy}] ✅ Matthew notified`);
         }
+
+        // NOW save complete status after emails sent
+        await saveResult(auditIdCopy, { ...result, status: 'complete' });
+        console.log(`[${auditIdCopy}] ✅ Fully complete — saved to DB`);
       } catch(e) {
         console.error(`[${auditIdCopy}] Audit error:`, e.message);
         await saveResult(auditIdCopy, { status: 'error', message: 'Audit encountered an error. Matthew has been notified and will follow up.' }).catch(()=>{});
@@ -228,22 +236,35 @@ app.post('/audit/private', async (req, res) => {
   }
 });
 
+// Clean issue text — remove backticks and chars that break JS template literals
+function cleanText(obj) {
+  if(typeof obj === 'string') return obj.replace(/`/g,"'").replace(/\\/g,'');
+  if(Array.isArray(obj)) return obj.map(cleanText);
+  if(obj && typeof obj === 'object') {
+    const out = {};
+    for(const k of Object.keys(obj)) out[k] = cleanText(obj[k]);
+    return out;
+  }
+  return obj;
+}
+
 async function runFullAudit(token, auditId, meta) {
   // Works with both MCP OAuth tokens AND HubSpot Private App tokens
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 30000 }); // 30s per request
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
 
   // Smart sampling fetch — scales to any portal size
-  // Full paginated fetch — reads ALL records with no limit
-  // Audit runs detached from HTTP request via setImmediate so no timeout pressure
-  const paginate = async (url) => {
+  // Paginated fetch — reads up to 10,000 records per object
+  // 10,000 is comprehensive for any statistical audit check
+  // Beyond this, diminishing returns — 100 duplicates from 10k is same signal as from 100k
+  const paginate = async (url, maxRecords = 10000) => {
     const results = [];
     let after = null;
     const limit = 100;
     let pages = 0;
-    const maxPages = 500; // 500 x 100 = 50,000 max per object absolute safety
+    const maxPages = Math.ceil(maxRecords / limit); // e.g. 100 pages for 10,000 records
 
-    while (pages < maxPages) {
+    while (pages < maxPages && results.length < maxRecords) {
       try {
         const sep = url.includes('?') ? '&' : '?';
         const params = after ? `${url}${sep}limit=${limit}&after=${after}` : `${url}${sep}limit=${limit}`;
@@ -265,13 +286,18 @@ async function runFullAudit(token, auditId, meta) {
     return { data: { results } };
   };
 
-  // Track progress in memory only - no DB writes during audit
-  // Final result is saved once at the end with a blocking await
-  const up = (pct, msg) => {
+  // Save real progress to DB so confirm page shows actual status
+  const up = async (pct, msg) => {
     console.log(`[${auditId}] ${pct}% — ${msg}`);
+    try {
+      await db.query(
+        'INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
+        [auditId, JSON.stringify({ status: 'running', progress: pct, currentTask: msg })]
+      );
+    } catch(e) { /* non-blocking — don't fail audit if progress save fails */ }
   };
 
-  up(10, 'Reading contacts and companies…');
+  await up(10, 'Reading contacts and companies…');
 
   console.log(`[${auditId}] Starting full portal data fetch...`);
 
@@ -283,7 +309,7 @@ async function runFullAudit(token, auditId, meta) {
     paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority'),
   ]);
 
-  up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
+  await up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
 
   // Fetch everything else in parallel — smaller objects, fast
   const [
@@ -376,7 +402,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${neverContacted.length} contacts have never been contacted by anyone`,description:`These contacts entered your portal and have never received an email, call, or any engagement. They\'re aging in your database with zero pipeline value, and you\'re paying for them in your contact tier every month.`,detail:`Uncontacted contacts degrade your overall email deliverability by reducing your engagement rate. HubSpot\'s send reputation is calculated across your entire database — dead weight hurts active campaigns.`,impact:`${neverContacted.length} contacts generating billing cost with zero pipeline contribution`,dimension:'Data Integrity',autoFixable:false,guide:['Review the source of these contacts — old list imports, trade shows, or discontinued campaigns?','Run a one-time re-engagement campaign before writing them off completely','Contacts with no engagement after 6 months should be evaluated for archival to protect deliverability','Set a quarterly data hygiene calendar reminder to review cold contacts before they become a billing problem']});
   }
 
-  up(45, `Checking ${workflows.length} workflows…`);
+  await up(45, `Checking ${workflows.length} workflows…`);
 
   // ── AUTOMATION HEALTH ───────────────────────────────────────
   const activeWf = workflows.filter(w=>w.enabled||w.isEnabled);
@@ -397,7 +423,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'warning',title:`${contacts.length.toLocaleString()} contacts but only ${activeWf.length} active automations — severe manual work overload`,description:`You have a significant contact database but almost no automation working against it. Every follow-up, task creation, lifecycle update, and nurture sequence is being done manually by your team — work that should be running automatically while they sleep.`,detail:`Benchmark: healthy HubSpot portals have 1 active workflow per 150-200 contacts. At your ratio, your team is doing 10x more manual work than necessary.`,impact:`Hundreds of hours per year in manual rep work that should be automated`,dimension:'Automation Health',autoFixable:false,guide:['The 3 workflows every portal needs: new lead assignment, demo request follow-up, closed-lost re-engagement','Map your customer journey from first contact to closed won — every manual step is an automation waiting to be built','FixOps Workflow Repair builds your core automation stack with documentation and conflict checking']});
   }
 
-  up(60, `Analyzing ${deals.length} deals in pipeline…`);
+  await up(60, `Analyzing ${deals.length} deals in pipeline…`);
 
   // ── PIPELINE INTEGRITY ──────────────────────────────────────
   const openDeals = deals.filter(d=>!['closedwon','closedlost'].includes(d.properties?.dealstage));
@@ -429,7 +455,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact:`${overdueTasks.length} missed rep commitments · pipeline going cold without manager visibility`,dimension:'Pipeline Integrity',autoFixable:false,guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
   }
 
-  up(73, 'Reviewing forms and marketing…');
+  await up(73, 'Reviewing forms and marketing…');
 
   // ── MARKETING HEALTH ────────────────────────────────────────
   const deadForms = forms.filter(f=>(f.submissionCounts?.total||f.totalSubmissions||0)===0);
@@ -444,7 +470,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact:`${deadLists.length} empty lists adding portal complexity and suppression risk`,dimension:'Marketing Health',autoFixable:true,guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
   }
 
-  up(83, 'Checking configuration and security…');
+  await up(83, 'Checking configuration and security…');
 
   // ── CONFIGURATION ───────────────────────────────────────────
   const superAdmins = users.filter(u=>u.superAdmin);
@@ -469,7 +495,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration',autoFixable:false,guide:['Settings → Properties → filter Custom → add description to each: what does it track, where is it populated, who uses it?','Identify unused properties (0 records updated) and archive them','FixOps AutoDoc automatically documents every custom property and exports a full Property Bible PDF']});
   }
 
-  up(90, 'Checking reporting quality…');
+  await up(90, 'Checking reporting quality…');
 
   // ── REPORTING QUALITY ───────────────────────────────────────
   if(zeroDeal.length>openDeals.length*0.3&&openDeals.length>3){
@@ -482,7 +508,7 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`No support tickets in HubSpot — customer health is a blind spot`,description:`If your team handles support but tickets aren\'t in HubSpot, you can\'t see which customers have open issues, there\'s no link between support history and deal records, and churn prediction is impossible because you have no signal.`,impact:`Customer health invisible · churn signals absent · no support-to-revenue correlation`,dimension:'Reporting Quality',autoFixable:false,guide:['HubSpot has native integrations for Zendesk, Intercom, and Freshdesk to sync ticket data','Even a basic ticket pipeline (New → In Progress → Resolved) dramatically improves customer health visibility','Connect tickets to company records for full account health view — critical for renewal conversations']});
   }
 
-  up(93, 'Checking team adoption…');
+  await up(93, 'Checking team adoption…');
 
   // ── TEAM ADOPTION ───────────────────────────────────────────
   if(meetings.length===0&&calls.length===0&&tasks.length>0&&users.length>2){
@@ -814,9 +840,10 @@ async function runFullAudit(token, auditId, meta) {
 
   // Wait 2 seconds for any pending async progress saves to finish, then save final result
   await new Promise(r => setTimeout(r, 2000));
-  await saveResult(auditId, finalResult);
+  const cleanResult = cleanText(finalResult);
+  await saveResult(auditId, cleanResult);
   console.log(`✅ Audit saved: ${auditId} | Score: ${overallScore} | ${criticalCount} critical | ${issues.length} total issues`);
-  return finalResult;
+  return cleanResult;
 }
 
 // ── Emails ────────────────────────────────────────────────────
