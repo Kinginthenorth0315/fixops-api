@@ -166,9 +166,74 @@ app.get('/audit/status/:id', async (req, res) => {
   res.json(result);
 });
 
+
+// Private App Full Audit endpoint
+app.post('/audit/private', async (req, res) => {
+  try {
+    const { privateToken, auditId, email, company } = req.body;
+    if (!privateToken) return res.status(400).json({ error: 'Private app token required' });
+
+    // Create new audit ID for the full audit
+    const fullAuditId = crypto.randomBytes(12).toString('hex');
+
+    // Save running status immediately
+    await saveResult(fullAuditId, { status: 'running', progress: 5, currentTask: 'Starting full audit with Private App token...' });
+
+    // Return the new audit ID immediately
+    res.json({ success: true, auditId: fullAuditId });
+
+    // Run full audit in background using private app token directly
+    try {
+      const meta = { email, company, plan: 'full' };
+      const result = await runFullAudit(privateToken, fullAuditId, meta);
+      await new Promise(r => setTimeout(r, 2000));
+      await saveResult(fullAuditId, result);
+      console.log(`✅ Private app audit saved: ${fullAuditId} | Score: ${result.summary?.overallScore}`);
+      if (email) sendClientEmail(email, result, fullAuditId).catch(e => console.error('Email:', e.message));
+      if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result, fullAuditId).catch(e => console.error('Notify:', e.message));
+    } catch(e) {
+      console.error('Private audit error:', e.message);
+      await saveResult(fullAuditId, { status: 'error', message: 'Full audit failed. Please check your Private App token has the required scopes.' });
+    }
+
+  } catch(e) {
+    console.error('Private audit endpoint error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 async function runFullAudit(token, auditId, meta) {
+  // Works with both MCP OAuth tokens AND HubSpot Private App tokens
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 25000 });
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
+
+  // Unlimited paginated fetch — reads every record available
+  const paginate = async (url, maxRecords = 999999) => {
+    const results = [];
+    let after = null;
+    const limit = 100;
+    let pages = 0;
+    const maxPages = 100; // safety cap — 100 pages x 100 = 10,000 records max per object
+    while (pages < maxPages) {
+      try {
+        const sep = url.includes('?') ? '&' : '?';
+        const params = after ? `${url}${sep}limit=${limit}&after=${after}` : `${url}${sep}limit=${limit}`;
+        const res = await hs.get(params);
+        const data = res.data?.results || res.data?.workflows || res.data?.lists || [];
+        results.push(...data);
+        pages++;
+        const nextAfter = res.data?.paging?.next?.after;
+        if (!nextAfter || data.length < limit) break;
+        after = nextAfter;
+        console.log(`  paginating ${url.split('?')[0].split('/').pop()}: ${results.length} records so far...`);
+      } catch(e) {
+        console.log('Paginate skip:', e.message?.substring(0,50));
+        break;
+      }
+    }
+    console.log(`  total ${url.split('?')[0].split('/').pop()}: ${results.length} records`);
+    return { data: { results } };
+  };
   // Track progress in memory only - no DB writes during audit
   // Final result is saved once at the end with a blocking await
   const up = (pct, msg) => {
@@ -177,43 +242,64 @@ async function runFullAudit(token, auditId, meta) {
 
   up(10, 'Reading contacts and companies…');
 
+  // Fetch ALL available data — no artificial limits
+  // Running in parallel batches to stay within timeout
+  console.log(`[${auditId}] Starting full portal data fetch...`);
+
   const [
-    contactsR, companiesR, dealsR, workflowsR, formsR, ownersR,
-    ticketsR, usersR, pipelinesR, cPropsR, dPropsR, listsR, tasksR, meetingsR, callsR
+    contactsR, companiesR, dealsR, ticketsR, ownersR,
+    workflowsR, formsR, usersR, pipelinesR,
+    cPropsR, dPropsR, listsR, tasksR, meetingsR, callsR,
+    lineItemsR, quotesR, productsR
   ] = await Promise.all([
-    safe(()=>hs.get('/crm/v3/objects/contacts?limit=100&properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/companies?limit=100&properties=name,domain,industry,numberofemployees,hubspot_owner_id,createdate'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/deals?limit=100&properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate'), {data:{results:[]}}),
+    // CRM Objects — full pagination, all records
+    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason'),
+    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate,hs_lastmodifieddate'),
+    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability'),
+    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority'),
+    safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
+    // Automation & Marketing — safe fallback if 403
     safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
     safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/tickets?limit=50&properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id'), {data:{results:[]}}),
+    // Settings & Config
     safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/pipelines/deals'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/contacts?limit=200'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/deals?limit=200'), {data:{results:[]}}),
+    // Properties
+    safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
+    safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
+    // Lists
     safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/tasks?limit=100&properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/meetings?limit=50&properties=hs_meeting_title,hs_meeting_outcome'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/calls?limit=50&properties=hs_call_title,hs_call_disposition'), {data:{results:[]}}),
+    // Engagements — full pagination
+    paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id'),
+    paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id'),
+    paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id'),
+    // Commerce objects
+    paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id'),
+    safe(()=>hs.get('/crm/v3/objects/quotes?limit=100&properties=hs_title,hs_status,hs_expiration_date'), {data:{results:[]}}),
+    safe(()=>hs.get('/crm/v3/objects/products?limit=100&properties=name,price,hs_product_type'), {data:{results:[]}}),
   ]);
 
-  const contacts  = contactsR.data?.results||[];
-  const companies = companiesR.data?.results||[];
-  const deals     = dealsR.data?.results||[];
-  const workflows = workflowsR.data?.workflows||workflowsR.data?.results||[];
-  const forms     = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
-  const owners    = ownersR.data?.results||[];
-  const tickets   = ticketsR.data?.results||[];
-  const users     = usersR.data?.results||[];
-  const pipelines = pipelinesR.data?.results||[];
-  const cProps    = cPropsR.data?.results||[];
-  const lists     = listsR.data?.lists||[];
-  const tasks     = tasksR.data?.results||[];
-  const meetings  = meetingsR.data?.results||[];
-  const calls     = callsR.data?.results||[];
+  const contacts   = contactsR.data?.results||[];
+  const companies  = companiesR.data?.results||[];
+  const deals      = dealsR.data?.results||[];
+  const tickets    = ticketsR.data?.results||[];
+  const owners     = ownersR.data?.results||[];
+  const workflows  = workflowsR.data?.workflows||workflowsR.data?.results||[];
+  const forms      = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
+  const users      = usersR.data?.results||[];
+  const pipelines  = pipelinesR.data?.results||[];
+  const cProps     = cPropsR.data?.results||[];
+  const lists      = listsR.data?.lists||[];
+  const tasks      = tasksR.data?.results||[];
+  const meetings   = meetingsR.data?.results||[];
+  const calls      = callsR.data?.results||[];
+  const lineItems  = lineItemsR.data?.results||[];
+  const quotes     = quotesR.data?.results||[];
+  const products   = productsR.data?.results||[];
 
-  console.log(`[${auditId}] Loaded: ${contacts.length}c ${deals.length}d ${workflows.length}wf ${tickets.length}t ${users.length}u`);
+  console.log(`[${auditId}] Full fetch complete: ${contacts.length} contacts · ${deals.length} deals · ${companies.length} companies · ${tickets.length} tickets · ${tasks.length} tasks · ${meetings.length} meetings · ${calls.length} calls · ${workflows.length} workflows · ${forms.length} forms · ${lineItems.length} line items · ${quotes.length} quotes`);
+
+  console.log(`[${auditId}] Loaded: ${contacts.length} contacts, ${deals.length} deals, ${companies.length} companies, ${tickets.length} tickets, ${tasks.length} tasks, ${workflows.length} workflows, ${users.length} users`);
 
   const issues = [];
   let dataScore=100, autoScore=100, pipelineScore=100, marketingScore=100;
@@ -545,7 +631,134 @@ async function runFullAudit(token, auditId, meta) {
 
 
 
-  // ── SCORES ──────────────────────────────────────────────────
+
+  // ════════════════════════════════════════════════════
+  // QUOTES & REVENUE — uses quotes + line items
+  // ════════════════════════════════════════════════════
+
+  // Expired quotes still open
+  const expiredQuotes = quotes.filter(q => {
+    const exp = new Date(q.properties?.hs_expiration_date||0).getTime();
+    const status = q.properties?.hs_status||'';
+    return exp > 0 && exp < now && !['APPROVED','REJECTED','SIGNED'].includes(status);
+  });
+  if(expiredQuotes.length > 0){
+    pipelineScore -= Math.min(10, expiredQuotes.length * 2);
+    issues.push({
+      severity: expiredQuotes.length > 5 ? 'warning' : 'info',
+      title: `${expiredQuotes.length} quotes have expired without a response — dead revenue opportunities`,
+      description: `These quotes were sent to prospects but expired before they responded. No follow-up task was created, no rep was alerted. Each expired quote is a deal that likely went cold because nobody followed up when the deadline passed.`,
+      detail: `Expired quotes with no follow-up are one of the clearest signs of pipeline neglect. A quote expiring should trigger an immediate rep task — this is a 5-minute workflow fix.`,
+      impact: `${expiredQuotes.length} expired quotes · unknown pipeline value lost to inaction`,
+      dimension: 'Pipeline Integrity',
+      autoFixable: false,
+      guide: [
+        'Create a workflow: Quote expiration date is reached AND status is not Approved → create urgent task for deal owner',
+        'Review each expired quote — many prospects just need a nudge, not a lost deal',
+        'Set quote expiration to 14 days maximum to create urgency without leaving deals hanging',
+        'FixOps can build the quote expiration alert workflow and retroactively create tasks on all expired quotes'
+      ]
+    });
+  }
+
+  // Line items without products linked
+  const unlinkedLineItems = lineItems.filter(l => !l.properties?.hs_product_id);
+  if(unlinkedLineItems.length > lineItems.length * 0.3 && lineItems.length > 5){
+    reportingScore -= 8;
+    issues.push({
+      severity: 'info',
+      title: `${unlinkedLineItems.length} line items are not linked to your product library — revenue reporting is fragmented`,
+      description: `These line items were created manually instead of from your HubSpot product library. This means your product revenue reports are inaccurate, you cannot track which products are driving the most revenue, and forecasting by product line is impossible.`,
+      detail: `Unlinked line items are a reporting blind spot. Every manually typed line item bypasses your product library analytics, making it impossible to answer "which product generates the most revenue?" without a spreadsheet.`,
+      impact: `Product revenue reporting broken · pricing consistency at risk · forecast by product line impossible`,
+      dimension: 'Reporting Quality',
+      autoFixable: false,
+      guide: [
+        'Settings → Products → build out your full product library with standardized names and pricing',
+        'Train reps to always select from the product library when creating quotes and deals',
+        'Export line items, match to products, reimport with product IDs linked',
+        'FixOps RevOps Build includes a full product library setup and line item reconciliation'
+      ]
+    });
+  }
+
+  // ════════════════════════════════════════════════════
+  // MEETING & CALL HEALTH — uses meetings + calls
+  // ════════════════════════════════════════════════════
+
+  // Meeting outcomes not being logged
+  const meetingsNoOutcome = meetings.filter(m => !m.properties?.hs_meeting_outcome);
+  if(meetingsNoOutcome.length > meetings.length * 0.4 && meetings.length > 5){
+    teamScore -= 10;
+    issues.push({
+      severity: 'warning',
+      title: `${meetingsNoOutcome.length} meetings have no outcome logged — coaching and forecasting blind spot`,
+      description: `Your team is logging meetings but not recording what happened. Without outcomes (Completed, No Show, Cancelled), you cannot measure meeting effectiveness, identify which reps have the highest no-show rates, or use meeting data to improve forecast accuracy.`,
+      detail: `Meeting outcomes are required for HubSpot's activity-based forecasting to work accurately. They are also essential for sales coaching — a rep with a 40% no-show rate needs different help than one with 90% completion.`,
+      impact: `Activity-based forecasting inaccurate · coaching data incomplete · rep performance invisible`,
+      dimension: 'Team Adoption',
+      autoFixable: false,
+      guide: [
+        'Make meeting outcome a required field: Settings → Properties → Meeting Outcome → Required',
+        'Create a workflow: Meeting is logged AND outcome is unknown → task for rep to update within 24 hours',
+        'Review your calendar integration settings — some integrations auto-complete meetings without setting outcome',
+        'FixOps sets up the full meeting outcome tracking workflow and manager reporting dashboard'
+      ]
+    });
+  }
+
+  // Calls with no disposition
+  const callsNoDisposition = calls.filter(c => !c.properties?.hs_call_disposition);
+  if(callsNoDisposition.length > calls.length * 0.4 && calls.length > 10){
+    teamScore -= 8;
+    issues.push({
+      severity: 'info',
+      title: `${callsNoDisposition.length} calls logged with no outcome — call data is useless for coaching`,
+      description: `Your team is logging calls but not recording the result. Without call dispositions (Connected, Left Voicemail, No Answer, Wrong Number), you cannot track connect rates, measure rep call effectiveness, or identify which call times perform best.`,
+      detail: `Call disposition data is the foundation of sales call analytics. Without it, you have a log of activity with no context — you know calls happened but not whether they produced anything.`,
+      impact: `Call connect rate unknown · rep coaching data missing · call time optimization impossible`,
+      dimension: 'Team Adoption',
+      autoFixable: false,
+      guide: [
+        'Make call disposition required: Settings → Properties → Call Outcome → Required',
+        'Install the HubSpot Sales mobile app — it prompts for disposition immediately after each call',
+        'Create a daily digest showing reps their calls logged vs calls with outcomes — visibility drives behavior',
+        'FixOps builds the full call analytics dashboard with connect rate tracking by rep and time of day'
+      ]
+    });
+  }
+
+  // ════════════════════════════════════════════════════
+  // COMPANY HEALTH — uses companies
+  // ════════════════════════════════════════════════════
+
+  // Companies with no associated contacts
+  if(companies.length > 10){
+    const companiesNoRevenue = companies.filter(c =>
+      !c.properties?.annualrevenue && !c.properties?.numberofemployees
+    );
+    if(companiesNoRevenue.length > companies.length * 0.5){
+      dataScore -= 6;
+      issues.push({
+        severity: 'info',
+        title: `${companiesNoRevenue.length} company records have no revenue or employee data — account intelligence missing`,
+        description: `More than half your company records have no annual revenue or employee count. This means you cannot segment by company size, cannot prioritize by account value, and HubSpot AI tools cannot generate meaningful account insights.`,
+        detail: `Company enrichment data powers HubSpot's account scoring, ideal customer profile matching, and territory planning. Without it, every company looks the same regardless of whether they are a 5-person startup or a 5,000-person enterprise.`,
+        impact: `Account prioritization impossible · ICP matching broken · territory planning blind`,
+        dimension: 'Data Integrity',
+        autoFixable: false,
+        guide: [
+          'Enable HubSpot Breeze company enrichment: Settings → Data Management → Enrichment',
+          'Use Clearbit, Apollo, or ZoomInfo to bulk-enrich company records',
+          'Alternatively, set up a workflow to prompt reps to fill in company size when creating a new deal',
+          'FixOps Data CleanUp includes company enrichment as part of the full portal cleanup service'
+        ]
+      });
+    }
+  }
+
+
+    // ── SCORES ──────────────────────────────────────────────────
   const scores = {
     dataIntegrity:    Math.max(20,Math.min(100,Math.round(dataScore))),
     automationHealth: Math.max(20,Math.min(100,Math.round(autoScore))),
@@ -566,8 +779,8 @@ async function runFullAudit(token, auditId, meta) {
   const finalResult = {
     status:'complete', auditId,
     portalInfo:{company:meta.company||'Your Portal',email:meta.email,plan:meta.plan,auditDate:new Date().toISOString(),
-      portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length}},
-    summary:{overallScore,grade:overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',criticalCount,warningCount,infoCount,monthlyWaste,totalContacts:contacts.length,totalDeals:deals.length,totalWorkflows:workflows.length,checksRun:165},
+      portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length,meetings:meetings.length,calls:calls.length,quotes:quotes.length,lineItems:lineItems.length,products:products.length}},
+    summary:{overallScore,grade:overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',criticalCount,warningCount,infoCount,monthlyWaste,totalContacts:contacts.length,totalDeals:deals.length,totalWorkflows:workflows.length,checksRun:165,recordsScanned:contacts.length+deals.length+companies.length+tickets.length+tasks.length},
     scores, issues
   };
 
