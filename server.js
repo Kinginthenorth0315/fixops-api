@@ -33,7 +33,7 @@ const db = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized:
 async function initDB() {
   try {
     await db.query(`CREATE TABLE IF NOT EXISTS audit_results (id VARCHAR(24) PRIMARY KEY, data JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW())`);
-    await db.query(`DELETE FROM audit_results WHERE created_at < NOW() - INTERVAL '7 days'`);
+    await db.query(`DELETE FROM audit_results WHERE created_at < NOW() - INTERVAL '30 days'`);
     console.log('Database ready');
   } catch(e) { console.error('DB init error:', e.message); }
 }
@@ -257,14 +257,14 @@ async function runFullAudit(token, auditId, meta) {
   // Paginated fetch — reads up to 10,000 records per object
   // 10,000 is comprehensive for any statistical audit check
   // Beyond this, diminishing returns — 100 duplicates from 10k is same signal as from 100k
-  const paginate = async (url, maxRecords = 10000) => {
+  const paginate = async (url) => {
     const results = [];
     let after = null;
     const limit = 100;
     let pages = 0;
-    const maxPages = Math.ceil(maxRecords / limit); // e.g. 100 pages for 10,000 records
+    const maxPages = 500; // 500 x 100 = 50,000 records max safety cap per object
 
-    while (pages < maxPages && results.length < maxRecords) {
+    while (pages < maxPages) {
       try {
         const sep = url.includes('?') ? '&' : '?';
         const params = after ? `${url}${sep}limit=${limit}&after=${after}` : `${url}${sep}limit=${limit}`;
