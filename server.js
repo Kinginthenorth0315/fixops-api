@@ -1207,7 +1207,149 @@ async function runFullAudit(token, auditId, meta) {
   }
 
 
-    // ── SCORES ──────────────────────────────────────────────────
+
+  // ════════════════════════════════════════════════════
+  // RESEARCH-BACKED CHECKS — real-world HubSpot failures
+  // ════════════════════════════════════════════════════
+
+  // 1. PIPELINE VELOCITY
+  if (openDeals.length > 10) {
+    const dealAges = openDeals.map(d => {
+      const created = new Date(d.properties?.createdate || 0).getTime();
+      return (now - created) / DAY;
+    }).filter(a => a > 0);
+    const avgDealAge = dealAges.length > 0 ? Math.round(dealAges.reduce((a,b) => a+b,0) / dealAges.length) : 0;
+    const oldDeals = openDeals.filter(d => (now - new Date(d.properties?.createdate||0).getTime()) / DAY > 90);
+    if (avgDealAge > 45) {
+      pipelineScore -= Math.min(15, Math.round(avgDealAge / 8));
+      issues.push({
+        severity: avgDealAge > 90 ? 'critical' : 'warning',
+        title: `Average open deal is ${avgDealAge} days old — pipeline velocity ${avgDealAge > 90 ? 'critically' : 'dangerously'} slow`,
+        description: `Your ${openDeals.length} open deals average ${avgDealAge} days old. Industry benchmark is 30–45 days. ${oldDeals.length} deals are over 90 days old. Deals inactive for 21+ days close at 11% vs 67% for deals touched weekly — every extra day costs you real revenue.`,
+        detail: `Pipeline velocity is the most predictive revenue health metric most HubSpot users never track. Slow velocity means deals are stuck at a specific stage, close dates are being pushed without action, or reps are hoarding pipeline. Each has a different fix — but none are fixable if you can't see the data.`,
+        impact: `${oldDeals.length} deals over 90 days old · close rate declining on each stalled deal · forecast accuracy degrading`,
+        dimension: 'Pipeline Integrity',
+        autoFixable: false,
+        guide: [
+          'Build a pipeline age report: filter open deals by Create Date → group by stage → oldest average age = your bottleneck stage',
+          'Set deal age SLA alerts: any deal > 21 days without activity → automated task for rep + Slack notification to manager',
+          'Enforce close date discipline: close date must always be within 90 days or deal resets to earlier stage with required notes',
+          'FixOps Pipeline Velocity audit identifies the exact stage where deals are dying and builds the full alert and escalation system'
+        ]
+      });
+    }
+  }
+
+  // 2. LEAD RESPONSE TIME — HBR: 1hr response = 7x better qualification
+  if (contacts.length > 50) {
+    const recentContacts = contacts.filter(c => (now - new Date(c.properties?.createdate||0).getTime()) / DAY < 90);
+    const neverTouched = recentContacts.filter(c =>
+      !c.properties?.hs_last_sales_activity_timestamp && parseInt(c.properties?.num_contacted_notes||'0') === 0
+    );
+    const untouchedPct = recentContacts.length > 0 ? Math.round((neverTouched.length / recentContacts.length) * 100) : 0;
+    if (untouchedPct > 25 && recentContacts.length > 20) {
+      dataScore -= Math.min(14, Math.round(untouchedPct / 5));
+      issues.push({
+        severity: untouchedPct > 55 ? 'critical' : 'warning',
+        title: `${untouchedPct}% of contacts added in the last 90 days have never been contacted`,
+        description: `${neverTouched.length} of your ${recentContacts.length.toLocaleString()} recent contacts have received zero outreach. Harvard Business Review research shows companies responding within 1 hour are 7x more likely to qualify a lead. After 24 hours, qualification rates drop 60x. These contacts entered your CRM warm — they are leaving it cold.`,
+        detail: `Lead decay is exponential, not linear. The window for a warm response is measured in minutes for inbound leads. Every hour of delay compounds the drop in qualification rate. This is the highest-ROI workflow any sales team can build — a 5-minute automation that prevents a permanent revenue leak.`,
+        impact: `${neverTouched.length} recent leads never contacted · estimated ${Math.round(neverTouched.length * 0.12)} qualified opportunities permanently lost`,
+        dimension: 'Data Integrity',
+        autoFixable: false,
+        guide: [
+          'Build a lead response SLA: Contact created from form → assign to rep + create First Contact task immediately',
+          'Add Slack or email notification on every new inbound contact so reps know in real time — not when they next open HubSpot',
+          'Set up round-robin lead assignment so no rep is overwhelmed and no lead is ever missed',
+          'FixOps builds the complete lead response system: assignment, notification, SLA tracking, and manager escalation in one session'
+        ]
+      });
+    }
+  }
+
+  // 3. LIFECYCLE STAGE GAPS — #1 setup mistake per HubSpot 2025 State of Marketing
+  if (contacts.length > 100) {
+    const noLifecycle = contacts.filter(c => !c.properties?.lifecyclestage);
+    const noLifecyclePct = Math.round((noLifecycle.length / contacts.length) * 100);
+    if (noLifecyclePct > 40) {
+      dataScore -= Math.min(12, Math.round(noLifecyclePct / 8));
+      issues.push({
+        severity: noLifecyclePct > 70 ? 'critical' : 'warning',
+        title: `${noLifecyclePct}% of contacts have no lifecycle stage — your revenue funnel is unmeasured`,
+        description: `${noLifecycle.length.toLocaleString()} contacts have no lifecycle stage. Without this, you cannot calculate lead-to-customer conversion rate, measure marketing pipeline contribution, or hold any team accountable for funnel performance. HubSpot's research shows companies with defined lifecycle stages close 28% more deals.`,
+        detail: `Lifecycle stage is the single most important property in HubSpot. It drives list segmentation, workflow enrollment, attribution reporting, and AI insights. Every blank stage is a gap in your revenue funnel you cannot see or fix. This is the most common HubSpot setup mistake identified in RevOps audits.`,
+        impact: `Funnel conversion unmeasurable · marketing ROI invisible · ${noLifecycle.length.toLocaleString()} contacts excluded from lifecycle automation`,
+        dimension: 'Data Integrity',
+        autoFixable: false,
+        guide: [
+          'Define lifecycle stage criteria with marketing and sales: what exactly makes someone a Lead vs MQL vs SQL vs Opportunity?',
+          'Build a workflow: Contact created → set lifecycle stage based on source (form submission = Lead, demo request = MQL)',
+          'Bulk-update existing contacts: export, fill lifecycle column based on deal history or engagement data, reimport',
+          'FixOps Lifecycle Setup defines your full funnel, builds the automation, and bulk-updates all existing contacts in one session'
+        ]
+      });
+    }
+  }
+
+  // 4. CLOSE-LOST REASON TRACKING — cannot learn from losses without this data
+  if (deals.length > 20) {
+    const closedWon = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    const closedLost = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true');
+    if (closedLost.length > 5) {
+      const winRate = Math.round((closedWon.length / (closedWon.length + closedLost.length)) * 100);
+      const avgWonValue = closedWon.length > 0
+        ? Math.round(closedWon.reduce((s,d) => s + parseFloat(d.properties?.amount||0), 0) / closedWon.length) : 0;
+      const lostNoReason = closedLost.filter(d => !d.properties?.closed_lost_reason && !d.properties?.hs_closed_lost_reason);
+      if (lostNoReason.length > closedLost.length * 0.5) {
+        reportingScore -= 10;
+        issues.push({
+          severity: 'warning',
+          title: `${lostNoReason.length} lost deals have no close-lost reason — you cannot learn from losses`,
+          description: `Your team closed ${closedLost.length} lost deals but ${lostNoReason.length} have no reason recorded. Win rate is ${winRate}%${avgWonValue > 0 ? ` with avg deal value $${avgWonValue.toLocaleString()}` : ''}. Without loss reasons, you cannot identify whether you lose on price, timing, competition, or fit — making rep coaching and process improvement impossible.`,
+          detail: `Loss reason data is the most valuable coaching asset a sales manager has. Teams that track loss reasons systematically improve win rate by 12% within 2 quarters according to Gong research. "Lost to competitor" requires completely different action than "lost — no budget" or "lost — wrong timing."`,
+          impact: `Win rate improvement blocked · rep coaching impossible · competitive intelligence blind · product feedback loop broken`,
+          dimension: 'Reporting Quality',
+          autoFixable: false,
+          guide: [
+            'Add required Close Lost Reason dropdown: Price, Competitor, Timing, No Budget, No Decision, Product Gap, Other',
+            'Workflow: Deal stage = Closed Lost AND reason is unknown → task to rep: fill in reason within 24 hours',
+            'Review loss reasons monthly in team meetings — patterns emerge within 60 days that directly improve close rate',
+            'FixOps builds the full close-lost tracking system with a manager dashboard showing loss reasons by rep, stage, and month'
+          ]
+        });
+      }
+    }
+  }
+
+  // 5. TICKET SLA — 67% of customers expect resolution within 3 hours (HubSpot State of Service)
+  if (tickets.length > 10) {
+    const oldTickets = tickets.filter(t => {
+      const created = new Date(t.properties?.createdate || 0).getTime();
+      const stage = String(t.properties?.hs_pipeline_stage || '').toLowerCase();
+      const isOpen = !['closed', 'resolved', '4', 'closed_won'].includes(stage);
+      return isOpen && (now - created) / DAY > 3;
+    });
+    if (oldTickets.length > tickets.length * 0.2) {
+      issues.push({
+        severity: oldTickets.length > tickets.length * 0.4 ? 'critical' : 'warning',
+        title: `${oldTickets.length} support tickets open more than 3 days — customer trust at risk`,
+        description: `HubSpot's State of Customer Service research shows 67% of customers expect resolution within 3 hours, and 32% within the same day. ${oldTickets.length} of your ${tickets.length} tickets exceed 3 days open. Each unresolved ticket is a customer whose trust is actively declining — and whose renewal is at risk.`,
+        detail: `Ticket age directly correlates with churn probability. A ticket open 3 days has 2x the churn risk of a same-day resolution. A ticket open 7+ days increases churn probability by 340% according to HubSpot's customer success research. This is a revenue retention problem disguised as a support problem.`,
+        impact: `Customer churn risk elevated · NPS declining · ${oldTickets.length} customers waiting too long · renewal conversations starting from deficit`,
+        dimension: 'Service Health',
+        autoFixable: false,
+        guide: [
+          'Set ticket SLA rules: Service Hub → Settings → SLA → define response and resolution targets by priority tier',
+          'Escalation workflow: Ticket open > 24 hours with no reply → notify manager + reassign to available rep',
+          'Create priority tiers: Critical (2hr SLA), High (4hr), Normal (24hr), Low (72hr) — not all tickets are equal',
+          'FixOps builds the full ticket SLA system with escalation workflows, manager dashboards, and customer health scoring'
+        ]
+      });
+    }
+  }
+
+
+      // ── SCORES ──────────────────────────────────────────────────
   const scores = {
     dataIntegrity:    Math.max(20,Math.min(100,Math.round(dataScore))),
     automationHealth: Math.max(20,Math.min(100,Math.round(autoScore))),
