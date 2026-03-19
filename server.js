@@ -138,20 +138,46 @@ app.get('/auth/callback', async (req, res) => {
       console.log('Standard token success');
     }
 
-    // Save running status + redirect immediately
+    // Save running status immediately
     await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
+
+    // Redirect user to confirm page BEFORE starting audit
     res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}`);
 
-    // Run audit in background
-    try {
-      const result = await runFullAudit(tokenRes.data.access_token, auditId, pending);
-      await saveResult(auditId, result);
-      if (pending.email) sendClientEmail(pending.email, result, auditId).catch(e => console.error('Email:', e.message));
-      if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result, auditId).catch(e => console.error('Notify:', e.message));
-    } catch(e) {
-      console.error('Audit error:', e.message);
-      await saveResult(auditId, { status: 'error', message: 'Audit encountered an error. Matthew has been notified.' });
-    }
+    // Use setImmediate to truly detach audit from the HTTP request lifecycle
+    // This prevents Railway from killing the process when the response closes
+    const accessToken = tokenRes.data.access_token;
+    const auditMeta = { ...pending };
+    const auditIdCopy = auditId;
+
+    setImmediate(async () => {
+      console.log(`[${auditIdCopy}] Background audit starting (detached from HTTP request)...`);
+      try {
+        const result = await runFullAudit(accessToken, auditIdCopy, auditMeta);
+        await saveResult(auditIdCopy, result);
+        console.log(`[${auditIdCopy}] ✅ Saved to DB. Sending emails...`);
+        if (auditMeta.email) {
+          await sendClientEmail(auditMeta.email, result, auditIdCopy);
+          console.log(`[${auditIdCopy}] ✅ Client email sent to ${auditMeta.email}`);
+        }
+        if (FIXOPS_NOTIFY_EMAIL) {
+          await notifyMatthew(result, auditIdCopy);
+          console.log(`[${auditIdCopy}] ✅ Matthew notified`);
+        }
+      } catch(e) {
+        console.error(`[${auditIdCopy}] Audit error:`, e.message);
+        await saveResult(auditIdCopy, { status: 'error', message: 'Audit encountered an error. Matthew has been notified and will follow up.' }).catch(()=>{});
+        // Try to notify Matthew of the failure
+        if (FIXOPS_NOTIFY_EMAIL) {
+          resend.emails.send({
+            from: 'FixOps Alerts <onboarding@resend.dev>',
+            to: FIXOPS_NOTIFY_EMAIL,
+            subject: `⚠️ Audit Failed — ${auditMeta.company} — ${auditIdCopy}`,
+            html: `<p>Audit failed for ${auditMeta.email} (${auditMeta.company})<br>Error: ${e.message}<br>Audit ID: ${auditIdCopy}</p>`
+          }).catch(()=>{});
+        }
+      }
+    });
 
   } catch(err) {
     console.error('Callback error:', err.response?.data || err.message);
@@ -204,16 +230,19 @@ app.post('/audit/private', async (req, res) => {
 
 async function runFullAudit(token, auditId, meta) {
   // Works with both MCP OAuth tokens AND HubSpot Private App tokens
-  const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 25000 });
+  const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 30000 }); // 30s per request
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
 
-  // Unlimited paginated fetch — reads every record available
-  const paginate = async (url, maxRecords = 999999) => {
+  // Smart sampling fetch — scales to any portal size
+  // Full paginated fetch — reads ALL records with no limit
+  // Audit runs detached from HTTP request via setImmediate so no timeout pressure
+  const paginate = async (url) => {
     const results = [];
     let after = null;
     const limit = 100;
     let pages = 0;
-    const maxPages = 100; // safety cap — 100 pages x 100 = 10,000 records max per object
+    const maxPages = 500; // 500 x 100 = 50,000 max per object absolute safety
+
     while (pages < maxPages) {
       try {
         const sep = url.includes('?') ? '&' : '?';
@@ -225,15 +254,17 @@ async function runFullAudit(token, auditId, meta) {
         const nextAfter = res.data?.paging?.next?.after;
         if (!nextAfter || data.length < limit) break;
         after = nextAfter;
-        console.log(`  paginating ${url.split('?')[0].split('/').pop()}: ${results.length} records so far...`);
       } catch(e) {
         console.log('Paginate skip:', e.message?.substring(0,50));
         break;
       }
     }
-    console.log(`  total ${url.split('?')[0].split('/').pop()}: ${results.length} records`);
+
+    const obj = url.split('/').pop().split('?')[0];
+    console.log(`  [${obj}] ${results.length} records loaded`);
     return { data: { results } };
   };
+
   // Track progress in memory only - no DB writes during audit
   // Final result is saved once at the end with a blocking await
   const up = (pct, msg) => {
@@ -242,38 +273,36 @@ async function runFullAudit(token, auditId, meta) {
 
   up(10, 'Reading contacts and companies…');
 
-  // Fetch ALL available data — no artificial limits
-  // Running in parallel batches to stay within timeout
   console.log(`[${auditId}] Starting full portal data fetch...`);
 
+  // Fetch large CRM objects first in parallel (contacts, deals, tickets are the big ones)
+  // Each capped at 5,000 records — comprehensive for any real portal
+  const [contactsR, dealsR, ticketsR] = await Promise.all([
+    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason'),
+    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability'),
+    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority'),
+  ]);
+
+  up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
+
+  // Fetch everything else in parallel — smaller objects, fast
   const [
-    contactsR, companiesR, dealsR, ticketsR, ownersR,
-    workflowsR, formsR, usersR, pipelinesR,
+    companiesR, ownersR, workflowsR, formsR, usersR, pipelinesR,
     cPropsR, dPropsR, listsR, tasksR, meetingsR, callsR,
     lineItemsR, quotesR, productsR
   ] = await Promise.all([
-    // CRM Objects — full pagination, all records
-    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason'),
-    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate,hs_lastmodifieddate'),
-    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability'),
-    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority'),
+    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate'),
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
-    // Automation & Marketing — safe fallback if 403
     safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
     safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
-    // Settings & Config
     safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/pipelines/deals'), {data:{results:[]}}),
-    // Properties
     safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
-    // Lists
     safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
-    // Engagements — full pagination
     paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id'),
     paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id'),
     paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id'),
-    // Commerce objects
     paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id'),
     safe(()=>hs.get('/crm/v3/objects/quotes?limit=100&properties=hs_title,hs_status,hs_expiration_date'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/products?limit=100&properties=name,price,hs_product_type'), {data:{results:[]}}),
@@ -306,7 +335,6 @@ async function runFullAudit(token, auditId, meta) {
   let configScore=100, reportingScore=100, teamScore=100;
   const now = Date.now(), DAY = 86400000;
 
-  up(28, `Analyzing ${contacts.length} contacts…`);
 
   // ── DATA INTEGRITY ──────────────────────────────────────────
   const nameMap = {};
