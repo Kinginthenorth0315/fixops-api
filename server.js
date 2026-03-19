@@ -70,14 +70,27 @@ async function initDb() {
   `);
   await db.query(`
     CREATE TABLE IF NOT EXISTS audit_history (
-      id          SERIAL PRIMARY KEY,
-      customer_id INT REFERENCES customers(id),
-      audit_id    VARCHAR(24),
-      plan        VARCHAR(50),
-      score       INT,
-      created_at  TIMESTAMP DEFAULT NOW()
+      id              SERIAL PRIMARY KEY,
+      customer_id     INT REFERENCES customers(id),
+      audit_id        VARCHAR(24),
+      plan            VARCHAR(50),
+      score           INT,
+      critical_count  INT DEFAULT 0,
+      warning_count   INT DEFAULT 0,
+      info_count      INT DEFAULT 0,
+      monthly_waste   INT DEFAULT 0,
+      records_scanned INT DEFAULT 0,
+      scores          JSONB,
+      issue_titles    JSONB,
+      portal_stats    JSONB,
+      created_at      TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Migrate existing installs — add new columns if not present
+  const newCols = ['critical_count INT DEFAULT 0','warning_count INT DEFAULT 0','info_count INT DEFAULT 0','monthly_waste INT DEFAULT 0','records_scanned INT DEFAULT 0','scores JSONB','issue_titles JSONB','portal_stats JSONB'];
+  for (const col of newCols) {
+    await db.query(`ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS ${col}`).catch(()=>{});
+  }
   // Cleanup: free results after 7 days, paid after 365
   await db.query(`
     DELETE FROM audit_results
@@ -243,6 +256,328 @@ const notifyMatthew = async (result, auditId, plan) => {
     }).catch(e => console.error('Paid notify error:', e.message));
   }
 };
+
+
+// ── Pulse Weekly Email ────────────────────────────────────────────────────────
+const sendPulseEmail = async (email, result, auditId, history, customer) => {
+  const s = result.summary || {};
+  const scores = result.scores || {};
+  const issues = result.issues || [];
+  const pi = result.portalInfo || {};
+  const ps = pi.portalStats || {};
+  const plan = customer.plan || 'pulse';
+
+  // Previous audit for comparison
+  const prev = history && history.length > 1 ? history[1] : null;
+  const prevScore = prev ? prev.score : null;
+  const scoreDiff = prevScore !== null ? s.overallScore - prevScore : null;
+  const scoreArrow = scoreDiff === null ? '' : scoreDiff > 0 ? `↑${scoreDiff}` : scoreDiff < 0 ? `↓${Math.abs(scoreDiff)}` : '→ no change';
+  const scoreColor = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#f43f5e';
+  const trendColor = scoreDiff === null ? '#6b7280' : scoreDiff > 0 ? '#10b981' : scoreDiff < 0 ? '#f43f5e' : '#f59e0b';
+
+  // Compare issues with previous week
+  const prevIssues = prev && prev.issue_titles ? (typeof prev.issue_titles === 'string' ? JSON.parse(prev.issue_titles) : prev.issue_titles) : [];
+  const prevTitles = prevIssues.map(i => i.title);
+  const currTitles = issues.map(i => i.title);
+  const newIssues = issues.filter(i => !prevTitles.includes(i.title));
+  const resolvedIssues = prevIssues.filter(i => !currTitles.includes(i.title));
+  const persistentIssues = issues.filter(i => prevTitles.includes(i.title));
+
+  // Dimension scores
+  const dimNames = {
+    dataIntegrity:'Data Integrity', automationHealth:'Automation Health',
+    pipelineIntegrity:'Pipeline', marketingHealth:'Marketing Health',
+    configSecurity:'Configuration', reportingQuality:'Reporting Quality',
+    teamAdoption:'Team Adoption', serviceHealth:'Service Health'
+  };
+  const prevScores = prev && prev.scores ? (typeof prev.scores === 'string' ? JSON.parse(prev.scores) : prev.scores) : {};
+
+  // Build score history sparkline data (last 5 weeks)
+  const sparkHistory = history.slice(0,5).reverse().map(h => h.score);
+  const sparkMax = Math.max(...sparkHistory, 100);
+
+  // Critical issues for email
+  const criticals = issues.filter(i => i.severity === 'critical').slice(0,3);
+  const warnings = issues.filter(i => i.severity === 'warning').slice(0,3);
+
+  // Portal report URL (token-gated by email)
+  const reportToken = Buffer.from(JSON.stringify({email, auditId, ts: Date.now()})).toString('base64url');
+  const reportUrl = `${FRONTEND_URL}/pulse.html?token=${reportToken}&id=${auditId}`;
+  const resultsUrl = `${FRONTEND_URL}/results.html?id=${auditId}`;
+
+  // Week number
+  const weekNum = history.length;
+  const auditDate = new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FixOps Pulse Report</title>
+</head>
+<body style="margin:0;padding:0;background:#f0f0f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+
+<!-- Wrapper -->
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f0f5;padding:24px 0;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+
+  <!-- Header -->
+  <tr><td style="background:#08061a;border-radius:14px 14px 0 0;padding:28px 32px;border-bottom:1px solid rgba(124,58,237,.3);">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td>
+          <div style="font-size:20px;font-weight:800;color:#fff;letter-spacing:-0.5px;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
+          <div style="font-size:11px;color:rgba(255,255,255,.35);margin-top:3px;font-family:monospace;letter-spacing:1px;">WEEKLY PULSE REPORT</div>
+        </td>
+        <td align="right">
+          <div style="font-size:11px;color:rgba(255,255,255,.35);">${auditDate}</div>
+          <div style="font-size:11px;color:#7c3aed;margin-top:3px;font-family:monospace;">Week #${weekNum} · ${plan.toUpperCase()}</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- Score Hero -->
+  <tr><td style="background:linear-gradient(135deg,#0e0b28,#120f30);padding:32px;border-bottom:1px solid rgba(255,255,255,.06);">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td width="140" align="center" style="vertical-align:middle;">
+          <div style="width:110px;height:110px;border-radius:50%;background:${scoreColor}15;border:3px solid ${scoreColor};display:inline-flex;align-items:center;justify-content:center;text-align:center;margin:0 auto;">
+            <div>
+              <div style="font-size:42px;font-weight:900;color:${scoreColor};line-height:1;">${s.overallScore}</div>
+              <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px;">/100</div>
+            </div>
+          </div>
+          ${scoreDiff !== null ? `<div style="margin-top:10px;font-size:13px;font-weight:700;color:${trendColor};">${scoreArrow} vs last week</div>` : '<div style="margin-top:10px;font-size:11px;color:rgba(255,255,255,.3);">First scan</div>'}
+        </td>
+        <td style="padding-left:24px;vertical-align:middle;">
+          <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:6px;">${pi.company || 'Your Portal'}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,.5);margin-bottom:16px;">Portal Health — ${s.overallScore>=85?'Excellent':s.overallScore>=70?'Good':s.overallScore>=55?'Needs Attention':'Critical'}</div>
+          <!-- Stats row -->
+          <table cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-right:16px;">
+                <div style="font-size:20px;font-weight:800;color:#f43f5e;">${s.criticalCount||0}</div>
+                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Critical</div>
+              </td>
+              <td style="padding-right:16px;">
+                <div style="font-size:20px;font-weight:800;color:#f59e0b;">${s.warningCount||0}</div>
+                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Warnings</div>
+              </td>
+              <td style="padding-right:16px;">
+                <div style="font-size:20px;font-weight:800;color:#a78bfa;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
+                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Est. Waste/mo</div>
+              </td>
+              <td>
+                <div style="font-size:20px;font-weight:800;color:#10b981;">${Number(s.recordsScanned||0).toLocaleString()}</div>
+                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Scanned</div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- Week-over-week summary bar -->
+  ${prev ? `
+  <tr><td style="background:#0a0820;padding:16px 32px;border-bottom:1px solid rgba(255,255,255,.05);">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td width="33%" align="center">
+          <div style="font-size:18px;font-weight:800;color:${newIssues.length>0?'#f43f5e':'#10b981'};">${newIssues.length}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">New Issues</div>
+        </td>
+        <td width="33%" align="center" style="border-left:1px solid rgba(255,255,255,.06);border-right:1px solid rgba(255,255,255,.06);">
+          <div style="font-size:18px;font-weight:800;color:${resolvedIssues.length>0?'#10b981':'rgba(255,255,255,.3)'};">${resolvedIssues.length}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">Resolved</div>
+        </td>
+        <td width="33%" align="center">
+          <div style="font-size:18px;font-weight:800;color:rgba(255,255,255,.6);">${persistentIssues.length}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">Ongoing</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>` : ''}
+
+  <!-- New Issues This Week -->
+  ${newIssues.length > 0 ? `
+  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#f43f5e;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">🚨 New This Week — ${newIssues.length} New Issue${newIssues.length!==1?'s':''} Found</div>
+    ${newIssues.slice(0,5).map(i => `
+    <div style="display:flex;align-items:flex-start;padding:12px;background:${i.severity==='critical'?'#fff5f5':i.severity==='warning'?'#fffbeb':'#faf5ff'};border-radius:8px;margin-bottom:8px;border-left:3px solid ${i.severity==='critical'?'#f43f5e':i.severity==='warning'?'#f59e0b':'#a78bfa'};">
+      <div style="flex:1;">
+        <div style="font-size:13px;font-weight:700;color:#111;margin-bottom:3px;">${i.title||''}</div>
+        ${i.impact ? `<div style="font-size:11px;color:#f59e0b;font-family:monospace;">${i.impact}</div>` : ''}
+      </div>
+      <div style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;margin-left:10px;flex-shrink:0;background:${i.severity==='critical'?'#fee2e2':i.severity==='warning'?'#fef3c7':'#ede9fe'};color:${i.severity==='critical'?'#dc2626':i.severity==='warning'?'#d97706':'#7c3aed'};">${(i.severity||'').toUpperCase()}</div>
+    </div>`).join('')}
+  </td></tr>` : ''}
+
+  <!-- Resolved Issues -->
+  ${resolvedIssues.length > 0 ? `
+  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#10b981;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">✅ Resolved This Week — ${resolvedIssues.length} Issue${resolvedIssues.length!==1?'s':''} Fixed</div>
+    ${resolvedIssues.slice(0,3).map(i => `
+    <div style="display:flex;align-items:center;padding:10px 12px;background:#f0fdf4;border-radius:8px;margin-bottom:6px;border-left:3px solid #10b981;">
+      <div style="color:#10b981;font-size:14px;margin-right:10px;">✓</div>
+      <div style="font-size:13px;color:#166534;">${i.title||''}</div>
+    </div>`).join('')}
+  </td></tr>` : ''}
+
+  <!-- Current Critical Issues -->
+  ${criticals.length > 0 ? `
+  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">🔴 Critical Issues Requiring Attention</div>
+    ${criticals.map((i,idx) => `
+    <div style="padding:14px 16px;background:#fff5f5;border-radius:8px;margin-bottom:10px;border:1px solid #fecaca;">
+      <div style="font-size:13px;font-weight:700;color:#111;margin-bottom:5px;">${i.title||''}</div>
+      ${i.description ? `<div style="font-size:12px;color:#666;line-height:1.6;margin-bottom:8px;">${(i.description||'').substring(0,180)}${(i.description||'').length>180?'...':''}</div>` : ''}
+      ${i.impact ? `<div style="font-size:11px;color:#f59e0b;font-family:monospace;margin-bottom:8px;">💸 ${i.impact}</div>` : ''}
+      ${i.guide && i.guide[0] ? `<div style="font-size:11px;color:#374151;background:#f9fafb;padding:8px 10px;border-radius:6px;border-left:2px solid #d1d5db;"><strong>Quick fix:</strong> ${i.guide[0]}</div>` : ''}
+    </div>`).join('')}
+  </td></tr>` : ''}
+
+  <!-- Health Dimensions -->
+  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px;">📊 Health Dimensions This Week</div>
+    <table width="100%" cellpadding="0" cellspacing="4">
+      ${Object.entries(scores).map(([k,v]) => {
+        const prev_v = prevScores[k];
+        const diff = prev_v !== undefined ? v - prev_v : null;
+        const bar_color = v>=80?'#10b981':v>=60?'#f59e0b':'#f43f5e';
+        const trend = diff===null?'':diff>0?`<span style="color:#10b981;font-size:10px;"> ↑${diff}</span>`:diff<0?`<span style="color:#f43f5e;font-size:10px;"> ↓${Math.abs(diff)}</span>`:'<span style="color:#9ca3af;font-size:10px;"> →</span>';
+        return `<tr>
+          <td width="130" style="font-size:12px;color:#374151;padding:4px 0;">${dimNames[k]||k}${trend}</td>
+          <td style="padding:4px 8px;">
+            <div style="background:#f3f4f6;border-radius:4px;height:8px;overflow:hidden;">
+              <div style="background:${bar_color};height:100%;width:${v}%;border-radius:4px;"></div>
+            </div>
+          </td>
+          <td width="40" align="right" style="font-size:12px;font-weight:700;color:${bar_color};padding:4px 0;">${v}</td>
+        </tr>`;
+      }).join('')}
+    </table>
+  </td></tr>
+
+  <!-- Portal Snapshot -->
+  <tr><td style="background:#fafafa;padding:20px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">📈 Portal Snapshot</div>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        ${[
+          ['Contacts', ps.contacts],
+          ['Companies', ps.companies],
+          ['Deals', ps.deals],
+          ['Tickets', ps.tickets],
+          ['Workflows', ps.workflows],
+          ['Users', ps.users]
+        ].filter(([,v])=>v!==undefined&&v!==null).map(([l,v])=>`
+        <td align="center" style="padding:8px;">
+          <div style="font-size:18px;font-weight:800;color:#111;">${Number(v||0).toLocaleString()}</div>
+          <div style="font-size:10px;color:#9ca3af;font-family:monospace;text-transform:uppercase;margin-top:2px;">${l}</div>
+        </td>`).join('')}
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- Score History -->
+  ${sparkHistory.length > 1 ? `
+  <tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">📉 Score History (Last ${sparkHistory.length} Weeks)</div>
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      ${sparkHistory.map((score,i)=>`
+      <td align="center" style="vertical-align:bottom;padding:0 4px;">
+        <div style="background:${score>=80?'#10b981':score>=60?'#f59e0b':'#f43f5e'};width:100%;height:${Math.round((score/100)*60)}px;border-radius:3px 3px 0 0;min-height:4px;"></div>
+        <div style="font-size:10px;color:#374151;font-weight:700;margin-top:4px;">${score}</div>
+        <div style="font-size:9px;color:#9ca3af;">W${i+1}</div>
+      </td>`).join('')}
+    </tr></table>
+  </td></tr>` : ''}
+
+  <!-- Warnings summary -->
+  ${warnings.length > 0 ? `
+  <tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">
+    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">⚠️ Warnings to Address</div>
+    ${warnings.map(i=>`
+    <div style="display:flex;align-items:center;padding:10px 12px;background:#fffbeb;border-radius:8px;margin-bottom:6px;border-left:3px solid #f59e0b;">
+      <div style="flex:1;font-size:12px;color:#92400e;">${i.title||''}</div>
+      ${i.dimension?`<div style="font-size:9px;font-weight:700;padding:2px 6px;background:#fef3c7;color:#d97706;border-radius:4px;margin-left:8px;flex-shrink:0;">${i.dimension}</div>`:''}
+    </div>`).join('')}
+  </td></tr>` : ''}
+
+  <!-- CTAs -->
+  <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
+    <div style="text-align:center;margin-bottom:20px;">
+      <a href="${reportUrl}" style="display:inline-block;padding:13px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;margin-right:10px;">📊 View Full Report →</a>
+      <a href="${resultsUrl}" style="display:inline-block;padding:13px 28px;background:rgba(124,58,237,.15);color:#a78bfa;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(124,58,237,.3);">View Audit Results →</a>
+    </div>
+    <div style="text-align:center;margin-bottom:16px;">
+      <a href="https://calendly.com/matthew-fixops/30min" style="font-size:12px;color:rgba(255,255,255,.4);text-decoration:none;">📅 Book a strategy call to discuss these findings</a>
+    </div>
+    <div style="border-top:1px solid rgba(255,255,255,.06);padding-top:16px;text-align:center;font-size:11px;color:rgba(255,255,255,.25);">
+      <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.<br>
+      <span style="font-size:10px;">Your portal is scanned every Monday at 9am ET · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);">Pause monitoring</a></span>
+    </div>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body></html>`;
+
+  const subject = scoreDiff === null
+    ? `⚡ FixOps Pulse — ${pi.company} — First Scan Complete — Score ${s.overallScore}/100`
+    : scoreDiff > 0
+      ? `⚡ FixOps Pulse — ${pi.company} — Score ↑${scoreDiff} to ${s.overallScore}/100 · ${newIssues.length} new issue${newIssues.length!==1?'s':''}`
+      : scoreDiff < 0
+        ? `⚡ FixOps Pulse — ${pi.company} — Score ↓${Math.abs(scoreDiff)} to ${s.overallScore}/100 · ${newIssues.length} new issue${newIssues.length!==1?'s':''} found`
+        : `⚡ FixOps Pulse — ${pi.company} — Score ${s.overallScore}/100 · ${s.criticalCount} critical · Weekly Report`;
+
+  await resend.emails.send({
+    from: 'FixOps Pulse <reports@fixops.io>',
+    to: email,
+    subject,
+    html
+  });
+};
+
+// ── Pulse Report Page — token-gated, no password needed ──────────────────────
+app.get('/pulse/report', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+    } catch(e) {
+      return res.status(400).json({ error: 'invalid token' });
+    }
+    const { email, auditId } = payload;
+    if (!email) return res.status(400).json({ error: 'invalid token' });
+
+    // Get customer and history
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    if (!custRes.rows[0]) return res.status(404).json({ error: 'customer not found' });
+    const cust = custRes.rows[0];
+
+    const histRes = await db.query(
+      'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 12',
+      [cust.id]
+    );
+
+    // Get latest audit result
+    const latestAuditId = auditId || cust.last_audit_id;
+    const latestResult = latestAuditId ? await getResult(latestAuditId) : null;
+
+    res.json({
+      customer: { email: cust.email, company: cust.company, plan: cust.plan },
+      history: histRes.rows,
+      latestAuditId,
+      latestResult
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // ── Fix request email ─────────────────────────────────────────────────────────
 app.post('/fix-request', async (req, res) => {
@@ -432,8 +767,14 @@ app.get('/auth/callback', async (req, res) => {
           const custRes = await db.query('SELECT id FROM customers WHERE email = $1', [auditMeta.email]).catch(() => ({ rows: [] }));
           if (custRes.rows[0]) {
             await db.query(
-              'INSERT INTO audit_history (customer_id, audit_id, plan, score) VALUES ($1, $2, $3, $4)',
-              [custRes.rows[0].id, auditIdCopy, auditMeta.plan, result.summary?.overallScore || 0]
+              `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+              [custRes.rows[0].id, auditIdCopy, auditMeta.plan,
+               result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.warningCount||0, result.summary?.infoCount||0,
+               result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
+               JSON.stringify(result.scores||{}),
+               JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
+               JSON.stringify(result.portalInfo?.portalStats||{})]
             ).catch(() => {});
           }
         }
@@ -544,7 +885,16 @@ const triggerRescan = async (customer) => {
       const meta = { email: customer.email, company: customer.company, plan: customer.plan };
       const result = await runFullAudit(customer.portal_token, auditId, meta);
 
-      await sendClientEmail(customer.email, result, auditId);
+      // For Pulse customers, send the rich weekly monitoring email instead of the standard one
+      if (['pulse','pro','command'].includes(customer.plan)) {
+        const histRes = await db.query(
+          'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 5',
+          [customer.id]
+        ).catch(()=>({rows:[]}));
+        await sendPulseEmail(customer.email, result, auditId, histRes.rows, customer);
+      } else {
+        await sendClientEmail(customer.email, result, auditId);
+      }
       await notifyMatthew(result, auditId, customer.plan);
 
       await db.query(`
@@ -552,8 +902,14 @@ const triggerRescan = async (customer) => {
       `, [auditId, customer.id]);
 
       await db.query(
-        'INSERT INTO audit_history (customer_id, audit_id, plan, score) VALUES ($1, $2, $3, $4)',
-        [customer.id, auditId, customer.plan, result.summary?.overallScore || 0]
+        `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [customer.id, auditId, customer.plan,
+         result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.warningCount||0, result.summary?.infoCount||0,
+         result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
+         JSON.stringify(result.scores||{}),
+         JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
+         JSON.stringify(result.portalInfo?.portalStats||{})]
       );
 
       await saveResult(auditId, { ...result, status: 'complete', plan: customer.plan });
