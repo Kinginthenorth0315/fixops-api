@@ -885,22 +885,14 @@ const triggerRescan = async (customer) => {
       const meta = { email: customer.email, company: customer.company, plan: customer.plan };
       const result = await runFullAudit(customer.portal_token, auditId, meta);
 
-      // For Pulse customers, send the rich weekly monitoring email instead of the standard one
-      if (['pulse','pro','command'].includes(customer.plan)) {
-        const histRes = await db.query(
-          'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 5',
-          [customer.id]
-        ).catch(()=>({rows:[]}));
-        await sendPulseEmail(customer.email, result, auditId, histRes.rows, customer);
-      } else {
-        await sendClientEmail(customer.email, result, auditId);
-      }
-      await notifyMatthew(result, auditId, customer.plan);
+      // Save to audit_history FIRST so email comparison is correct
+      // history[0] = last week (before this scan), history[1] = two weeks ago, etc.
+      const prevHistRes = await db.query(
+        'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 5',
+        [customer.id]
+      ).catch(()=>({rows:[]}));
 
-      await db.query(`
-        UPDATE customers SET last_audit_id = $1, last_audit_at = NOW(), updated_at = NOW() WHERE id = $2
-      `, [auditId, customer.id]);
-
+      // Save this week's result to history
       await db.query(
         `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
@@ -911,6 +903,18 @@ const triggerRescan = async (customer) => {
          JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
          JSON.stringify(result.portalInfo?.portalStats||{})]
       );
+
+      await db.query(`
+        UPDATE customers SET last_audit_id = $1, last_audit_at = NOW(), updated_at = NOW() WHERE id = $2
+      `, [auditId, customer.id]);
+
+      // Send email — prevHistRes.rows[0] = last week for comparison
+      if (['pulse','pro','command'].includes(customer.plan)) {
+        await sendPulseEmail(customer.email, result, auditId, prevHistRes.rows, customer);
+      } else {
+        await sendClientEmail(customer.email, result, auditId);
+      }
+      await notifyMatthew(result, auditId, customer.plan);
 
       await saveResult(auditId, { ...result, status: 'complete', plan: customer.plan });
       console.log(`[${auditId}] ✅ Weekly rescan complete for ${customer.email}`);
