@@ -33,7 +33,7 @@ const db = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized:
 async function initDB() {
   try {
     await db.query(`CREATE TABLE IF NOT EXISTS audit_results (id VARCHAR(24) PRIMARY KEY, data JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW())`);
-    await db.query(`DELETE FROM audit_results WHERE created_at < NOW() - INTERVAL '30 days'`);
+    await db.query(`DELETE FROM audit_results WHERE (data->>'plan' = 'free' OR data->>'plan' IS NULL) AND created_at < NOW() - INTERVAL '7 days' OR created_at < NOW() - INTERVAL '365 days'`);
     console.log('Database ready');
   } catch(e) { console.error('DB init error:', e.message); }
 }
@@ -153,7 +153,7 @@ app.get('/auth/callback', async (req, res) => {
     // Use setImmediate to truly detach audit from the HTTP request lifecycle
     // This prevents Railway from killing the process when the response closes
     const accessToken = tokenRes.data.access_token;
-    const auditMeta = { ...pending };
+    const auditMeta = { ...pending, storageDays: pending.plan === 'pro-audit' ? 365 : (pending.plan && pending.plan !== 'free' ? 90 : 7) };
     const auditIdCopy = auditId;
 
     setImmediate(async () => {
@@ -171,12 +171,30 @@ app.get('/auth/callback', async (req, res) => {
           console.log(`[${auditIdCopy}] ✅ Client email sent to ${auditMeta.email}`);
         }
         if (FIXOPS_NOTIFY_EMAIL) {
-          await notifyMatthew(result, auditIdCopy);
+          await notifyMatthew(result, auditIdCopy, auditMeta.plan);
           console.log(`[${auditIdCopy}] ✅ Matthew notified`);
         }
 
+        // For paid one-time audits — send Matthew a separate action required email
+        if ((auditMeta.plan === 'deep' || auditMeta.plan === 'deep-audit' || auditMeta.plan === 'pro-audit') && FIXOPS_NOTIFY_EMAIL) {
+          const callLength = auditMeta.plan === 'pro-audit' ? '60-min' : '30-min';
+          await resend.emails.send({
+            from: 'FixOps Alerts <reports@fixops.io>',
+            to: FIXOPS_NOTIFY_EMAIL,
+            subject: `📞 ACTION: Schedule ${callLength} call — ${auditMeta.company} paid ${auditMeta.plan === 'pro-audit' ? '$599' : '$299'}`,
+            html: `<h2>Paid audit complete — schedule their strategy call</h2>
+              <p><strong>Company:</strong> ${auditMeta.company}</p>
+              <p><strong>Email:</strong> ${auditMeta.email}</p>
+              <p><strong>Plan:</strong> ${auditMeta.plan} (${auditMeta.plan === 'pro-audit' ? '$599 — 60-min call' : '$299 — 30-min call'})</p>
+              <p><strong>Score:</strong> ${result.summary?.overallScore}/100</p>
+              <p><strong>Critical issues:</strong> ${result.summary?.criticalCount}</p>
+              <p><strong>Action:</strong> Reply to ${auditMeta.email} to schedule their ${callLength} strategy call and send their written action plan.</p>
+              <p><a href="https://fixops.io/results.html?id=${auditIdCopy}">View their audit results</a></p>`
+          }).catch(e => console.error('Paid audit notify error:', e.message));
+        }
+
         // NOW save complete status after emails sent
-        await saveResult(auditIdCopy, { ...result, status: 'complete' });
+        await saveResult(auditIdCopy, { ...result, status: 'complete', plan: auditMeta.plan||'free', storageDays: auditMeta.storageDays||7 });
         console.log(`[${auditIdCopy}] ✅ Fully complete — saved to DB`);
       } catch(e) {
         console.error(`[${auditIdCopy}] Audit error:`, e.message);
@@ -308,17 +326,39 @@ async function runFullAudit(token, auditId, meta) {
 
   console.log(`[${auditId}] Starting full portal data fetch...`);
 
-  // Fetch large CRM objects first in parallel (contacts, deals, tickets are the big ones)
-  // Each capped at 5,000 records — comprehensive for any real portal
-  // Free plan gets limited records — enough to show value, drives upgrade
-  const isPaid = meta.plan && meta.plan !== 'free';
-  const contactLimit  = isPaid ? 999999 : 1000;
-  const dealLimit     = isPaid ? 999999 : 1000;
-  const ticketLimit   = isPaid ? 999999 : 500;
-  const companyLimit  = isPaid ? 999999 : 500;
-  const smallLimit    = isPaid ? 999999 : 100;
+  // ── Tier-based scan configuration ──────────────────────────────────────
+  // free     : Snapshot — standard objects, up to 1k contacts
+  // deep     : Deep Audit ($299) — all objects, unlimited records
+  // pro-audit: Pro Audit ($599) — all objects + extended checks
+  // pulse    : Pulse ($399/mo) — all objects, unlimited, weekly
+  // pro      : Pro ($699/mo) — all objects, daily
+  // command  : Command ($1,299/mo) — all objects, unlimited
+  const plan = meta.plan || 'free';
+  const isFree     = plan === 'free';
+  const isDeep     = plan === 'deep' || plan === 'deep-audit';
+  const isProAudit = plan === 'pro-audit';
+  const isPulse    = plan === 'pulse';
+  const isProPlan  = plan === 'pro';
+  const isCommand  = plan === 'command';
+  const isPaid     = !isFree;
 
-  console.log(`[${auditId}] Plan: ${meta.plan||'free'} | Limits: contacts=${contactLimit} deals=${dealLimit}`);
+  // Record limits
+  const contactLimit = isFree ? 1000   : 999999;
+  const dealLimit    = isFree ? 1000   : 999999;
+  const ticketLimit  = isFree ? 500    : 999999;
+  const companyLimit = isFree ? 500    : 999999;
+  const smallLimit   = isFree ? 100    : 999999;
+
+  // Result storage duration (days) — saved in result so DB cleanup respects it
+  const storageDays = isProAudit ? 365 : (isPaid ? 90 : 7);
+
+  // Extended checks — Pro Audit and Pro/Command plans only
+  const runExtended = isProAudit || isProPlan || isCommand;
+
+  // Custom objects — Pro and Command only (needs full OAuth when available)
+  const runCustomObjects = isProPlan || isCommand;
+
+  console.log(`[${auditId}] Plan: ${plan} | contacts=${contactLimit} | storage=${storageDays}d | extended=${runExtended}`);
 
   const [contactsR, dealsR, ticketsR] = await Promise.all([
     paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason', contactLimit),
