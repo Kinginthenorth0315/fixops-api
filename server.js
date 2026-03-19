@@ -920,6 +920,61 @@ const triggerRescan = async (customer) => {
       console.log(`[${auditId}] ✅ Weekly rescan complete for ${customer.email}`);
     } catch(e) {
       console.error(`[${auditId}] Rescan error:`, e.message);
+
+      // Detect expired/invalid token — notify customer to reconnect
+      const isAuthError = e.message?.includes('401') || e.message?.includes('403') ||
+        e.response?.status === 401 || e.response?.status === 403;
+
+      if (isAuthError) {
+        console.log(`[${auditId}] Token expired for ${customer.email} — sending reconnect email`);
+        // Clear the expired token so we don't keep trying
+        await db.query(
+          'UPDATE customers SET portal_token = NULL, updated_at = NOW() WHERE id = $1',
+          [customer.id]
+        ).catch(()=>{});
+
+        // Send reconnect email
+        await resend.emails.send({
+          from: 'FixOps Pulse <reports@fixops.io>',
+          to: customer.email,
+          subject: `⚡ FixOps Pulse — Action Required: Reconnect Your HubSpot Portal`,
+          html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
+<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
+  <div style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
+    <div style="font-size:20px;font-weight:800;color:#fff;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
+    <div style="font-size:11px;color:rgba(255,255,255,.35);margin-top:3px;font-family:monospace;letter-spacing:1px;">PULSE MONITORING ALERT</div>
+  </div>
+  <div style="padding:32px;">
+    <div style="font-size:22px;font-weight:800;color:#111;margin-bottom:10px;">Your HubSpot connection needs to be refreshed</div>
+    <p style="font-size:14px;color:#555;line-height:1.7;margin-bottom:20px;">
+      Hi ${customer.company || 'there'} — your weekly FixOps Pulse scan ran today but your HubSpot connection has expired.
+      This is normal and happens periodically for security reasons. It takes about 30 seconds to reconnect.
+    </p>
+    <div style="background:#f5f3ff;border:1px solid #ede9fe;border-radius:10px;padding:16px;margin-bottom:24px;font-size:13px;color:#5b21b6;">
+      <strong>What you missed:</strong> Your weekly portal health scan — we'll run it automatically as soon as you reconnect.
+    </div>
+    <div style="text-align:center;">
+      <a href="${FRONTEND_URL}/?reconnect=1&email=${encodeURIComponent(customer.email)}&plan=${customer.plan}"
+         style="display:inline-block;padding:14px 32px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">
+        Reconnect HubSpot →
+      </a>
+    </div>
+    <p style="font-size:12px;color:#999;text-align:center;margin-top:16px;">Takes 30 seconds · Read-only access · You can revoke anytime from HubSpot</p>
+  </div>
+  <div style="background:#f9f9f9;border-top:1px solid #eee;padding:16px 32px;text-align:center;font-size:11px;color:#aaa;">
+    <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io
+  </div>
+</div></body></html>`
+        }).catch(e => console.error('Reconnect email error:', e.message));
+
+        // Alert Matthew too
+        await resend.emails.send({
+          from: 'FixOps Alerts <reports@fixops.io>',
+          to: FIXOPS_NOTIFY_EMAIL,
+          subject: `⚠️ Pulse token expired — ${customer.email} needs to reconnect`,
+          html: `<p>Token expired for <strong>${customer.email}</strong> (${customer.plan}).<br>Reconnect email sent. Token cleared from DB.</p>`
+        }).catch(()=>{});
+      }
     }
   });
 };
@@ -950,7 +1005,7 @@ cron.schedule('0 14 * * 1', async () => {
 async function runFullAudit(token, auditId, meta) {
   // Works with both MCP OAuth tokens AND HubSpot Private App tokens
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 30000 }); // 30s per request
-  const safe = async (fn, fb) => { try { return await fn(); } catch(e) { console.log('API skip:', e.message?.substring(0,50)); return fb; } };
+  const safe = async (fn, fb) => { try { return await fn(); } catch(e) { if(e.response?.status !== 403) console.log('API skip:', e.message?.substring(0,50)); return fb; } };
 
   // Smart sampling fetch — scales to any portal size
   // Paginated fetch — reads up to 10,000 records per object
@@ -985,7 +1040,7 @@ async function runFullAudit(token, auditId, meta) {
           await sleep(wait);
           continue; // retry same page
         }
-        console.log('Paginate skip:', e.message?.substring(0,50));
+        if(e.response?.status !== 403) console.log('Paginate skip:', e.message?.substring(0,50));
         break;
       }
     }
@@ -1058,14 +1113,15 @@ async function runFullAudit(token, auditId, meta) {
   const invoicesR      = await paginate('/crm/v3/objects/invoices?properties=hs_invoice_status,hs_due_date,hs_amount_billed,hs_createdate', smallLimit);
   const subscriptionsR = await paginate('/crm/v3/objects/subscriptions?properties=hs_status,hs_recurring_revenue,hs_createdate,hs_next_payment_due_date', smallLimit);
 
-  // ── PRIORITY 3: Owners + pipelines — single requests, fast ───────────────────
-  await up(48, 'Reading owners and pipeline config…');
-  const [ownersR, pipelinesR, cPropsR, dPropsR] = await Promise.all([
+  // ── PRIORITY 3: Owners — available via MCP ──────────────────────────────────
+  // Note: pipelines and properties are NOT available via MCP beta — using empty fallbacks
+  const [ownersR] = await Promise.all([
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/pipelines/deals'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
   ]);
+  const pipelinesR = {data:{results:[]}};
+  const cPropsR    = {data:{results:[]}};
+  const dPropsR    = {data:{results:[]}};
+  await up(48, 'Reading owners…');
 
   // ── PRIORITY 4: Objects blocked by MCP scope — skip gracefully ───────────────
   // Workflows, forms, tasks, meetings, calls, lists, users — not available via MCP beta
@@ -1075,17 +1131,18 @@ async function runFullAudit(token, auditId, meta) {
   const meetingsR = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
   const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
 
-  // These require Public App scopes — safe fallback to empty
-  const workflowsR = await safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}});
-  const formsR     = await safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}});
-  const usersR     = await safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}});
-  const listsR     = await safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}});
+  // These require Public App scopes — not available via MCP beta
+  const workflowsR = {data:{workflows:[]}}; // Requires automation scope — Public App only
+  const formsR     = {data:{results:[]}}; // Requires marketing scope — Public App only
+  // Users available via MCP crm.objects.users.read
+  const usersR     = await safe(()=>hs.get('/crm/v3/objects/users?limit=100'), {data:{results:[]}});
+  const listsR     = {data:{lists:[]}}; // Not available via MCP beta
 
-  // ── Unwrap all results ────────────────────────────────────────────────────────
-  const contacts      = contactsR.data?.results||[];
-  const companies     = companiesR.data?.results||[];
-  const deals         = dealsR.data?.results||[];
-  const tickets       = ticketsR.data?.results||[];
+  // ── Unwrap all results — enforce hard limits for free plan ──────────────────
+  const contacts      = (contactsR.data?.results||[]).slice(0, contactLimit);
+  const companies     = (companiesR.data?.results||[]).slice(0, companyLimit);
+  const deals         = (dealsR.data?.results||[]).slice(0, dealLimit);
+  const tickets       = (ticketsR.data?.results||[]).slice(0, ticketLimit);
   const owners        = ownersR.data?.results||[];
   const workflows     = workflowsR.data?.workflows||workflowsR.data?.results||[];
   const forms         = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
