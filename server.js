@@ -458,6 +458,42 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
+// ── Private App Token Audit — bypasses MCP OAuth, full record access ──────────
+// Used when customer provides a HubSpot Private App token directly
+// Enables full portal scans without MCP token scope/record limitations
+app.post('/audit/private', async (req, res) => {
+  try {
+    const { token, email, company, plan } = req.body;
+    if (!token) return res.status(400).json({ error: 'token required' });
+
+    const auditId = crypto.randomBytes(12).toString('hex');
+    await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
+
+    const confirmUrl = `${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(email||'')}&id=${auditId}&plan=${encodeURIComponent(plan||'free')}&paid=0`;
+    res.json({ auditId, confirmUrl });
+
+    setImmediate(async () => {
+      console.log(`[${auditId}] Private app audit starting — plan: ${plan}`);
+      try {
+        const meta = { email: email||'', company: company||'Your Portal', plan: plan||'free' };
+        const result = await runFullAudit(token, auditId, meta);
+        await saveResult(auditId, { status: 'running', progress: 99, currentTask: 'Sending your report...' });
+        if (email) {
+          await sendClientEmail(email, result, auditId);
+          console.log(`[${auditId}] ✅ Client email sent`);
+        }
+        await notifyMatthew(result, auditId, plan||'free');
+        await saveResult(auditId, { ...result, status: 'complete', plan: plan||'free' });
+        console.log(`[${auditId}] ✅ Private app audit complete`);
+      } catch(e) {
+        console.error(`[${auditId}] Private audit error:`, e.message);
+        await saveResult(auditId, { status: 'error', message: 'Audit failed. Matthew has been notified.' }).catch(()=>{});
+      }
+    });
+
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Audit status ──────────────────────────────────────────────────────────────
 app.get('/audit/status/:id', async (req, res) => {
   try {
@@ -620,59 +656,100 @@ async function runFullAudit(token, auditId, meta) {
   const plan = cfg.plan;
   console.log(`[${auditId}] Plan: ${plan} | contacts=${contactLimit} | storage=${storageDays}d | extended=${runExtended}`);
 
-  const [contactsR, dealsR, ticketsR] = [
-    await paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason', contactLimit),
-    await paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability', dealLimit),
-    await paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority', ticketLimit),
-  ];
+  // ── PRIORITY 1: Core CRM objects — fetch fully and sequentially ──────────────
+  // These are the highest-value objects. Sequential to avoid 429s on large portals.
+  await up(12, 'Reading contacts…');
+  const contactsR = await paginate(
+    '/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason,hs_email_optout,hs_calculated_merged_vids',
+    contactLimit
+  );
 
-  await up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
+  await up(20, 'Reading companies…');
+  const companiesR = await paginate(
+    '/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate,hs_lastmodifieddate,city,country',
+    companyLimit
+  );
 
-  // Fetch everything else — small objects in parallel, large ones sequential
-  const [
-    ownersR, workflowsR, formsR, usersR, pipelinesR,
-    cPropsR, dPropsR, listsR, quotesR, productsR
-  ] = await Promise.all([
+  await up(28, 'Reading deals…');
+  const dealsR = await paginate(
+    '/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability,hs_is_closed,hs_is_closed_won',
+    dealLimit
+  );
+
+  await up(34, 'Reading tickets…');
+  const ticketsR = await paginate(
+    '/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority,hs_pipeline,time_to_close',
+    ticketLimit
+  );
+
+  await up(38, `Loaded ${contactsR.data.results.length.toLocaleString()} contacts · ${dealsR.data.results.length.toLocaleString()} deals · ${companiesR.data.results.length.toLocaleString()} companies…`);
+
+  // ── PRIORITY 2: Commerce objects — available via MCP ─────────────────────────
+  await up(40, 'Reading products and line items…');
+  const productsR  = await paginate('/crm/v3/objects/products?properties=name,price,hs_product_type,createdate,hs_lastmodifieddate', smallLimit);
+  const lineItemsR = await paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id,price,discount', smallLimit);
+
+  await up(44, 'Reading quotes…');
+  const quotesR = await paginate('/crm/v3/objects/quotes?properties=hs_title,hs_status,hs_expiration_date,hs_quote_amount,hs_lastmodifieddate,hubspot_owner_id', smallLimit);
+
+  // Orders, invoices, subscriptions, carts — available in MCP scope
+  await up(46, 'Reading orders and invoices…');
+  const ordersR        = await paginate('/crm/v3/objects/orders?properties=hs_order_name,hs_status,hs_createdate,hs_currency_code', smallLimit);
+  const invoicesR      = await paginate('/crm/v3/objects/invoices?properties=hs_invoice_status,hs_due_date,hs_amount_billed,hs_createdate', smallLimit);
+  const subscriptionsR = await paginate('/crm/v3/objects/subscriptions?properties=hs_status,hs_recurring_revenue,hs_createdate,hs_next_payment_due_date', smallLimit);
+
+  // ── PRIORITY 3: Owners + pipelines — single requests, fast ───────────────────
+  await up(48, 'Reading owners and pipeline config…');
+  const [ownersR, pipelinesR, cPropsR, dPropsR] = await Promise.all([
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
-    safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
-    safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
-    safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/pipelines/deals'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
-    safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/quotes?limit=100&properties=hs_title,hs_status,hs_expiration_date'), {data:{results:[]}}),
-    safe(()=>hs.get('/crm/v3/objects/products?limit=100&properties=name,price,hs_product_type'), {data:{results:[]}}),
   ]);
 
-  // Fetch large activity objects sequentially to avoid 429s
-  const companiesR  = await paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate', companyLimit);
-  const tasksR      = await paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit);
-  const meetingsR   = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
-  const callsR      = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
-  const lineItemsR  = await paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id', smallLimit);
+  // ── PRIORITY 4: Objects blocked by MCP scope — skip gracefully ───────────────
+  // Workflows, forms, tasks, meetings, calls, lists, users — not available via MCP beta
+  // These will return data when using a Private App token or after Public App approval
+  await up(50, 'Checking engagement data…');
+  const tasksR    = await paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit);
+  const meetingsR = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
+  const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
 
-  const contacts   = contactsR.data?.results||[];
-  const companies  = companiesR.data?.results||[];
-  const deals      = dealsR.data?.results||[];
-  const tickets    = ticketsR.data?.results||[];
-  const owners     = ownersR.data?.results||[];
-  const workflows  = workflowsR.data?.workflows||workflowsR.data?.results||[];
-  const forms      = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
-  const users      = usersR.data?.results||[];
-  const pipelines  = pipelinesR.data?.results||[];
-  const cProps     = cPropsR.data?.results||[];
-  const lists      = listsR.data?.lists||[];
-  const tasks      = tasksR.data?.results||[];
-  const meetings   = meetingsR.data?.results||[];
-  const calls      = callsR.data?.results||[];
-  const lineItems  = lineItemsR.data?.results||[];
-  const quotes     = quotesR.data?.results||[];
-  const products   = productsR.data?.results||[];
+  // These require Public App scopes — safe fallback to empty
+  const workflowsR = await safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}});
+  const formsR     = await safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}});
+  const usersR     = await safe(()=>hs.get('/settings/v3/users/?limit=100'), {data:{results:[]}});
+  const listsR     = await safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}});
 
-  console.log(`[${auditId}] Full fetch complete: ${contacts.length} contacts · ${deals.length} deals · ${companies.length} companies · ${tickets.length} tickets · ${tasks.length} tasks · ${meetings.length} meetings · ${calls.length} calls · ${workflows.length} workflows · ${forms.length} forms · ${lineItems.length} line items · ${quotes.length} quotes`);
+  // ── Unwrap all results ────────────────────────────────────────────────────────
+  const contacts      = contactsR.data?.results||[];
+  const companies     = companiesR.data?.results||[];
+  const deals         = dealsR.data?.results||[];
+  const tickets       = ticketsR.data?.results||[];
+  const owners        = ownersR.data?.results||[];
+  const workflows     = workflowsR.data?.workflows||workflowsR.data?.results||[];
+  const forms         = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
+  const users         = usersR.data?.results||[];
+  const pipelines     = pipelinesR.data?.results||[];
+  const cProps        = cPropsR.data?.results||[];
+  const lists         = listsR.data?.lists||[];
+  const tasks         = tasksR.data?.results||[];
+  const meetings      = meetingsR.data?.results||[];
+  const calls         = callsR.data?.results||[];
+  const lineItems     = lineItemsR.data?.results||[];
+  const quotes        = quotesR.data?.results||[];
+  const products      = productsR.data?.results||[];
+  const orders        = ordersR.data?.results||[];
+  const invoices      = invoicesR.data?.results||[];
+  const subscriptions = subscriptionsR.data?.results||[];
 
-  console.log(`[${auditId}] Loaded: ${contacts.length} contacts, ${deals.length} deals, ${companies.length} companies, ${tickets.length} tickets, ${tasks.length} tasks, ${workflows.length} workflows, ${users.length} users`);
+  console.log(`[${auditId}] ✅ Fetch complete:
+    contacts=${contacts.length} | companies=${companies.length} | deals=${deals.length} | tickets=${tickets.length}
+    products=${products.length} | lineItems=${lineItems.length} | quotes=${quotes.length}
+    orders=${orders.length} | invoices=${invoices.length} | subscriptions=${subscriptions.length}
+    tasks=${tasks.length} | meetings=${meetings.length} | calls=${calls.length}
+    workflows=${workflows.length} | forms=${forms.length} | users=${users.length} | owners=${owners.length}
+  `);
 
   const issues = [];
   let dataScore=100, autoScore=100, pipelineScore=100, marketingScore=100;
@@ -1148,13 +1225,36 @@ async function runFullAudit(token, auditId, meta) {
   const infoCount     = issues.filter(i=>i.severity==='info').length;
   const monthlyWaste  = Math.round((dupes*0.38)+(stalled.length*18)+(deadWf.length*10)+(inactiveUsers.length*75)+(noEmail.length*0.5));
 
+  const totalRecordsScanned =
+    contacts.length + companies.length + deals.length + tickets.length +
+    tasks.length + meetings.length + calls.length +
+    lineItems.length + quotes.length + products.length +
+    orders.length + invoices.length + subscriptions.length;
+
   const finalResult = {
     status:'complete', auditId,
-    portalInfo:{company:meta.company||'Your Portal',email:meta.email,plan:meta.plan,auditDate:new Date().toISOString(),
-      portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length,meetings:meetings.length,calls:calls.length,quotes:quotes.length,lineItems:lineItems.length,products:products.length},
+    portalInfo:{
+      company: meta.company||'Your Portal', email: meta.email, plan: meta.plan,
+      auditDate: new Date().toISOString(),
+      portalStats:{
+        contacts: contacts.length, companies: companies.length,
+        deals: deals.length, tickets: tickets.length,
+        workflows: workflows.length, forms: forms.length, users: users.length,
+        lists: lists.length, tasks: tasks.length, meetings: meetings.length,
+        calls: calls.length, quotes: quotes.length, lineItems: lineItems.length,
+        products: products.length, orders: orders.length,
+        invoices: invoices.length, subscriptions: subscriptions.length,
+      },
       isLimited: !isPaid,
-      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}},
-    summary:{overallScore,grade:overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',criticalCount,warningCount,infoCount,monthlyWaste,totalContacts:contacts.length,totalDeals:deals.length,totalWorkflows:workflows.length,checksRun:165,recordsScanned:contacts.length+deals.length+companies.length+tickets.length+tasks.length},
+      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
+    },
+    summary:{
+      overallScore,
+      grade: overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',
+      criticalCount, warningCount, infoCount, monthlyWaste,
+      totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
+      checksRun: 165, recordsScanned: totalRecordsScanned
+    },
     scores, issues
   };
 
