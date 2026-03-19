@@ -57,7 +57,7 @@ app.post('/fix-request', async (req, res) => {
     const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, auditId } = req.body;
     
     await resend.emails.send({
-      from: 'FixOps Alerts <onboarding@resend.dev>',
+      from: 'FixOps Alerts <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
       subject: `🛠 Fix It For Me — ${issueTitle?.substring(0,60)} — ${portalCompany}`,
       html: `<div style="font-family:monospace;background:#000;color:#fff;padding:24px;border-radius:8px;max-width:600px">
@@ -170,7 +170,7 @@ app.get('/auth/callback', async (req, res) => {
         // Try to notify Matthew of the failure
         if (FIXOPS_NOTIFY_EMAIL) {
           resend.emails.send({
-            from: 'FixOps Alerts <onboarding@resend.dev>',
+            from: 'FixOps Alerts <reports@fixops.io>',
             to: FIXOPS_NOTIFY_EMAIL,
             subject: `⚠️ Audit Failed — ${auditMeta.company} — ${auditIdCopy}`,
             html: `<p>Audit failed for ${auditMeta.email} (${auditMeta.company})<br>Error: ${e.message}<br>Audit ID: ${auditIdCopy}</p>`
@@ -826,7 +826,7 @@ async function sendClientEmail(to, data, auditId) {
   const top = issues.slice(0,4);
 
   await resend.emails.send({
-    from:'FixOps Reports <onboarding@resend.dev>', to,
+    from:'FixOps Reports <reports@fixops.io>', to,
     subject:`Your HubSpot Audit — Score ${summary.overallScore}/100 · ${summary.criticalCount} critical issues · $${summary.monthlyWaste}/mo in waste found`,
     html:`<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -945,7 +945,7 @@ async function sendClientEmail(to, data, auditId) {
 async function notifyMatthew(data, auditId) {
   const {summary,portalInfo} = data;
   await resend.emails.send({
-    from:'FixOps Alerts <onboarding@resend.dev>', to:FIXOPS_NOTIFY_EMAIL,
+    from:'FixOps Alerts <reports@fixops.io>', to:FIXOPS_NOTIFY_EMAIL,
     subject:`🔔 New Audit — ${portalInfo.company} — Score ${summary.overallScore}/100 — $${summary.monthlyWaste}/mo waste`,
     html:`<div style="font-family:monospace;background:#000;color:#fff;padding:24px;border-radius:8px;max-width:600px">
 <h2 style="color:#a78bfa;margin:0 0 20px">⚡ New FixOps Audit Completed</h2>
