@@ -92,23 +92,27 @@ app.get('/health', async (req, res) => {
 });
 
 // Auth URL
-app.get('/auth/url', (req, res) => {
+// Auth URL — supports both GET (free audit) and POST (paid plans)
+const buildAuthUrl = (req, res, params) => {
   try {
-    const { email='', company='', plan='free' } = req.query;
+    const { email='', company='', plan='free', paid=false } = params;
     const codeVerifier  = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
-    pendingAudits.set(state, { email, company, plan, codeVerifier, createdAt: Date.now() });
+    pendingAudits.set(state, { email, company, plan, paid: !!paid, codeVerifier, createdAt: Date.now() });
     const url = new URL('https://mcp.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
     url.searchParams.set('redirect_uri', HUBSPOT_REDIRECT_URI);
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', codeChallenge);
     url.searchParams.set('code_challenge_method', 'S256');
-    console.log('Auth URL:', email);
+    console.log(`Auth URL: ${email} | plan: ${plan} | paid: ${paid}`);
     res.json({ url: url.toString(), state });
   } catch(e) { res.status(500).json({ error: e.message }); }
-});
+};
+
+app.get('/auth/url', (req, res) => buildAuthUrl(req, res, req.query));
+app.post('/auth/url', (req, res) => buildAuthUrl(req, res, req.body));
 
 // Callback
 app.get('/auth/callback', async (req, res) => {
@@ -142,7 +146,9 @@ app.get('/auth/callback', async (req, res) => {
     await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
 
     // Redirect user to confirm page BEFORE starting audit
-    res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}`);
+    // Paid users get plan info passed through so confirm page shows right messaging
+    const confirmUrl = `${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}&plan=${encodeURIComponent(pending.plan||'free')}&paid=${pending.paid?'1':'0'}`;
+    res.redirect(confirmUrl);
 
     // Use setImmediate to truly detach audit from the HTTP request lifecycle
     // This prevents Railway from killing the process when the response closes
