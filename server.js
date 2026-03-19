@@ -257,14 +257,15 @@ async function runFullAudit(token, auditId, meta) {
   // Paginated fetch — reads up to 10,000 records per object
   // 10,000 is comprehensive for any statistical audit check
   // Beyond this, diminishing returns — 100 duplicates from 10k is same signal as from 100k
-  const paginate = async (url) => {
+  const paginate = async (url, maxRecords) => {
     const results = [];
     let after = null;
     const limit = 100;
     let pages = 0;
-    const maxPages = 500; // 500 x 100 = 50,000 records max safety cap per object
+    maxRecords = maxRecords || 999999;
+    const maxPages = Math.min(500, Math.ceil(maxRecords / 100));
 
-    while (pages < maxPages) {
+    while (pages < maxPages && results.length < maxRecords) {
       try {
         const sep = url.includes('?') ? '&' : '?';
         const params = after ? `${url}${sep}limit=${limit}&after=${after}` : `${url}${sep}limit=${limit}`;
@@ -303,10 +304,20 @@ async function runFullAudit(token, auditId, meta) {
 
   // Fetch large CRM objects first in parallel (contacts, deals, tickets are the big ones)
   // Each capped at 5,000 records — comprehensive for any real portal
+  // Free plan gets limited records — enough to show value, drives upgrade
+  const isPaid = meta.plan && meta.plan !== 'free';
+  const contactLimit  = isPaid ? 999999 : 1000;
+  const dealLimit     = isPaid ? 999999 : 1000;
+  const ticketLimit   = isPaid ? 999999 : 500;
+  const companyLimit  = isPaid ? 999999 : 500;
+  const smallLimit    = isPaid ? 999999 : 100;
+
+  console.log(`[${auditId}] Plan: ${meta.plan||'free'} | Limits: contacts=${contactLimit} deals=${dealLimit}`);
+
   const [contactsR, dealsR, ticketsR] = await Promise.all([
-    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason'),
-    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability'),
-    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority'),
+    paginate('/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason', contactLimit),
+    paginate('/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability', dealLimit),
+    paginate('/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority', ticketLimit),
   ]);
 
   await up(28, `Analyzing ${contactsR.data.results.length.toLocaleString()} contacts, ${dealsR.data.results.length.toLocaleString()} deals…`);
@@ -317,7 +328,7 @@ async function runFullAudit(token, auditId, meta) {
     cPropsR, dPropsR, listsR, tasksR, meetingsR, callsR,
     lineItemsR, quotesR, productsR
   ] = await Promise.all([
-    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate'),
+    paginate('/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate', companyLimit),
     safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
     safe(()=>hs.get('/automation/v3/workflows?limit=100'), {data:{workflows:[]}}),
     safe(()=>hs.get('/marketing/v3/forms?limit=100'), {data:{results:[]}}),
@@ -326,10 +337,10 @@ async function runFullAudit(token, auditId, meta) {
     safe(()=>hs.get('/crm/v3/properties/contacts?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/properties/deals?limit=500'), {data:{results:[]}}),
     safe(()=>hs.get('/contacts/v1/lists?count=100'), {data:{lists:[]}}),
-    paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id'),
-    paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id'),
-    paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id'),
-    paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id'),
+    paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit),
+    paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit),
+    paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit),
+    paginate('/crm/v3/objects/line_items?properties=name,quantity,amount,hs_product_id', smallLimit),
     safe(()=>hs.get('/crm/v3/objects/quotes?limit=100&properties=hs_title,hs_status,hs_expiration_date'), {data:{results:[]}}),
     safe(()=>hs.get('/crm/v3/objects/products?limit=100&properties=name,price,hs_product_type'), {data:{results:[]}}),
   ]);
@@ -833,7 +844,9 @@ async function runFullAudit(token, auditId, meta) {
   const finalResult = {
     status:'complete', auditId,
     portalInfo:{company:meta.company||'Your Portal',email:meta.email,plan:meta.plan,auditDate:new Date().toISOString(),
-      portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length,meetings:meetings.length,calls:calls.length,quotes:quotes.length,lineItems:lineItems.length,products:products.length}},
+      portalStats:{contacts:contacts.length,companies:companies.length,deals:deals.length,workflows:workflows.length,forms:forms.length,users:users.length,tickets:tickets.length,lists:lists.length,tasks:tasks.length,meetings:meetings.length,calls:calls.length,quotes:quotes.length,lineItems:lineItems.length,products:products.length},
+      isLimited: !isPaid,
+      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}},
     summary:{overallScore,grade:overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',criticalCount,warningCount,infoCount,monthlyWaste,totalContacts:contacts.length,totalDeals:deals.length,totalWorkflows:workflows.length,checksRun:165,recordsScanned:contacts.length+deals.length+companies.length+tickets.length+tasks.length},
     scores, issues
   };
