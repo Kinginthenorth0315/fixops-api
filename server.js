@@ -1,101 +1,343 @@
-// ============================================================
-// FIXOPS.IO API v4 — PostgreSQL Storage + Full Audit Engine
-// ============================================================
-const express = require('express');
-const axios   = require('axios');
-const crypto  = require('crypto');
-const { Resend } = require('resend');
+'use strict';
+const express    = require('express');
+const axios      = require('axios');
+const crypto     = require('crypto');
 const { Pool }   = require('pg');
+const { Resend } = require('resend');
+const stripe     = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
+const cron       = require('node-cron');
 
-const app = express();
+const app  = express();
+const PORT = process.env.PORT || 3000;
+
+// ── Stripe webhook needs raw body ─────────────────────────────────────────────
+app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 
-const {
-  HUBSPOT_CLIENT_ID, HUBSPOT_CLIENT_SECRET, HUBSPOT_REDIRECT_URI,
-  RESEND_API_KEY, FIXOPS_NOTIFY_EMAIL, FRONTEND_URL, DATABASE_URL, PORT
-} = process.env;
+// ── Config ────────────────────────────────────────────────────────────────────
+const HUBSPOT_CLIENT_ID     = process.env.HUBSPOT_CLIENT_ID;
+const HUBSPOT_CLIENT_SECRET = process.env.HUBSPOT_CLIENT_SECRET;
+const HUBSPOT_REDIRECT_URI  = process.env.HUBSPOT_REDIRECT_URI;
+const RESEND_API_KEY        = process.env.RESEND_API_KEY;
+const FIXOPS_NOTIFY_EMAIL   = process.env.FIXOPS_NOTIFY_EMAIL || 'matthew@fixops.io';
+const BASE_URL              = process.env.BASE_URL || 'https://fixops-api-production.up.railway.app';
+const FRONTEND_URL          = process.env.FRONTEND_URL || 'https://fixops.io';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
+// Stripe plan → internal plan key mapping
+const STRIPE_PRICE_MAP = {
+  [process.env.STRIPE_PRICE_PULSE    || 'price_pulse']:     'pulse',
+  [process.env.STRIPE_PRICE_PRO      || 'price_pro']:       'pro',
+  [process.env.STRIPE_PRICE_COMMAND  || 'price_command']:   'command',
+  [process.env.STRIPE_PRICE_DEEP     || 'price_deep']:      'deep',
+  [process.env.STRIPE_PRICE_PROAUDIT || 'price_proaudit']:  'pro-audit',
+};
+
+// ── Database ──────────────────────────────────────────────────────────────────
+const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const resend = new Resend(RESEND_API_KEY);
+
+async function initDb() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS audit_results (
+      id          VARCHAR(24) PRIMARY KEY,
+      data        JSONB NOT NULL,
+      created_at  TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS customers (
+      id              SERIAL PRIMARY KEY,
+      email           VARCHAR(255) UNIQUE NOT NULL,
+      company         VARCHAR(255),
+      stripe_customer VARCHAR(255),
+      plan            VARCHAR(50) DEFAULT 'free',
+      plan_status     VARCHAR(50) DEFAULT 'active',
+      subscription_id VARCHAR(255),
+      portal_token    TEXT,
+      last_audit_id   VARCHAR(24),
+      last_audit_at   TIMESTAMP,
+      created_at      TIMESTAMP DEFAULT NOW(),
+      updated_at      TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS audit_history (
+      id          SERIAL PRIMARY KEY,
+      customer_id INT REFERENCES customers(id),
+      audit_id    VARCHAR(24),
+      plan        VARCHAR(50),
+      score       INT,
+      created_at  TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  // Cleanup: free results after 7 days, paid after 365
+  await db.query(`
+    DELETE FROM audit_results
+    WHERE (data->>'plan' IS NULL OR data->>'plan' = 'free')
+      AND created_at < NOW() - INTERVAL '7 days'
+  `);
+  await db.query(`
+    DELETE FROM audit_results
+    WHERE created_at < NOW() - INTERVAL '365 days'
+  `);
+  console.log('Database ready — all tables initialized');
+}
+
+const saveResult = async (id, data) => {
+  await db.query(
+    'INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
+    [id, JSON.stringify(data)]
+  );
+};
+
+const getResult = async (id) => {
+  const r = await db.query('SELECT data FROM audit_results WHERE id = $1', [id]);
+  return r.rows[0]?.data || null;
+};
+
+// ── Pending OAuth state ───────────────────────────────────────────────────────
 const pendingAudits = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [k, v] of pendingAudits) {
+    if (v.createdAt < cutoff) pendingAudits.delete(k);
+  }
+}, 5 * 60 * 1000);
 
-// PostgreSQL
-const db = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+// ── Plan config ───────────────────────────────────────────────────────────────
+const getPlanConfig = (plan) => {
+  const p = plan || 'free';
+  const isFree = p === 'free';
+  return {
+    plan: p,
+    isFree,
+    isPaid: !isFree,
+    contactLimit:  isFree ? 1000   : 999999,
+    dealLimit:     isFree ? 1000   : 999999,
+    ticketLimit:   isFree ? 500    : 999999,
+    companyLimit:  isFree ? 500    : 999999,
+    smallLimit:    isFree ? 100    : 999999,
+    storageDays:   p === 'pro-audit' ? 365 : (!isFree ? 90 : 7),
+    runExtended:   ['pro-audit','pro','command'].includes(p),
+    isOneTime:     ['deep','deep-audit','pro-audit'].includes(p),
+    callLength:    p === 'pro-audit' ? '60' : '30',
+  };
+};
 
-async function initDB() {
-  try {
-    await db.query(`CREATE TABLE IF NOT EXISTS audit_results (id VARCHAR(24) PRIMARY KEY, data JSONB NOT NULL, created_at TIMESTAMP DEFAULT NOW())`);
-    await db.query(`DELETE FROM audit_results WHERE (data->>'plan' = 'free' OR data->>'plan' IS NULL) AND created_at < NOW() - INTERVAL '7 days' OR created_at < NOW() - INTERVAL '365 days'`);
-    console.log('Database ready');
-  } catch(e) { console.error('DB init error:', e.message); }
-}
+// ── Sanitize text ─────────────────────────────────────────────────────────────
+const cleanText = (obj) => {
+  if (!obj) return obj;
+  if (typeof obj === 'string') return obj.replace(/`/g,"'").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g,'');
+  if (Array.isArray(obj)) return obj.map(cleanText);
+  if (typeof obj === 'object') {
+    const out = {};
+    for (const k of Object.keys(obj)) out[k] = cleanText(obj[k]);
+    return out;
+  }
+  return obj;
+};
 
-async function saveResult(id, data) {
-  try {
-    await db.query('INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2', [id, JSON.stringify(data)]);
-  } catch(e) { console.error('DB save error:', e.message); }
-}
+// ── HubSpot API helper ────────────────────────────────────────────────────────
 
-async function getResult(id) {
-  try {
-    const r = await db.query('SELECT data FROM audit_results WHERE id = $1', [id]);
-    return r.rows[0]?.data || null;
-  } catch(e) { return null; }
-}
 
-// Fix It For Me endpoint
-app.post('/fix-request', async (req, res) => {
-  try {
-    const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, auditId } = req.body;
-    
+// ── Email helpers ─────────────────────────────────────────────────────────────
+const sendClientEmail = async (email, result, auditId) => {
+  const s = result.summary || {};
+  const col = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#f43f5e';
+  const plan = result.plan || 'free';
+  const planLabel = {
+    'free':'Free Snapshot','deep':'Deep Audit','pro-audit':'Pro Audit',
+    'pulse':'Pulse','pro':'Pro Plan','command':'Command'
+  }[plan] || 'Audit';
+
+  await resend.emails.send({
+    from: 'FixOps Reports <reports@fixops.io>',
+    to: email,
+    subject: `Your HubSpot Audit — Score ${s.overallScore}/100 · ${s.criticalCount} critical issues · ${planLabel}`,
+    html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f5f5f5;margin:0;padding:20px;">
+<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+<div style="background:#0a0a14;padding:28px 32px;text-align:center;">
+  <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">⚡ FixOps.io</div>
+  <div style="font-size:12px;color:rgba(255,255,255,.4);font-family:monospace;">HubSpot Portal Intelligence</div>
+</div>
+<div style="padding:32px;">
+  <div style="text-align:center;margin-bottom:28px;">
+    <div style="font-size:64px;font-weight:900;color:${col};line-height:1;">${s.overallScore}</div>
+    <div style="font-size:14px;color:#666;margin-top:4px;">Portal Health Score / 100</div>
+    <div style="display:inline-block;margin-top:8px;padding:4px 14px;background:${col}18;color:${col};border:1px solid ${col}44;border-radius:20px;font-size:12px;font-weight:700;">${planLabel}</div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:28px;text-align:center;">
+    <div style="background:#fff5f5;border-radius:8px;padding:14px;border:1px solid #fee2e2;">
+      <div style="font-size:24px;font-weight:800;color:#ef4444;">${s.criticalCount||0}</div>
+      <div style="font-size:11px;color:#666;margin-top:2px;">Critical</div>
+    </div>
+    <div style="background:#fffbeb;border-radius:8px;padding:14px;border:1px solid #fef3c7;">
+      <div style="font-size:24px;font-weight:800;color:#f59e0b;">${s.warningCount||0}</div>
+      <div style="font-size:11px;color:#666;margin-top:2px;">Warnings</div>
+    </div>
+    <div style="background:#f5f3ff;border-radius:8px;padding:14px;border:1px solid #ede9fe;">
+      <div style="font-size:24px;font-weight:800;color:#7c3aed;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
+      <div style="font-size:11px;color:#666;margin-top:2px;">Est. Waste/mo</div>
+    </div>
+  </div>
+  <div style="text-align:center;margin-bottom:24px;">
+    <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="display:inline-block;padding:14px 32px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">View Full Audit Results →</a>
+  </div>
+  <div style="background:#f9f9f9;border-radius:8px;padding:16px;font-size:13px;color:#666;line-height:1.6;">
+    <strong style="color:#333;">What's in your results:</strong><br>
+    Every issue found includes a dollar impact estimate, a step-by-step fix guide, and a one-click "Fix It For Me" button to send it to our team for a same-day quote.
+  </div>
+  ${plan === 'deep' || plan === 'pro-audit' ? `
+  <div style="margin-top:20px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;font-size:13px;color:#166534;">
+    <strong>Your strategy call:</strong> Matthew will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and send your written action plan.
+  </div>` : ''}
+</div>
+<div style="background:#f9f9f9;border-top:1px solid #eee;padding:20px 32px;text-align:center;font-size:12px;color:#999;">
+  <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.
+</div>
+</div></body></html>`
+  });
+};
+
+const notifyMatthew = async (result, auditId, plan) => {
+  const s = result.summary || {};
+  const pi = result.portalInfo || {};
+  const planLabel = plan || 'free';
+  await resend.emails.send({
+    from: 'FixOps Alerts <reports@fixops.io>',
+    to: FIXOPS_NOTIFY_EMAIL,
+    subject: `🔔 New Audit — ${pi.company} — Score ${s.overallScore}/100 — $${Number(s.monthlyWaste||0).toLocaleString()}/mo — ${planLabel}`,
+    html: `<h2>New Audit Complete</h2>
+      <p><strong>Company:</strong> ${pi.company}</p>
+      <p><strong>Email:</strong> ${pi.email}</p>
+      <p><strong>Plan:</strong> ${planLabel}</p>
+      <p><strong>Score:</strong> ${s.overallScore}/100</p>
+      <p><strong>Critical:</strong> ${s.criticalCount} · Warnings: ${s.warningCount}</p>
+      <p><strong>Est. waste:</strong> $${Number(s.monthlyWaste||0).toLocaleString()}/mo</p>
+      <p><strong>Records scanned:</strong> ${Number(s.recordsScanned||0).toLocaleString()}</p>
+      <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View Results</a></p>`
+  });
+
+  // Paid one-time — action required alert
+  if (['deep','deep-audit','pro-audit'].includes(plan)) {
+    const callLen = plan === 'pro-audit' ? '60-min' : '30-min';
     await resend.emails.send({
       from: 'FixOps Alerts <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
-      subject: `🛠 Fix It For Me — ${issueTitle?.substring(0,60)} — ${portalCompany}`,
-      html: `<div style="font-family:monospace;background:#000;color:#fff;padding:24px;border-radius:8px;max-width:600px">
-<h2 style="color:#a78bfa;margin:0 0 20px">🛠 Fix It For Me Request</h2>
-<table cellpadding="6" cellspacing="0">
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Company</td><td style="color:#fff;padding-left:16px">${portalCompany||'Unknown'}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Email</td><td style="color:#fff;padding-left:16px">${portalEmail||'Unknown'}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Audit ID</td><td style="color:rgba(255,255,255,.4);padding-left:16px;font-size:11px">${auditId||'Unknown'}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap">Dimension</td><td style="color:#a78bfa;padding-left:16px">${issueDimension||'Unknown'}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap;vertical-align:top">Issue</td><td style="color:#f43f5e;padding-left:16px;font-weight:700">${issueTitle||'Unknown'}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5);white-space:nowrap;vertical-align:top">Impact</td><td style="color:#f59e0b;padding-left:16px">${issueImpact||'Unknown'}</td></tr>
-</table>
-<div style="margin:20px 0;height:1px;background:#333"></div>
-<p style="color:#f59e0b;margin:0 0 12px">⚡ Reply to this email or book a call to scope and quote within 4 hours.</p>
-<a href="mailto:${portalEmail}" style="display:inline-block;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-right:8px">Reply to Client →</a>
-<a href="https://calendly.com/matthew-fixops/30min" style="display:inline-block;background:#333;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700">Book Call →</a>
-</div>`
-    });
-    
-    res.json({ success: true });
-  } catch(e) {
-    console.error('Fix request error:', e.message);
-    res.status(500).json({ error: e.message });
+      subject: `📞 ACTION REQUIRED: Schedule ${callLen} call — ${pi.company} paid ${plan === 'pro-audit' ? '$599' : '$299'}`,
+      html: `<h2>Paid audit complete — schedule their strategy call now</h2>
+        <p><strong>Company:</strong> ${pi.company}</p>
+        <p><strong>Email:</strong> ${pi.email}</p>
+        <p><strong>Plan:</strong> ${plan} (${plan === 'pro-audit' ? '$599 — 60-min call' : '$299 — 30-min call'})</p>
+        <p><strong>Score:</strong> ${s.overallScore}/100 · ${s.criticalCount} critical issues</p>
+        <p>Reply to <a href="mailto:${pi.email}">${pi.email}</a> to schedule their ${callLen} strategy call and send their written action plan.</p>
+        <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View their full audit results</a></p>`
+    }).catch(e => console.error('Paid notify error:', e.message));
   }
+};
+
+// ── Fix request email ─────────────────────────────────────────────────────────
+app.post('/fix-request', async (req, res) => {
+  try {
+    const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, auditId } = req.body;
+    await resend.emails.send({
+      from: 'FixOps Fix Request <reports@fixops.io>',
+      to: FIXOPS_NOTIFY_EMAIL,
+      subject: `🛠 Fix Request — ${issueTitle?.substring(0,60)} — ${portalCompany}`,
+      html: `<h2>Fix It For Me Request</h2>
+        <p><strong>Issue:</strong> ${issueTitle}</p>
+        <p><strong>Impact:</strong> ${issueImpact}</p>
+        <p><strong>Dimension:</strong> ${issueDimension}</p>
+        <p><strong>Company:</strong> ${portalCompany}</p>
+        <p><strong>Email:</strong> ${portalEmail}</p>
+        <p><strong>Audit ID:</strong> ${auditId}</p>
+        <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View full audit</a></p>`
+    });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Health
+// ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
   let dbOk = false;
   try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
-  res.json({ status: 'ok', service: 'FixOps API', version: '4.0.0', db: dbOk ? 'connected' : 'error', uptime: Math.round(process.uptime()) + 's' });
+  res.json({ status: 'ok', db: dbOk ? 'connected' : 'error', version: '5.0.0', ts: new Date().toISOString() });
 });
 
-// Auth URL
-// Auth URL — supports both GET (free audit) and POST (paid plans)
+// ── Stripe Webhook ────────────────────────────────────────────────────────────
+app.post('/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+  } catch(err) {
+    console.error('Webhook signature error:', err.message);
+    return res.status(400).json({ error: `Webhook Error: ${err.message}` });
+  }
+
+  console.log(`Stripe webhook: ${event.type}`);
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const email = session.customer_details?.email || session.metadata?.email;
+    const planKey = STRIPE_PRICE_MAP[session.metadata?.price_id] || 'paid';
+
+    console.log(`Payment complete: ${email} — ${planKey}`);
+
+    // Upsert customer record
+    if (email) {
+      await db.query(`
+        INSERT INTO customers (email, plan, plan_status, stripe_customer, updated_at)
+        VALUES ($1, $2, 'active', $3, NOW())
+        ON CONFLICT (email) DO UPDATE
+        SET plan = $2, plan_status = 'active', stripe_customer = $3, updated_at = NOW()
+      `, [email, planKey, session.customer]).catch(e => console.error('Customer upsert:', e.message));
+    }
+  }
+
+  if (event.type === 'customer.subscription.deleted' || event.type === 'customer.subscription.updated') {
+    const sub = event.data.object;
+    const status = sub.status;
+    if (sub.customer) {
+      await db.query(`
+        UPDATE customers SET plan_status = $1, updated_at = NOW()
+        WHERE stripe_customer = $2
+      `, [status, sub.customer]).catch(e => console.error('Sub update:', e.message));
+    }
+  }
+
+  if (event.type === 'invoice.payment_failed') {
+    const invoice = event.data.object;
+    const custId = invoice.customer;
+    const custRes = await db.query('SELECT email FROM customers WHERE stripe_customer = $1', [custId]).catch(() => ({ rows: [] }));
+    const custEmail = custRes.rows[0]?.email;
+
+    if (custEmail) {
+      await resend.emails.send({
+        from: 'FixOps Billing <reports@fixops.io>',
+        to: FIXOPS_NOTIFY_EMAIL,
+        subject: `⚠️ Payment Failed — ${custEmail}`,
+        html: `<p>Payment failed for customer: ${custEmail}<br>Stripe customer: ${custId}</p>`
+      }).catch(() => {});
+    }
+  }
+
+  res.json({ received: true });
+});
+
+// ── Auth URL — GET (free) and POST (paid) ─────────────────────────────────────
 const buildAuthUrl = (req, res, params) => {
   try {
-    const { email='', company='', plan='free', paid=false } = params;
+    const { email = '', company = '', plan = 'free', paid = false } = params;
     const codeVerifier  = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
@@ -111,24 +353,28 @@ const buildAuthUrl = (req, res, params) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 };
 
-app.get('/auth/url', (req, res) => buildAuthUrl(req, res, req.query));
+app.get('/auth/url',  (req, res) => buildAuthUrl(req, res, req.query));
 app.post('/auth/url', (req, res) => buildAuthUrl(req, res, req.body));
 
-// Callback
+// ── OAuth callback ────────────────────────────────────────────────────────────
 app.get('/auth/callback', async (req, res) => {
   const { code, state, error } = req.query;
-  if (error) return res.redirect(`${FRONTEND_URL}?audit_error=${encodeURIComponent(error)}`);
+  if (error) return res.redirect(`${FRONTEND_URL}/?error=${encodeURIComponent(error)}`);
+
   const pending = pendingAudits.get(state);
-  if (!pending) return res.redirect(`${FRONTEND_URL}?audit_error=session_expired`);
+  if (!pending) return res.redirect(`${FRONTEND_URL}/?error=session_expired`);
   pendingAudits.delete(state);
 
   const auditId = crypto.randomBytes(12).toString('hex');
 
   try {
     const body = new URLSearchParams({
-      grant_type: 'authorization_code', client_id: HUBSPOT_CLIENT_ID,
-      client_secret: HUBSPOT_CLIENT_SECRET, redirect_uri: HUBSPOT_REDIRECT_URI,
-      code, code_verifier: pending.codeVerifier
+      grant_type: 'authorization_code',
+      client_id: HUBSPOT_CLIENT_ID,
+      client_secret: HUBSPOT_CLIENT_SECRET,
+      redirect_uri: HUBSPOT_REDIRECT_URI,
+      code,
+      code_verifier: pending.codeVerifier,
     });
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
 
@@ -142,135 +388,168 @@ app.get('/auth/callback', async (req, res) => {
       console.log('Standard token success');
     }
 
-    // Save running status immediately
     await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
 
-    // Redirect user to confirm page BEFORE starting audit
-    // Paid users get plan info passed through so confirm page shows right messaging
+    // Store token for Pulse re-scans
+    if (pending.email && ['pulse','pro','command'].includes(pending.plan)) {
+      await db.query(`
+        INSERT INTO customers (email, company, plan, plan_status, portal_token, last_audit_id, last_audit_at, updated_at)
+        VALUES ($1, $2, $3, 'active', $4, $5, NOW(), NOW())
+        ON CONFLICT (email) DO UPDATE
+        SET portal_token = $4, last_audit_id = $5, last_audit_at = NOW(),
+            plan = $3, company = $2, updated_at = NOW()
+      `, [pending.email, pending.company, pending.plan, tokenRes.data.access_token, auditId])
+        .catch(e => console.error('Customer token save:', e.message));
+    }
+
     const confirmUrl = `${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email)}&id=${auditId}&plan=${encodeURIComponent(pending.plan||'free')}&paid=${pending.paid?'1':'0'}`;
     res.redirect(confirmUrl);
 
-    // Use setImmediate to truly detach audit from the HTTP request lifecycle
-    // This prevents Railway from killing the process when the response closes
     const accessToken = tokenRes.data.access_token;
-    const auditMeta = { ...pending, storageDays: pending.plan === 'pro-audit' ? 365 : (pending.plan && pending.plan !== 'free' ? 90 : 7) };
+    const auditMeta   = { ...pending };
     const auditIdCopy = auditId;
 
     setImmediate(async () => {
-      console.log(`[${auditIdCopy}] Background audit starting (detached from HTTP request)...`);
+      console.log(`[${auditIdCopy}] Background audit starting — plan: ${auditMeta.plan}`);
       try {
         const result = await runFullAudit(accessToken, auditIdCopy, auditMeta);
-        // Save running status while sending email
-        await db.query(
-          'INSERT INTO audit_results (id, data) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET data = $2',
-          [auditIdCopy, JSON.stringify({ status: 'running', progress: 99, currentTask: 'Sending your report by email…' })]
-        ).catch(()=>{});
+        await saveResult(auditIdCopy, { status: 'running', progress: 99, currentTask: 'Sending your report...' });
 
         if (auditMeta.email) {
           await sendClientEmail(auditMeta.email, result, auditIdCopy);
-          console.log(`[${auditIdCopy}] ✅ Client email sent to ${auditMeta.email}`);
+          console.log(`[${auditIdCopy}] ✅ Client email sent`);
         }
-        if (FIXOPS_NOTIFY_EMAIL) {
-          await notifyMatthew(result, auditIdCopy, auditMeta.plan);
-          console.log(`[${auditIdCopy}] ✅ Matthew notified`);
+        await notifyMatthew(result, auditIdCopy, auditMeta.plan);
+
+        // Update customer last audit
+        if (auditMeta.email) {
+          await db.query(`
+            UPDATE customers SET last_audit_id = $1, last_audit_at = NOW(), updated_at = NOW()
+            WHERE email = $2
+          `, [auditIdCopy, auditMeta.email]).catch(() => {});
+
+          // Save to audit history
+          const custRes = await db.query('SELECT id FROM customers WHERE email = $1', [auditMeta.email]).catch(() => ({ rows: [] }));
+          if (custRes.rows[0]) {
+            await db.query(
+              'INSERT INTO audit_history (customer_id, audit_id, plan, score) VALUES ($1, $2, $3, $4)',
+              [custRes.rows[0].id, auditIdCopy, auditMeta.plan, result.summary?.overallScore || 0]
+            ).catch(() => {});
+          }
         }
 
-        // For paid one-time audits — send Matthew a separate action required email
-        if ((auditMeta.plan === 'deep' || auditMeta.plan === 'deep-audit' || auditMeta.plan === 'pro-audit') && FIXOPS_NOTIFY_EMAIL) {
-          const callLength = auditMeta.plan === 'pro-audit' ? '60-min' : '30-min';
-          await resend.emails.send({
-            from: 'FixOps Alerts <reports@fixops.io>',
-            to: FIXOPS_NOTIFY_EMAIL,
-            subject: `📞 ACTION: Schedule ${callLength} call — ${auditMeta.company} paid ${auditMeta.plan === 'pro-audit' ? '$599' : '$299'}`,
-            html: `<h2>Paid audit complete — schedule their strategy call</h2>
-              <p><strong>Company:</strong> ${auditMeta.company}</p>
-              <p><strong>Email:</strong> ${auditMeta.email}</p>
-              <p><strong>Plan:</strong> ${auditMeta.plan} (${auditMeta.plan === 'pro-audit' ? '$599 — 60-min call' : '$299 — 30-min call'})</p>
-              <p><strong>Score:</strong> ${result.summary?.overallScore}/100</p>
-              <p><strong>Critical issues:</strong> ${result.summary?.criticalCount}</p>
-              <p><strong>Action:</strong> Reply to ${auditMeta.email} to schedule their ${callLength} strategy call and send their written action plan.</p>
-              <p><a href="https://fixops.io/results.html?id=${auditIdCopy}">View their audit results</a></p>`
-          }).catch(e => console.error('Paid audit notify error:', e.message));
-        }
-
-        // NOW save complete status after emails sent
-        await saveResult(auditIdCopy, { ...result, status: 'complete', plan: auditMeta.plan||'free', storageDays: auditMeta.storageDays||7 });
-        console.log(`[${auditIdCopy}] ✅ Fully complete — saved to DB`);
+        await saveResult(auditIdCopy, { ...result, status: 'complete', plan: auditMeta.plan || 'free' });
+        console.log(`[${auditIdCopy}] ✅ Fully complete`);
       } catch(e) {
         console.error(`[${auditIdCopy}] Audit error:`, e.message);
-        await saveResult(auditIdCopy, { status: 'error', message: 'Audit encountered an error. Matthew has been notified and will follow up.' }).catch(()=>{});
-        // Try to notify Matthew of the failure
-        if (FIXOPS_NOTIFY_EMAIL) {
-          resend.emails.send({
-            from: 'FixOps Alerts <reports@fixops.io>',
-            to: FIXOPS_NOTIFY_EMAIL,
-            subject: `⚠️ Audit Failed — ${auditMeta.company} — ${auditIdCopy}`,
-            html: `<p>Audit failed for ${auditMeta.email} (${auditMeta.company})<br>Error: ${e.message}<br>Audit ID: ${auditIdCopy}</p>`
-          }).catch(()=>{});
-        }
+        await saveResult(auditIdCopy, { status: 'error', message: 'Audit failed. Matthew has been notified.' }).catch(() => {});
+        await resend.emails.send({
+          from: 'FixOps Alerts <reports@fixops.io>',
+          to: FIXOPS_NOTIFY_EMAIL,
+          subject: `⚠️ Audit Failed — ${auditMeta.company}`,
+          html: `<p>Audit failed: ${auditMeta.email} | ${auditMeta.plan}<br>Error: ${e.message}<br>Audit ID: ${auditIdCopy}</p>`
+        }).catch(() => {});
       }
     });
 
   } catch(err) {
     console.error('Callback error:', err.response?.data || err.message);
-    if (!res.headersSent) res.redirect(`${FRONTEND_URL}/confirm.html?email=${encodeURIComponent(pending.email||'')}&id=${auditId}`);
+    if (!res.headersSent) res.redirect(`${FRONTEND_URL}/confirm.html?error=auth_failed&id=${auditId}`);
   }
 });
 
-// Status polling
+// ── Audit status ──────────────────────────────────────────────────────────────
 app.get('/audit/status/:id', async (req, res) => {
-  const result = await getResult(req.params.id);
-  if (!result) return res.status(404).json({ error: 'Audit not found', id: req.params.id });
-  res.json(result);
-});
-
-
-// Private App Full Audit endpoint
-app.post('/audit/private', async (req, res) => {
   try {
-    const { privateToken, auditId, email, company } = req.body;
-    if (!privateToken) return res.status(400).json({ error: 'Private app token required' });
-
-    // Create new audit ID for the full audit
-    const fullAuditId = crypto.randomBytes(12).toString('hex');
-
-    // Save running status immediately
-    await saveResult(fullAuditId, { status: 'running', progress: 5, currentTask: 'Starting full audit with Private App token...' });
-
-    // Return the new audit ID immediately
-    res.json({ success: true, auditId: fullAuditId });
-
-    // Run full audit in background using private app token directly
-    try {
-      const meta = { email, company, plan: 'full' };
-      const result = await runFullAudit(privateToken, fullAuditId, meta);
-      await new Promise(r => setTimeout(r, 2000));
-      await saveResult(fullAuditId, result);
-      console.log(`✅ Private app audit saved: ${fullAuditId} | Score: ${result.summary?.overallScore}`);
-      if (email) sendClientEmail(email, result, fullAuditId).catch(e => console.error('Email:', e.message));
-      if (FIXOPS_NOTIFY_EMAIL) notifyMatthew(result, fullAuditId).catch(e => console.error('Notify:', e.message));
-    } catch(e) {
-      console.error('Private audit error:', e.message);
-      await saveResult(fullAuditId, { status: 'error', message: 'Full audit failed. Please check your Private App token has the required scopes.' });
-    }
-
-  } catch(e) {
-    console.error('Private audit endpoint error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
+    const data = await getResult(req.params.id);
+    if (!data) return res.status(404).json({ error: 'not_found', message: 'Audit not found or expired' });
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Clean issue text — remove backticks and chars that break JS template literals
-function cleanText(obj) {
-  if(typeof obj === 'string') return obj.replace(/`/g,"'").replace(/\\/g,'');
-  if(Array.isArray(obj)) return obj.map(cleanText);
-  if(obj && typeof obj === 'object') {
-    const out = {};
-    for(const k of Object.keys(obj)) out[k] = cleanText(obj[k]);
-    return out;
+// ── Customer history ──────────────────────────────────────────────────────────
+app.get('/customer/history', async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    if (!custRes.rows[0]) return res.json({ customer: null, history: [] });
+    const hist = await db.query(
+      'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20',
+      [custRes.rows[0].id]
+    );
+    res.json({ customer: custRes.rows[0], history: hist.rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Pulse re-scan trigger (internal) ─────────────────────────────────────────
+app.post('/audit/rescan', async (req, res) => {
+  const { secret, email } = req.body;
+  if (secret !== process.env.RESCAN_SECRET) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const custRes = await db.query(
+      'SELECT * FROM customers WHERE email = $1 AND plan IN ($2,$3,$4) AND plan_status = $5 AND portal_token IS NOT NULL',
+      [email, 'pulse', 'pro', 'command', 'active']
+    );
+    if (!custRes.rows[0]) return res.status(404).json({ error: 'customer not found or not eligible' });
+    const cust = custRes.rows[0];
+    await triggerRescan(cust);
+    res.json({ success: true, message: `Rescan triggered for ${email}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+const triggerRescan = async (customer) => {
+  const auditId = crypto.randomBytes(12).toString('hex');
+  await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Weekly monitoring scan starting...' });
+
+  setImmediate(async () => {
+    console.log(`[${auditId}] Weekly rescan for ${customer.email}`);
+    try {
+      const meta = { email: customer.email, company: customer.company, plan: customer.plan };
+      const result = await runFullAudit(customer.portal_token, auditId, meta);
+
+      await sendClientEmail(customer.email, result, auditId);
+      await notifyMatthew(result, auditId, customer.plan);
+
+      await db.query(`
+        UPDATE customers SET last_audit_id = $1, last_audit_at = NOW(), updated_at = NOW() WHERE id = $2
+      `, [auditId, customer.id]);
+
+      await db.query(
+        'INSERT INTO audit_history (customer_id, audit_id, plan, score) VALUES ($1, $2, $3, $4)',
+        [customer.id, auditId, customer.plan, result.summary?.overallScore || 0]
+      );
+
+      await saveResult(auditId, { ...result, status: 'complete', plan: customer.plan });
+      console.log(`[${auditId}] ✅ Weekly rescan complete for ${customer.email}`);
+    } catch(e) {
+      console.error(`[${auditId}] Rescan error:`, e.message);
+    }
+  });
+};
+
+// ── Weekly Pulse cron — runs every Monday 9am ET ──────────────────────────────
+cron.schedule('0 14 * * 1', async () => {
+  console.log('🕐 Weekly Pulse scan starting...');
+  try {
+    const custRes = await db.query(`
+      SELECT * FROM customers
+      WHERE plan IN ('pulse','pro','command')
+        AND plan_status = 'active'
+        AND portal_token IS NOT NULL
+        AND (last_audit_at IS NULL OR last_audit_at < NOW() - INTERVAL '6 days')
+    `);
+    console.log(`Found ${custRes.rows.length} customers to rescan`);
+    for (const customer of custRes.rows) {
+      await triggerRescan(customer);
+      await new Promise(r => setTimeout(r, 5000)); // 5s delay between scans
+    }
+  } catch(e) {
+    console.error('Cron error:', e.message);
   }
-  return obj;
-}
+}, { timezone: 'America/New_York' });
+
+
 
 async function runFullAudit(token, auditId, meta) {
   // Works with both MCP OAuth tokens AND HubSpot Private App tokens
@@ -326,38 +605,10 @@ async function runFullAudit(token, auditId, meta) {
 
   console.log(`[${auditId}] Starting full portal data fetch...`);
 
-  // ── Tier-based scan configuration ──────────────────────────────────────
-  // free     : Snapshot — standard objects, up to 1k contacts
-  // deep     : Deep Audit ($299) — all objects, unlimited records
-  // pro-audit: Pro Audit ($599) — all objects + extended checks
-  // pulse    : Pulse ($399/mo) — all objects, unlimited, weekly
-  // pro      : Pro ($699/mo) — all objects, daily
-  // command  : Command ($1,299/mo) — all objects, unlimited
-  const plan = meta.plan || 'free';
-  const isFree     = plan === 'free';
-  const isDeep     = plan === 'deep' || plan === 'deep-audit';
-  const isProAudit = plan === 'pro-audit';
-  const isPulse    = plan === 'pulse';
-  const isProPlan  = plan === 'pro';
-  const isCommand  = plan === 'command';
-  const isPaid     = !isFree;
-
-  // Record limits
-  const contactLimit = isFree ? 1000   : 999999;
-  const dealLimit    = isFree ? 1000   : 999999;
-  const ticketLimit  = isFree ? 500    : 999999;
-  const companyLimit = isFree ? 500    : 999999;
-  const smallLimit   = isFree ? 100    : 999999;
-
-  // Result storage duration (days) — saved in result so DB cleanup respects it
-  const storageDays = isProAudit ? 365 : (isPaid ? 90 : 7);
-
-  // Extended checks — Pro Audit and Pro/Command plans only
-  const runExtended = isProAudit || isProPlan || isCommand;
-
-  // Custom objects — Pro and Command only (needs full OAuth when available)
-  const runCustomObjects = isProPlan || isCommand;
-
+  // ── Tier-based scan config ───────────────────────────────────────────────
+  const cfg = getPlanConfig(meta.plan);
+  const { isFree, isPaid, contactLimit, dealLimit, ticketLimit, companyLimit, smallLimit, storageDays, runExtended } = cfg;
+  const plan = cfg.plan;
   console.log(`[${auditId}] Plan: ${plan} | contacts=${contactLimit} | storage=${storageDays}d | extended=${runExtended}`);
 
   const [contactsR, dealsR, ticketsR] = await Promise.all([
@@ -906,152 +1157,6 @@ async function runFullAudit(token, auditId, meta) {
 }
 
 // ── Emails ────────────────────────────────────────────────────
-async function sendClientEmail(to, data, auditId) {
-  const {summary,issues,portalInfo} = data;
-  const col = summary.overallScore>=85?'#10b981':summary.overallScore>=70?'#10b981':summary.overallScore>=55?'#f59e0b':'#f43f5e';
-  const top = issues.slice(0,4);
 
-  await resend.emails.send({
-    from:'FixOps Reports <reports@fixops.io>', to,
-    subject:`Your HubSpot Audit — Score ${summary.overallScore}/100 · ${summary.criticalCount} critical issues · $${summary.monthlyWaste}/mo in waste found`,
-    html:`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#000000;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#000;padding:48px 20px;">
-<tr><td align="center">
-<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%">
-
-<!-- Logo -->
-<tr><td style="padding:0 0 32px;text-align:center">
-  <table cellpadding="0" cellspacing="0" align="center">
-    <tr>
-      <td style="background:linear-gradient(135deg,#7c3aed,#5b21b6);border-radius:10px;width:38px;height:38px;text-align:center;line-height:38px;font-size:20px;vertical-align:middle">⚡</td>
-      <td style="padding-left:10px;font-size:22px;font-weight:900;color:#ffffff;vertical-align:middle">Fix<span style="color:#a78bfa">Ops</span><span style="color:rgba(255,255,255,0.3);font-size:14px;font-weight:400">.io</span></td>
-    </tr>
-  </table>
-</td></tr>
-
-<!-- Score Card -->
-<tr><td style="background:linear-gradient(145deg,rgba(124,58,237,0.3) 0%,rgba(91,33,182,0.15) 50%,rgba(0,0,0,0) 100%);border:1px solid rgba(124,58,237,0.4);border-radius:20px;padding:40px 32px;text-align:center;margin-bottom:16px">
-  <p style="margin:0 0 8px;font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:3px;text-transform:uppercase;font-weight:600">FixOps Portal Health Score</p>
-  <p style="margin:0;font-size:80px;font-weight:900;color:${col};letter-spacing:-4px;line-height:1">${summary.overallScore}</p>
-  <p style="margin:6px 0 0;font-size:14px;color:rgba(255,255,255,0.4)">/100 &mdash; <strong style="color:${col}">${summary.grade}</strong></p>
-  <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px">
-    <tr>
-      <td style="text-align:center;padding:16px 8px;background:rgba(244,63,94,0.12);border-radius:12px;margin-right:6px">
-        <p style="margin:0;font-size:28px;font-weight:900;color:#f43f5e">${summary.criticalCount}</p>
-        <p style="margin:4px 0 0;font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px">Critical</p>
-      </td>
-      <td width="8"></td>
-      <td style="text-align:center;padding:16px 8px;background:rgba(245,158,11,0.12);border-radius:12px">
-        <p style="margin:0;font-size:28px;font-weight:900;color:#f59e0b">${summary.warningCount}</p>
-        <p style="margin:4px 0 0;font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px">Warnings</p>
-      </td>
-      <td width="8"></td>
-      <td style="text-align:center;padding:16px 8px;background:rgba(167,139,250,0.12);border-radius:12px">
-        <p style="margin:0;font-size:28px;font-weight:900;color:#a78bfa">$${summary.monthlyWaste.toLocaleString()}</p>
-        <p style="margin:4px 0 0;font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px">Monthly Waste</p>
-      </td>
-      <td width="8"></td>
-      <td style="text-align:center;padding:16px 8px;background:rgba(16,185,129,0.12);border-radius:12px">
-        <p style="margin:0;font-size:28px;font-weight:900;color:#10b981">${summary.checksRun}</p>
-        <p style="margin:4px 0 0;font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px">Checks Run</p>
-      </td>
-    </tr>
-  </table>
-</td></tr>
-
-<!-- Spacer -->
-<tr><td height="24"></td></tr>
-
-<!-- Issues Header -->
-<tr><td>
-  <p style="margin:0 0 16px;font-size:14px;font-weight:700;color:#ffffff">🔍 Top Issues Found In Your Portal</p>
-
-  ${top.map(issue=>{
-    const sc = issue.severity==='critical'?'#f43f5e':issue.severity==='warning'?'#f59e0b':'#a78bfa';
-    const scBg = issue.severity==='critical'?'rgba(244,63,94,0.08)':issue.severity==='warning'?'rgba(245,158,11,0.08)':'rgba(167,139,250,0.08)';
-    const scBorder = issue.severity==='critical'?'rgba(244,63,94,0.25)':issue.severity==='warning'?'rgba(245,158,11,0.25)':'rgba(167,139,250,0.25)';
-    return `
-  <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:10px">
-  <tr>
-    <td width="3" style="background:${sc};border-radius:2px">&nbsp;</td>
-    <td width="12"></td>
-    <td style="background:${scBg};border:1px solid ${scBorder};border-left:none;border-radius:0 12px 12px 0;padding:16px 18px">
-      <table width="100%" cellpadding="0" cellspacing="0">
-        <tr>
-          <td><span style="font-size:9px;font-weight:700;color:${sc};text-transform:uppercase;letter-spacing:1.5px;background:${scBg};border:1px solid ${scBorder};padding:3px 8px;border-radius:4px">${issue.severity}</span></td>
-          <td align="right" style="font-size:11px;color:rgba(255,255,255,0.3);font-family:monospace">${issue.dimension}</td>
-        </tr>
-        <tr><td colspan="2" height="8"></td></tr>
-        <tr><td colspan="2"><p style="margin:0;font-size:14px;font-weight:700;color:#ffffff;line-height:1.35">${issue.title}</p></td></tr>
-        <tr><td colspan="2" height="6"></td></tr>
-        <tr><td colspan="2"><p style="margin:0;font-size:12.5px;color:rgba(255,255,255,0.5);line-height:1.6;font-weight:300">${issue.description.substring(0,150)}${issue.description.length>150?'…':''}</p></td></tr>
-        <tr><td colspan="2" height="10"></td></tr>
-        <tr><td colspan="2"><p style="margin:0;font-size:11px;color:#f59e0b;font-family:monospace">💸 ${issue.impact}</p></td></tr>
-      </table>
-    </td>
-  </tr>
-  </table>`;
-  }).join('')}
-
-</td></tr>
-
-<!-- Spacer -->
-<tr><td height="16"></td></tr>
-
-<!-- CTA Box -->
-<tr><td style="background:linear-gradient(135deg,rgba(124,58,237,0.2),rgba(91,33,182,0.1));border:1px solid rgba(124,58,237,0.3);border-radius:16px;padding:32px;text-align:center">
-  <p style="margin:0 0 8px;font-size:18px;font-weight:800;color:#ffffff;letter-spacing:-0.5px">Ready to fix these issues?</p>
-  <p style="margin:0 0 24px;font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6">Matthew will personally review your audit and send a prioritized fix plan with transparent flat-rate pricing. Or book a call to go through it together.</p>
-  <table cellpadding="0" cellspacing="0" align="center">
-    <tr>
-      <td style="background:#7c3aed;border-radius:10px;padding:14px 28px;text-align:center">
-        <a href="${process.env.FRONTEND_URL||"https://fixops.io"}/results.html?id=${auditId}" style="color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;display:block">🔍 View Your Full Results ↗</a>
-      </td>
-    </tr>
-  </table>
-  <p style="margin:12px 0 0;font-size:12px;color:rgba(255,255,255,0.3)">Or book a free strategy call: <a href="https://calendly.com/matthew-fixops/30min" style="color:#a78bfa">calendly.com/matthew-fixops/30min</a></p>
-  <p style="margin:8px 0 0;font-size:12px;color:rgba(255,255,255,0.25)">matthew@fixops.io · fixops.io</p>
-</td></tr>
-
-<!-- Footer -->
-<tr><td style="padding:28px 0 0;text-align:center;border-top:1px solid #18182a;margin-top:28px">
-  <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.2)">FixOps.io &middot; HubSpot Systems. Fixed. &middot; <a href="https://fixops.io" style="color:rgba(255,255,255,0.3)">fixops.io</a></p>
-  <p style="margin:6px 0 0;font-size:11px;color:rgba(255,255,255,0.15)">You\'re receiving this because you ran a free portal audit at fixops.io</p>
-</td></tr>
-
-</table>
-</td></tr></table>
-</body></html>`
-  });
-  console.log(`Client email sent: ${to}`);
-}
-
-async function notifyMatthew(data, auditId) {
-  const {summary,portalInfo} = data;
-  await resend.emails.send({
-    from:'FixOps Alerts <reports@fixops.io>', to:FIXOPS_NOTIFY_EMAIL,
-    subject:`🔔 New Audit — ${portalInfo.company} — Score ${summary.overallScore}/100 — $${summary.monthlyWaste}/mo waste`,
-    html:`<div style="font-family:monospace;background:#000;color:#fff;padding:24px;border-radius:8px;max-width:600px">
-<h2 style="color:#a78bfa;margin:0 0 20px">⚡ New FixOps Audit Completed</h2>
-<table cellpadding="4" cellspacing="0">
-<tr><td style="color:rgba(255,255,255,.5)">Company</td><td style="color:#fff;padding-left:16px">${portalInfo.company}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Email</td><td style="color:#fff;padding-left:16px">${portalInfo.email}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Plan</td><td style="color:#a78bfa;padding-left:16px">${portalInfo.plan}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Score</td><td style="color:${summary.overallScore>=70?'#10b981':'#f43f5e'};padding-left:16px;font-weight:700">${summary.overallScore}/100 — ${summary.grade}</td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Issues</td><td style="padding-left:16px"><span style="color:#f43f5e">${summary.criticalCount} critical</span> · <span style="color:#f59e0b">${summary.warningCount} warnings</span> · <span style="color:#a78bfa">${summary.infoCount||0} info</span></td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Monthly Waste</td><td style="color:#f59e0b;padding-left:16px;font-weight:700">$${summary.monthlyWaste.toLocaleString()}/mo</td></tr>
-<tr><td style="color:rgba(255,255,255,.5)">Portal Size</td><td style="color:rgba(255,255,255,.7);padding-left:16px">${summary.totalContacts} contacts · ${summary.totalDeals} deals · ${summary.totalWorkflows} workflows</td></tr>
-</table>
-<div style="margin:20px 0;height:1px;background:#333"></div>
-<p style="color:#f59e0b;margin:0 0 12px">⚡ Follow up within a few hours — this is a hot lead.</p>
-<a href="${process.env.FRONTEND_URL||'https://fixops.io'}/results.html?id=${auditId}" style="display:inline-block;background:#7c3aed;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700;margin-right:8px">View Results →</a>
-<a href="https://calendly.com/matthew-fixops/30min" style="display:inline-block;background:#333;color:#fff;padding:10px 20px;border-radius:8px;text-decoration:none;font-weight:700">Book Call →</a>
-</div>`
-  });
-  console.log('Matthew notified');
-}
-
-const port = PORT||3000;
-initDB().then(()=>app.listen(port,()=>console.log(`⚡ FixOps API v4 running on port ${port}`)));
+// ── Start ────────────────────────────────────────────────────────────────────
+initDb().then(() => app.listen(PORT, () => console.log(`⚡ FixOps API v5 running on port ${PORT}`)));
