@@ -164,58 +164,158 @@ const cleanText = (obj) => {
 // ── Email helpers ─────────────────────────────────────────────────────────────
 const sendClientEmail = async (email, result, auditId) => {
   const s = result.summary || {};
+  const pi = result.portalInfo || {};
+  const issues = result.issues || [];
+  const scores = result.scores || {};
   const col = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#f43f5e';
   const plan = result.plan || 'free';
   const planLabel = {
     'free':'Free Snapshot','deep':'Deep Audit','pro-audit':'Pro Audit',
     'pulse':'Pulse','pro':'Pro Plan','command':'Command'
   }[plan] || 'Audit';
+  const company = pi.company || 'Your Portal';
+  const ps = pi.portalStats || {};
+  const grade = s.overallScore >= 85 ? 'Excellent' : s.overallScore >= 70 ? 'Good' : s.overallScore >= 55 ? 'Needs Attention' : 'Critical';
+
+  // Get top 3 critical issues for preview
+  const criticals = issues.filter(i => i.severity === 'critical').slice(0, 3);
+  const warnings = issues.filter(i => i.severity === 'warning').slice(0, 2);
+  const previewIssues = [...criticals, ...warnings].slice(0, 4);
+
+  // Build dimension score bars
+  const dims = [
+    ['Data Integrity', scores.dataIntegrity],
+    ['Automation', scores.automationHealth],
+    ['Pipeline', scores.pipelineIntegrity],
+    ['Configuration', scores.configSecurity],
+    ['Reporting', scores.reportingQuality],
+    ['Team Adoption', scores.teamAdoption],
+  ].filter(d => d[1] !== undefined);
+
+  const dimBarsHtml = dims.slice(0,6).map(([name, score]) => {
+    const sc = score || 0;
+    const bc = sc >= 80 ? '#10b981' : sc >= 60 ? '#f59e0b' : '#ef4444';
+    const pct = Math.round(sc);
+    return `<tr>
+      <td style="font-size:12px;color:#555;padding:4px 0;width:140px;">${name}</td>
+      <td style="padding:4px 8px;">
+        <div style="background:#f0f0f0;border-radius:4px;height:8px;width:160px;">
+          <div style="background:${bc};height:8px;border-radius:4px;width:${pct}%;"></div>
+        </div>
+      </td>
+      <td style="font-size:12px;font-weight:700;color:${bc};padding:4px 0;text-align:right;width:36px;">${pct}</td>
+    </tr>`;
+  }).join('');
+
+  // Build issue preview
+  const issuePreviewHtml = previewIssues.length > 0 ? previewIssues.map(i => {
+    const ic = i.severity === 'critical' ? '#ef4444' : '#f59e0b';
+    const ib = i.severity === 'critical' ? '#fff5f5' : '#fffbeb';
+    const ib2 = i.severity === 'critical' ? '#fee2e2' : '#fef3c7';
+    const label = i.severity === 'critical' ? 'CRITICAL' : 'WARNING';
+    const title = i.title || '';
+    const impact = i.impact || '';
+    return `<div style="background:${ib};border:1px solid ${ib2};border-left:3px solid ${ic};border-radius:6px;padding:10px 14px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+        <span style="font-size:9px;font-weight:700;color:${ic};letter-spacing:1px;">${label}</span>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:#111;margin-bottom:3px;">${title.length > 80 ? title.substring(0,80)+'…' : title}</div>
+      ${impact ? `<div style="font-size:11px;color:#666;">${impact.length > 100 ? impact.substring(0,100)+'…' : impact}</div>` : ''}
+    </div>`;
+  }).join('') : '';
+
+  const moreCount = issues.length - previewIssues.length;
 
   await resend.emails.send({
     from: 'FixOps Reports <reports@fixops.io>',
     to: email,
-    subject: `Your HubSpot Audit — Score ${s.overallScore}/100 · ${s.criticalCount} critical issues · ${planLabel}`,
-    html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f5f5f5;margin:0;padding:20px;">
-<div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
-<div style="background:#0a0a14;padding:28px 32px;text-align:center;">
-  <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:4px;">⚡ FixOps.io</div>
-  <div style="font-size:12px;color:rgba(255,255,255,.4);font-family:monospace;">HubSpot Portal Intelligence</div>
+    subject: s.criticalCount > 0
+      ? `⚠️ ${company} — ${s.criticalCount} critical issue${s.criticalCount!==1?'s':''} found · Score ${s.overallScore}/100`
+      : `✅ ${company} — Portal audit complete · Score ${s.overallScore}/100`,
+    html: `<!DOCTYPE html><html><body style="font-family:system-ui,-apple-system,sans-serif;background:#f0f0f5;margin:0;padding:24px 12px;">
+<div style="max-width:580px;margin:0 auto;">
+
+<!-- Header -->
+<div style="background:#08061a;border-radius:16px 16px 0 0;padding:28px 32px;text-align:center;">
+  <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.5px;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
+  <div style="font-size:11px;color:rgba(255,255,255,.35);font-family:monospace;letter-spacing:2px;margin-top:4px;text-transform:uppercase;">HubSpot Portal Intelligence</div>
 </div>
-<div style="padding:32px;">
-  <div style="text-align:center;margin-bottom:28px;">
-    <div style="font-size:64px;font-weight:900;color:${col};line-height:1;">${s.overallScore}</div>
-    <div style="font-size:14px;color:#666;margin-top:4px;">Portal Health Score / 100</div>
-    <div style="display:inline-block;margin-top:8px;padding:4px 14px;background:${col}18;color:${col};border:1px solid ${col}44;border-radius:20px;font-size:12px;font-weight:700;">${planLabel}</div>
+
+<!-- Score hero -->
+<div style="background:#fff;padding:32px 32px 24px;text-align:center;border-left:1px solid #eee;border-right:1px solid #eee;">
+  <div style="font-size:13px;color:#888;font-weight:500;margin-bottom:8px;">Portal Health Score · ${company}</div>
+  <div style="font-size:80px;font-weight:900;color:${col};line-height:1;letter-spacing:-3px;">${s.overallScore}</div>
+  <div style="font-size:14px;color:#999;margin-top:4px;">out of 100 · ${grade}</div>
+  <div style="display:inline-block;margin-top:12px;padding:5px 16px;background:${col}12;color:${col};border:1px solid ${col}33;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${planLabel}</div>
+</div>
+
+<!-- Stats row -->
+<div style="background:#fff;padding:0 24px 24px;border-left:1px solid #eee;border-right:1px solid #eee;">
+  <table style="width:100%;border-collapse:separate;border-spacing:8px 0;">
+    <tr>
+      <td style="background:#fff5f5;border:1px solid #fee2e2;border-radius:10px;padding:16px;text-align:center;width:33%;">
+        <div style="font-size:28px;font-weight:900;color:#ef4444;">${s.criticalCount||0}</div>
+        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">CRITICAL</div>
+      </td>
+      <td style="background:#fffbeb;border:1px solid #fef3c7;border-radius:10px;padding:16px;text-align:center;width:33%;">
+        <div style="font-size:28px;font-weight:900;color:#f59e0b;">${s.warningCount||0}</div>
+        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">WARNINGS</div>
+      </td>
+      <td style="background:#f5f3ff;border:1px solid #ede9fe;border-radius:10px;padding:16px;text-align:center;width:33%;">
+        <div style="font-size:28px;font-weight:900;color:#7c3aed;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
+        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">EST. WASTE/MO</div>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<!-- Records scanned -->
+<div style="background:#fff;padding:0 32px 20px;border-left:1px solid #eee;border-right:1px solid #eee;">
+  <div style="background:#f9f9f9;border-radius:8px;padding:12px 16px;font-size:12px;color:#888;text-align:center;">
+    📊 Scanned <strong style="color:#444;">${Number(s.recordsScanned||0).toLocaleString()} records</strong> across
+    ${ps.contacts ? `<strong style="color:#444;">${Number(ps.contacts).toLocaleString()} contacts</strong>` : ''}
+    ${ps.deals ? ` · <strong style="color:#444;">${Number(ps.deals).toLocaleString()} deals</strong>` : ''}
+    ${ps.tickets ? ` · <strong style="color:#444;">${Number(ps.tickets).toLocaleString()} tickets</strong>` : ''}
   </div>
-  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:28px;text-align:center;">
-    <div style="background:#fff5f5;border-radius:8px;padding:14px;border:1px solid #fee2e2;">
-      <div style="font-size:24px;font-weight:800;color:#ef4444;">${s.criticalCount||0}</div>
-      <div style="font-size:11px;color:#666;margin-top:2px;">Critical</div>
-    </div>
-    <div style="background:#fffbeb;border-radius:8px;padding:14px;border:1px solid #fef3c7;">
-      <div style="font-size:24px;font-weight:800;color:#f59e0b;">${s.warningCount||0}</div>
-      <div style="font-size:11px;color:#666;margin-top:2px;">Warnings</div>
-    </div>
-    <div style="background:#f5f3ff;border-radius:8px;padding:14px;border:1px solid #ede9fe;">
-      <div style="font-size:24px;font-weight:800;color:#7c3aed;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
-      <div style="font-size:11px;color:#666;margin-top:2px;">Est. Waste/mo</div>
-    </div>
-  </div>
-  <div style="text-align:center;margin-bottom:24px;">
-    <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="display:inline-block;padding:14px 32px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">View Full Audit Results →</a>
-  </div>
-  <div style="background:#f9f9f9;border-radius:8px;padding:16px;font-size:13px;color:#666;line-height:1.6;">
-    <strong style="color:#333;">What's in your results:</strong><br>
-    Every issue found includes a dollar impact estimate, a step-by-step fix guide, and a one-click "Fix It For Me" button to send it to our team for a same-day quote.
-  </div>
+</div>
+
+<!-- Issues preview -->
+${previewIssues.length > 0 ? `
+<div style="background:#fff;padding:0 32px 8px;border-left:1px solid #eee;border-right:1px solid #eee;">
+  <div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;padding-top:4px;">Top Issues Found</div>
+  ${issuePreviewHtml}
+  ${moreCount > 0 ? `<div style="font-size:12px;color:#888;text-align:center;padding:8px 0 16px;">+ ${moreCount} more issue${moreCount!==1?'s':''} in your full report</div>` : ''}
+</div>` : ''}
+
+<!-- Dimension scores -->
+${dims.length > 0 ? `
+<div style="background:#fff;padding:16px 32px 24px;border-left:1px solid #eee;border-right:1px solid #eee;">
+  <div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">Health Dimensions</div>
+  <table style="width:100%;border-collapse:collapse;">
+    ${dimBarsHtml}
+  </table>
+</div>` : ''}
+
+<!-- CTA -->
+<div style="background:#fff;padding:24px 32px 32px;border-left:1px solid #eee;border-right:1px solid #eee;text-align:center;">
+  <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="display:inline-block;padding:15px 36px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:12px;font-weight:700;font-size:15px;letter-spacing:-0.2px;">View Full Audit Results →</a>
+  <div style="margin-top:12px;font-size:12px;color:#999;">Every issue includes a dollar impact estimate and a step-by-step fix guide</div>
   ${plan === 'deep' || plan === 'pro-audit' ? `
-  <div style="margin-top:20px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;font-size:13px;color:#166534;">
-    <strong>Your strategy call:</strong> Matthew will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and send your written action plan.
+  <div style="margin-top:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px;font-size:13px;color:#166534;text-align:left;">
+    <strong>📅 Your strategy call:</strong> Matthew will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and written action plan.
   </div>` : ''}
+  <div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px;font-size:12px;color:#5b21b6;text-align:left;">
+    <strong>💡 Want this fixed?</strong> Every issue has a "Fix It For Me" button in your results — click it and Matthew will scope and quote a fix within 24 hours. No commitment required.
+  </div>
 </div>
-<div style="background:#f9f9f9;border-top:1px solid #eee;padding:20px 32px;text-align:center;font-size:12px;color:#999;">
-  <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.
+
+<!-- Footer -->
+<div style="background:#f9f9f9;border:1px solid #eee;border-top:none;border-radius:0 0 16px 16px;padding:20px 32px;text-align:center;font-size:11px;color:#aaa;">
+  <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · 
+  <a href="mailto:matthew@fixops.io" style="color:#aaa;text-decoration:none;">matthew@fixops.io</a> · 
+  HubSpot Systems. Fixed.
 </div>
+
 </div></body></html>`
   });
 };
