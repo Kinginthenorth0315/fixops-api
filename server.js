@@ -1206,13 +1206,19 @@ app.get('/auth/callback', async (req, res) => {
       console.log(`[${auditIdCopy}] Background audit starting — plan: ${auditMeta.plan}`);
       try {
         const result = await runFullAudit(accessToken, auditIdCopy, auditMeta);
-        await saveResult(auditIdCopy, { status: 'running', progress: 99, currentTask: 'Sending your report...' });
 
+        // ✅ Save complete result FIRST — before anything else can fail
+        await saveResult(auditIdCopy, { ...result, status: 'complete', plan: auditMeta.plan || 'free' });
+        console.log(`[${auditIdCopy}] ✅ Result saved — now sending emails`);
+
+        // Send emails in background — wrapped so they never block or overwrite result
         if (auditMeta.email) {
-          await sendClientEmail(auditMeta.email, result, auditIdCopy);
-          console.log(`[${auditIdCopy}] ✅ Client email sent`);
+          sendClientEmail(auditMeta.email, result, auditIdCopy)
+            .then(() => console.log(`[${auditIdCopy}] ✅ Client email sent`))
+            .catch(e => console.error(`[${auditIdCopy}] ⚠️ Client email failed:`, e.message));
         }
-        await notifyMatthew(result, auditIdCopy, auditMeta.plan);
+        notifyMatthew(result, auditIdCopy, auditMeta.plan)
+          .catch(e => console.error(`[${auditIdCopy}] ⚠️ Matthew notify failed:`, e.message));
 
         // Update customer last audit
         if (auditMeta.email) {
@@ -1237,7 +1243,6 @@ app.get('/auth/callback', async (req, res) => {
           }
         }
 
-        await saveResult(auditIdCopy, { ...result, status: 'complete', plan: auditMeta.plan || 'free' });
         console.log(`[${auditIdCopy}] ✅ Fully complete`);
       } catch(e) {
         console.error(`[${auditIdCopy}] Audit error:`, e.message);
@@ -1276,13 +1281,15 @@ app.post('/audit/private', async (req, res) => {
       try {
         const meta = { email: email||'', company: company||'Your Portal', plan: plan||'free' };
         const result = await runFullAudit(token, auditId, meta);
-        await saveResult(auditId, { status: 'running', progress: 99, currentTask: 'Sending your report...' });
-        if (email) {
-          await sendClientEmail(email, result, auditId);
-          console.log(`[${auditId}] ✅ Client email sent`);
-        }
-        await notifyMatthew(result, auditId, plan||'free');
+        // ✅ Save complete result FIRST before emails can fail
         await saveResult(auditId, { ...result, status: 'complete', plan: plan||'free' });
+        console.log(`[${auditId}] ✅ Result saved`);
+        if (email) {
+          sendClientEmail(email, result, auditId)
+            .then(() => console.log(`[${auditId}] ✅ Client email sent`))
+            .catch(e => console.error(`[${auditId}] ⚠️ Client email failed:`, e.message));
+        }
+        notifyMatthew(result, auditId, plan||'free').catch(e => console.error(`[${auditId}] ⚠️ Notify failed:`, e.message));
         console.log(`[${auditId}] ✅ Private app audit complete`);
       } catch(e) {
         console.error(`[${auditId}] Private audit error:`, e.message);
