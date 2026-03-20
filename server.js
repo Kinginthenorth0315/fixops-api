@@ -302,10 +302,10 @@ ${dims.length > 0 ? `
   <div style="margin-top:12px;font-size:12px;color:#999;">Every issue includes a dollar impact estimate and a step-by-step fix guide</div>
   ${plan === 'deep' || plan === 'pro-audit' ? `
   <div style="margin-top:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px;font-size:13px;color:#166534;text-align:left;">
-    <strong>📅 Your strategy call:</strong> Matthew will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and written action plan.
+    <strong>📅 Your strategy call:</strong> Our team will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and written action plan.
   </div>` : ''}
   <div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px;font-size:12px;color:#5b21b6;text-align:left;">
-    <strong>💡 Want this fixed?</strong> Every issue has a "Fix It For Me" button in your results — click it and Matthew will scope and quote a fix within 24 hours. No commitment required.
+    <strong>💡 Want this fixed?</strong> Every issue has a "Fix It For Me" button in your results — click it and we'll scope and quote a fix within 24 hours. No commitment required.
   </div>
 </div>
 
@@ -780,7 +780,7 @@ app.post('/auth/refresh', async (req, res) => {
             requiresReconnect: true
           }).catch(()=>{});
         } else {
-          await saveResult(auditId, { status: 'error', message: 'Refresh failed. Matthew has been notified.' }).catch(()=>{});
+          await saveResult(auditId, { status: 'error', message: 'Refresh failed. Our team has been notified.' }).catch(()=>{});
         }
       }
     });
@@ -1246,7 +1246,7 @@ app.get('/auth/callback', async (req, res) => {
         console.log(`[${auditIdCopy}] ✅ Fully complete`);
       } catch(e) {
         console.error(`[${auditIdCopy}] Audit error:`, e.message);
-        await saveResult(auditIdCopy, { status: 'error', message: 'Audit failed. Matthew has been notified.' }).catch(() => {});
+        await saveResult(auditIdCopy, { status: 'error', message: 'Audit failed. Our team has been notified.' }).catch(() => {});
         await resend.emails.send({
           from: 'FixOps Alerts <reports@fixops.io>',
           to: FIXOPS_NOTIFY_EMAIL,
@@ -1293,7 +1293,7 @@ app.post('/audit/private', async (req, res) => {
         console.log(`[${auditId}] ✅ Private app audit complete`);
       } catch(e) {
         console.error(`[${auditId}] Private audit error:`, e.message);
-        await saveResult(auditId, { status: 'error', message: 'Audit failed. Matthew has been notified.' }).catch(()=>{});
+        await saveResult(auditId, { status: 'error', message: 'Audit failed. Our team has been notified.' }).catch(()=>{});
       }
     });
 
