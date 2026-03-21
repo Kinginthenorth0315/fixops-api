@@ -345,11 +345,11 @@ const notifyMatthew = async (result, auditId, plan) => {
     await resend.emails.send({
       from: 'FixOps Alerts <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
-      subject: `📞 ACTION REQUIRED: Schedule ${callLen} call — ${pi.company} paid ${plan === 'pro-audit' ? '$599' : '$299'}`,
+      subject: `📞 ACTION REQUIRED: Schedule ${callLen} call — ${pi.company} paid ${plan === 'pro-audit' ? '$699' : '$399'}`,
       html: `<h2>Paid audit complete — schedule their strategy call now</h2>
         <p><strong>Company:</strong> ${pi.company}</p>
         <p><strong>Email:</strong> ${pi.email}</p>
-        <p><strong>Plan:</strong> ${plan} (${plan === 'pro-audit' ? '$599 — 60-min call' : '$299 — 30-min call'})</p>
+        <p><strong>Plan:</strong> ${plan} (${plan === 'pro-audit' ? '$699 — 60-min call' : '$399 — 30-min call'})</p>
         <p><strong>Score:</strong> ${s.overallScore}/100 · ${s.criticalCount} critical issues</p>
         <p>Reply to <a href="mailto:${pi.email}">${pi.email}</a> to schedule their ${callLen} strategy call and send their written action plan.</p>
         <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View their full audit results</a></p>`
@@ -617,7 +617,7 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     </div>
     <div style="border-top:1px solid rgba(255,255,255,.06);padding-top:16px;text-align:center;font-size:11px;color:rgba(255,255,255,.25);">
       <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.<br>
-      <span style="font-size:10px;">Your portal is scanned every Monday at 9am ET · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);">Pause monitoring</a></span>
+      <span style="font-size:10px;">Your portal is scanned every Monday at 9am ET · <a href="mailto:matthew@fixops.io" style="color:rgba(255,255,255,.4);text-decoration:none;font-size:10px;">matthew@fixops.io</a><!--w@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);">Pause monitoring</a></span>
     </div>
   </td></tr>
 
@@ -1218,7 +1218,7 @@ app.get('/auth/callback', async (req, res) => {
             .catch(e => console.error(`[${auditIdCopy}] ⚠️ Client email failed:`, e.message));
         }
         notifyMatthew(result, auditIdCopy, auditMeta.plan)
-          .catch(e => console.error(`[${auditIdCopy}] ⚠️ Matthew notify failed:`, e.message));
+          .catch(e => console.error(`[${auditIdCopy}] ⚠️ Notify failed:`, e.message));
 
         // Update customer last audit
         if (auditMeta.email) {
@@ -1432,7 +1432,7 @@ const triggerRescan = async (customer) => {
 </div></body></html>`
         }).catch(e => console.error('Reconnect email error:', e.message));
 
-        // Alert Matthew too
+        // Notify ops team
         await resend.emails.send({
           from: 'FixOps Alerts <reports@fixops.io>',
           to: FIXOPS_NOTIFY_EMAIL,
