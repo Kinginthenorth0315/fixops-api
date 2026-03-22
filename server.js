@@ -1413,6 +1413,42 @@ app.get('/audit/status/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Snapshot endpoint — returns audit + history for reporting.html ─────────────
+// Used by reporting.html when a token is present (Pulse/Pro subscribers)
+app.get('/snapshot/:id', async (req, res) => {
+  try {
+    const { token } = req.query;
+    const data = await getResult(req.params.id);
+    if (!data) return res.status(404).json({ error: 'not_found' });
+
+    // If token provided, enrich with customer history
+    if (token) {
+      try {
+        const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+        const { email } = payload;
+        if (email) {
+          const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+          if (custRes.rows[0]) {
+            const cust = custRes.rows[0];
+            const histRes = await db.query(
+              'SELECT id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats, created_at FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20',
+              [cust.id]
+            );
+            return res.json({
+              ...data,
+              customer: { email: cust.email, company: cust.company, plan: cust.plan },
+              history: histRes.rows,
+              hasHistory: histRes.rows.length > 1
+            });
+          }
+        }
+      } catch(e) { /* token invalid — return data without history */ }
+    }
+
+    res.json({ ...data, history: [], hasHistory: false });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Customer history ──────────────────────────────────────────────────────────
 app.get('/customer/history', async (req, res) => {
   try {
@@ -2434,7 +2470,96 @@ async function runFullAudit(token, auditId, meta) {
   }
 
 
-      // ── SCORES ──────────────────────────────────────────────────
+        // ── SUBSCRIPTION HEALTH ────────────────────────────────────────
+  if (subscriptions.length > 0) {
+    const activeSubs = subscriptions.filter(sub=>String(sub.properties?.hs_status||'').toLowerCase()==='active');
+    const cancelledSubs = subscriptions.filter(sub=>['cancelled','canceled'].includes(String(sub.properties?.hs_status||'').toLowerCase()));
+    const mrrTotal = activeSubs.reduce((s,sub)=>s+parseFloat(sub.properties?.hs_recurring_revenue||0),0);
+    const renewNext30 = activeSubs.filter(sub=>{
+      const nd = sub.properties?.hs_next_payment_due_date;
+      if(!nd) return false;
+      const days = (new Date(nd).getTime()-now)/DAY;
+      return days >= 0 && days <= 30;
+    });
+    const churnRate = subscriptions.length > 0 ? Math.round((cancelledSubs.length/subscriptions.length)*100) : 0;
+
+    if (churnRate > 25) {
+      reportingScore -= 12;
+      issues.push({
+        severity: churnRate > 40 ? 'critical' : 'warning',
+        title: churnRate + '% subscription churn rate — revenue retention at risk',
+        description: cancelledSubs.length + ' of ' + subscriptions.length + ' subscriptions are cancelled. Industry benchmark is under 5% monthly churn. At ' + churnRate + '% your MRR is actively shrinking.',
+        impact: 'MRR at risk · customer lifetime value declining · growth offset by churn',
+        dimension: 'Reporting Quality',
+        guide: [
+          'Map cancelled subscriptions to contact records — identify churn patterns',
+          'Set up a churn prevention workflow: trigger at 60 days before renewal with proactive check-in',
+          'Review all cancellations for past 90 days — is churn concentrated in one product or segment?'
+        ]
+      });
+    }
+    if (renewNext30.length > 0) {
+      issues.push({
+        severity: 'info',
+        title: renewNext30.length + ' subscription' + (renewNext30.length!==1?'s':'') + ' renewing in the next 30 days — proactive outreach window',
+        description: 'You have ' + renewNext30.length + ' active subscriptions renewing within 30 days. This is the highest-leverage customer success window: a proactive check-in before renewal reduces churn by 40% vs reactive handling after cancellation.',
+        impact: 'MRR renewal window · proactive outreach opportunity',
+        dimension: 'Team Adoption',
+        guide: [
+          'Create a renewal sequence: 30-day, 14-day, and 7-day pre-renewal touch points',
+          'Assign each renewal to a CSM or account owner with a task due this week',
+          'Send a value summary email showing what they accomplished with the product this year'
+        ]
+      });
+    }
+  }
+
+  // ── QUOTE HEALTH ─────────────────────────────────────────────────
+  if (quotes.length > 3) {
+    const expiredQuotes = quotes.filter(q=>{
+      const exp = q.properties?.hs_expiration_date;
+      return exp && new Date(exp).getTime() < now &&
+        String(q.properties?.hs_status||'').toLowerCase() !== 'accepted';
+    });
+    if (expiredQuotes.length > 0) {
+      reportingScore -= Math.min(10, expiredQuotes.length * 2);
+      issues.push({
+        severity: expiredQuotes.length > 5 ? 'warning' : 'info',
+        title: expiredQuotes.length + ' quote' + (expiredQuotes.length!==1?'s':'') + ' expired without being accepted — lost revenue signal',
+        description: 'Expired unaccepted quotes indicate deals that stalled at the proposal stage. Each expired quote is a buyer who evaluated your offer and did not convert — without follow-up, this is silent churn in your pipeline.',
+        impact: 'Proposal conversion gap · unworked pipeline · revenue intelligence missing',
+        dimension: 'Pipeline Integrity',
+        guide: [
+          'Review all expired quotes — were these deals lost, delayed, or forgotten?',
+          'Set quote expiration reminders: 3 days before expiry → task to rep to follow up',
+          'Add close-lost reason tracking to every expired quote for pattern analysis'
+        ]
+      });
+    }
+  }
+
+  // ── INVOICE HEALTH ───────────────────────────────────────────────
+  if (invoices.length > 0) {
+    const overdueInvoices = invoices.filter(i=>String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due');
+    if (overdueInvoices.length > 0) {
+      const overdueRate = Math.round((overdueInvoices.length/invoices.length)*100);
+      reportingScore -= Math.min(12, overdueInvoices.length * 3);
+      issues.push({
+        severity: overdueRate > 30 ? 'critical' : 'warning',
+        title: overdueInvoices.length + ' overdue invoice' + (overdueInvoices.length!==1?'s':'') + ' — cash flow risk',
+        description: overdueInvoices.length + ' invoices are past due (' + overdueRate + '% of all invoices). Uncollected invoices are cash that should already be in your account. Each day overdue increases collection difficulty exponentially.',
+        impact: 'Cash flow at risk · accounts receivable aging · collection cost rising',
+        dimension: 'Reporting Quality',
+        guide: [
+          'Set up automated payment reminder sequences: 7 days before due, on due date, 3 days after, 7 days after',
+          'Review overdue invoices by amount — prioritize largest for immediate personal outreach',
+          'Implement ACH/auto-pay for recurring customers to eliminate future overdue risk'
+        ]
+      });
+    }
+  }
+
+// ── SCORES ──────────────────────────────────────────────────
   const scores = {
     dataIntegrity:    Math.max(20,Math.min(100,Math.round(dataScore))),
     automationHealth: Math.max(20,Math.min(100,Math.round(autoScore))),
@@ -2471,6 +2596,85 @@ async function runFullAudit(token, auditId, meta) {
         calls: calls.length, quotes: quotes.length, lineItems: lineItems.length,
         products: products.length, orders: orders.length,
         invoices: invoices.length, subscriptions: subscriptions.length,
+
+        // ── Revenue intelligence ──────────────────────────────────
+        openDealsCount: openDeals.length,
+        openPipelineValue: Math.round(openDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)),
+        avgDealSize: openDeals.length > 0
+          ? Math.round(openDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0) / openDeals.length)
+          : 0,
+        zeroDollarDeals: openDeals.filter(d=>!parseFloat(d.properties?.amount||0)).length,
+        stalledDeals: openDeals.filter(d=>(now-new Date(d.properties?.hs_lastmodifieddate||0).getTime())/DAY>21).length,
+        dealsNoCloseDate: openDeals.filter(d=>!d.properties?.closedate).length,
+        pastDueDeals: openDeals.filter(d=>{
+          const cd = d.properties?.closedate;
+          return cd && new Date(cd).getTime() < now;
+        }).length,
+
+        // ── Subscription / MRR intelligence ──────────────────────
+        activeSubscriptions: subscriptions.filter(sub=>
+          String(sub.properties?.hs_status||'').toLowerCase()==='active').length,
+        mrrTotal: Math.round(subscriptions
+          .filter(sub=>String(sub.properties?.hs_status||'').toLowerCase()==='active')
+          .reduce((s,sub)=>s+parseFloat(sub.properties?.hs_recurring_revenue||0),0)),
+        subsRenewingNext30: subscriptions.filter(sub=>{
+          const nd = sub.properties?.hs_next_payment_due_date;
+          if(!nd) return false;
+          const days = (new Date(nd).getTime()-now)/DAY;
+          return days >= 0 && days <= 30;
+        }).length,
+        cancelledSubscriptions: subscriptions.filter(sub=>
+          ['cancelled','canceled'].includes(String(sub.properties?.hs_status||'').toLowerCase())).length,
+
+        // ── Quote intelligence ────────────────────────────────────
+        openQuotes: quotes.filter(q=>
+          ['draft','approval_not_needed','pending_approval'].includes(
+            String(q.properties?.hs_status||'').toLowerCase())).length,
+        expiredQuotes: quotes.filter(q=>{
+          const exp = q.properties?.hs_expiration_date;
+          return exp && new Date(exp).getTime() < now &&
+            String(q.properties?.hs_status||'').toLowerCase() !== 'accepted';
+        }).length,
+        acceptedQuotes: quotes.filter(q=>
+          String(q.properties?.hs_status||'').toLowerCase()==='accepted').length,
+
+        // ── Contact engagement segmentation ──────────────────────
+        hotContacts: contacts.filter(c=>{
+          const last = c.properties?.hs_last_sales_activity_timestamp;
+          return last && (now-new Date(last).getTime())/DAY < 30;
+        }).length,
+        warmContacts: contacts.filter(c=>{
+          const last = c.properties?.hs_last_sales_activity_timestamp;
+          return last && (now-new Date(last).getTime())/DAY >= 30 &&
+                 (now-new Date(last).getTime())/DAY < 90;
+        }).length,
+        coldContacts: contacts.filter(c=>{
+          const last = c.properties?.hs_last_sales_activity_timestamp;
+          return !last || (now-new Date(last).getTime())/DAY >= 90;
+        }).length,
+        contactsWithDeals: contacts.filter(c=>c.properties?.num_contacted_notes > 0).length,
+
+        // ── Invoice intelligence ──────────────────────────────────
+        unpaidInvoices: invoices.filter(i=>
+          ['outstanding','past_due'].includes(String(i.properties?.hs_invoice_status||'').toLowerCase())).length,
+        overdueInvoices: invoices.filter(i=>
+          String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due').length,
+        paidInvoices: invoices.filter(i=>
+          String(i.properties?.hs_invoice_status||'').toLowerCase()==='paid').length,
+
+        // ── Team activity (last 7 days) ───────────────────────────
+        callsThisWeek: calls.filter(c=>(now-new Date(c.properties?.hs_createdate||0).getTime())/DAY<7).length,
+        meetingsThisWeek: meetings.filter(m=>(now-new Date(m.properties?.hs_timestamp||0).getTime())/DAY<7).length,
+        overdueTasks: tasks.filter(t=>{
+          const due = t.properties?.hs_timestamp;
+          const status = String(t.properties?.hs_task_status||'').toLowerCase();
+          return due && new Date(due).getTime() < now && status !== 'completed';
+        }).length,
+
+        // ── Company intelligence ──────────────────────────────────
+        companiesCount: companies.length,
+        companiesWithRevenue: companies.filter(c=>parseFloat(c.properties?.annualrevenue||0)>0).length,
+        companiesNoOwner: companies.filter(c=>!c.properties?.hubspot_owner_id).length,
       },
       isLimited: !isPaid,
       limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
