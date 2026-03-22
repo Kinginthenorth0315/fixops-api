@@ -287,6 +287,28 @@ ${previewIssues.length > 0 ? `
   ${moreCount > 0 ? `<div style="font-size:12px;color:#888;text-align:center;padding:8px 0 16px;">+ ${moreCount} more issue${moreCount!==1?'s':''} in your full report</div>` : ''}
 </div>` : ''}
 
+<!-- Ghost Seats Alert -->
+\${(()=>{
+  const ghostIssue = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
+  if(!ghostIssue) return '';
+  const ghostData = ghostIssue.ghostSeatData;
+  const waste = ghostData.length * 90;
+  const rows = ghostData.slice(0,5).map(u =>
+    '<tr>' +
+      '<td style="font-size:12px;color:#374151;padding:4px 8px;border-bottom:1px solid #f3f4f6;">' + u.name + '</td>' +
+      '<td align="center" style="font-size:12px;color:#ef4444;font-weight:700;padding:4px 8px;border-bottom:1px solid #f3f4f6;">' + u.daysSince + 'd</td>' +
+    '</tr>'
+  ).join('');
+  return '<div style="background:#fff;padding:16px 32px;border-left:1px solid #eee;border-right:1px solid #eee;">' +
+    '<div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">👻 Ghost Seats — $' + waste.toLocaleString() + '/mo Wasted</div>' +
+    '<div style="font-size:11px;color:#666;margin-bottom:10px;">' + ghostData.length + ' paid users with zero logins in 90+ days</div>' +
+    '<table style="width:100%;border-collapse:collapse;">' +
+      '<tr style="background:#f9fafb;"><th style="font-size:10px;color:#6b7280;padding:4px 8px;text-align:left;font-weight:600;">User</th><th style="font-size:10px;color:#6b7280;padding:4px 8px;text-align:center;font-weight:600;">Days Inactive</th></tr>' +
+      rows +
+    '</table>' +
+  '</div>';
+})()}
+
 <!-- Dimension scores -->
 ${dims.length > 0 ? `
 <div style="background:#fff;padding:16px 32px 24px;border-left:1px solid #eee;border-right:1px solid #eee;">
