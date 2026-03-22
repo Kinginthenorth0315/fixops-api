@@ -606,6 +606,74 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     </div>`).join('')}
   </td></tr>` : ''}
 
+  <!-- Rep Activity Scorecard -->
+  ${(()=>{
+    const repIssue = issues.find(i => i.repScorecard && i.repScorecard.length > 0);
+    const repData = repIssue ? repIssue.repScorecard.slice(0,8) : [];
+    if(repData.length === 0) return '';
+    const rows = repData.map(r => {
+      const actColor = (r.calls + r.meetings) > 5 ? '#10b981' : (r.calls + r.meetings) > 1 ? '#f59e0b' : '#f43f5e';
+      return '<tr>' +
+        '<td style="font-size:12px;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.name + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.calls + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.meetings + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:' + (r.staleDealCount > 2 ? '#f43f5e' : '#374151') + ';padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.staleDealCount + '</td>' +
+        '<td align="center" style="padding:5px 8px;border-bottom:1px solid #f3f4f6;"><span style="font-size:11px;font-weight:700;color:' + actColor + ';">' + (r.calls+r.meetings > 5 ? 'Active' : r.calls+r.meetings > 0 ? 'Low' : 'Dark') + '</span></td>' +
+      '</tr>';
+    }).join('');
+    return '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+      '<div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">👥 Rep Activity This Week</div>' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
+        '<tr style="background:#f9fafb;">' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;letter-spacing:.05em;">Rep</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Calls</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Meetings</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Stale Deals</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Status</th>' +
+        '</tr>' +
+        rows +
+      '</table>' +
+    '</td></tr>';
+  })()}
+
+  <!-- Ghost Seats Alert -->
+  ${(()=>{
+    const ghostIssue = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
+    const ghostData = ghostIssue ? ghostIssue.ghostSeatData : [];
+    if(ghostData.length === 0) return '';
+    const waste = ghostData.length * 90;
+    const rows = ghostData.slice(0,6).map(u =>
+      '<tr>' +
+        '<td style="font-size:12px;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + u.name + '</td>' +
+        '<td align="center" style="font-size:12px;color:#f43f5e;font-weight:700;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + u.daysSince + ' days</td>' +
+        '<td style="font-size:11px;color:#9ca3af;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + (u.email||'') + '</td>' +
+      '</tr>'
+    ).join('');
+    return '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+      '<div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;">👻 Ghost Seats — $' + waste.toLocaleString() + '/mo Wasted</div>' +
+      '<div style="font-size:11px;color:#6b7280;margin-bottom:12px;">' + ghostData.length + ' paid users with zero logins in 90+ days</div>' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
+        '<tr style="background:#f9fafb;">' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;">User</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;">Last Login</th>' +
+          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;">Email</th>' +
+        '</tr>' +
+        rows +
+      '</table>' +
+    '</td></tr>';
+  })()}
+
+  <!-- Ticket SLA Section -->
+  ${(()=>{
+    const ticketIssue = issues.find(i => i.title && i.title.includes('support tickets open more than'));
+    if(!ticketIssue) return '';
+    return '<tr><td style="background:#fffbeb;padding:18px 32px;border-bottom:1px solid #fef3c7;border-left:3px solid #f59e0b;">' +
+      '<div style="font-size:11px;font-weight:700;color:#92400e;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">🎫 Ticket SLA Alert</div>' +
+      '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px;">' + ticketIssue.title + '</div>' +
+      '<div style="font-size:12px;color:#92400e;opacity:.8;">' + (ticketIssue.impact||'') + '</div>' +
+    '</td></tr>';
+  })()}
+
   <!-- CTAs -->
   <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
     <div style="text-align:center;margin-bottom:20px;">
@@ -626,13 +694,27 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
 </table>
 </body></html>`;
 
-  const subject = scoreDiff === null
-    ? `⚡ FixOps Pulse — ${pi.company} — First Scan Complete — Score ${s.overallScore}/100`
-    : scoreDiff > 0
-      ? `⚡ FixOps Pulse — ${pi.company} — Score ↑${scoreDiff} to ${s.overallScore}/100 · ${newIssues.length} new issue${newIssues.length!==1?'s':''}`
-      : scoreDiff < 0
-        ? `⚡ FixOps Pulse — ${pi.company} — Score ↓${Math.abs(scoreDiff)} to ${s.overallScore}/100 · ${newIssues.length} new issue${newIssues.length!==1?'s':''} found`
-        : `⚡ FixOps Pulse — ${pi.company} — Score ${s.overallScore}/100 · ${s.criticalCount} critical · Weekly Report`;
+  // Smart subject line — lead with the most impactful metric
+  const ghostCount = (issues.find(i=>i.ghostSeatData)?.ghostSeatData||[]).length;
+  const ghostWaste = ghostCount * 90;
+  const darkRepCount = (issues.find(i=>i.repScorecard)?.repScorecard||[]).filter(r=>r.calls===0&&r.meetings===0).length;
+  const monthlyWasteAmt = Number(s.monthlyWaste||0);
+  let subject;
+  if(scoreDiff === null){
+    subject = '⚡ FixOps — ' + pi.company + ' — First Scan: ' + s.criticalCount + ' critical issues · $' + monthlyWasteAmt.toLocaleString() + '/mo at risk';
+  } else if(newIssues.length > 0 && monthlyWasteAmt > 0){
+    subject = '⚡ FixOps — ' + pi.company + ' — ' + newIssues.length + ' new issue' + (newIssues.length!==1?'s':'') + ' · $' + monthlyWasteAmt.toLocaleString() + '/mo waste found';
+  } else if(ghostCount > 0){
+    subject = '⚡ FixOps — ' + pi.company + ' — ' + ghostCount + ' ghost seat' + (ghostCount!==1?'s':'') + ' costing $' + ghostWaste.toLocaleString() + '/mo · Score ' + s.overallScore;
+  } else if(darkRepCount > 0){
+    subject = '⚡ FixOps — ' + pi.company + ' — ' + darkRepCount + ' rep' + (darkRepCount!==1?'s':'') + ' logged zero activity this week · Score ' + s.overallScore;
+  } else if(scoreDiff > 0){
+    subject = '⚡ FixOps — ' + pi.company + ' — Score ↑' + scoreDiff + ' to ' + s.overallScore + '/100 · ' + resolvedIssues.length + ' issue' + (resolvedIssues.length!==1?'s':'') + ' resolved';
+  } else if(scoreDiff < 0){
+    subject = '⚡ FixOps — ' + pi.company + ' — Score ↓' + Math.abs(scoreDiff) + ' · ' + newIssues.length + ' new issue' + (newIssues.length!==1?'s':'') + ' found';
+  } else {
+    subject = '⚡ FixOps — ' + pi.company + ' — Score ' + s.overallScore + '/100 · ' + s.criticalCount + ' critical · Weekly Report';
+  }
 
   await resend.emails.send({
     from: 'FixOps Pulse <reports@fixops.io>',
@@ -1757,13 +1839,36 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   const inactiveUsers = users.filter(u=>{
-    const last=u.lastLoginDate||u.lastLogin;
-    if(!last)return false;
-    return(now-new Date(last).getTime())/DAY>60;
+    const last = u.properties?.hs_last_login_time || u.lastLoginDate || u.lastLogin || u.properties?.lastLoginDate;
+    if(!last) return false;
+    return (now - new Date(last).getTime()) / DAY > 90;
   });
-  if(inactiveUsers.length>0){
-    configScore-=Math.min(12,inactiveUsers.length*3);
-    issues.push({severity:inactiveUsers.length>3?'warning':'info',title:`${inactiveUsers.length} users haven\'t logged in for 60+ days — wasted paid seats`,description:`You\'re paying for ${inactiveUsers.length} HubSpot seats that nobody is actively using. On paid Sales or Service Hub, that\'s $50-$120/month per seat going to waste. Even on free plans, inactive accounts are a security risk.`,detail:`Inactive seats are the easiest budget win: immediate savings with zero operational impact if the user genuinely doesn\'t need access.`,impact:`~$${inactiveUsers.length*75}–$${inactiveUsers.length*120}/mo in unused paid seat costs`,dimension:'Configuration',guide:['Settings → Users → sort by last login date — oldest first','Contact each inactive user: do they still need HubSpot access?','Deactivate users who have left the company — their data and records stay, only login access is removed','Reassign open deals, contacts, and tasks from inactive users before deactivating']});
+  const ghostSeatData = inactiveUsers.map(u => {
+    const last = u.properties?.hs_last_login_time || u.lastLoginDate || u.lastLogin || u.properties?.lastLoginDate;
+    const daysSince = last ? Math.round((now - new Date(last).getTime()) / DAY) : 999;
+    const name = [u.properties?.firstname||u.firstName||'', u.properties?.lastname||u.lastName||''].filter(Boolean).join(' ') || u.properties?.email || 'Unknown User';
+    return { name, daysSince, email: u.properties?.email || '' };
+  }).sort((a,b) => b.daysSince - a.daysSince);
+  const estMonthlySeatWaste = inactiveUsers.length * 90;
+  if(inactiveUsers.length > 0){
+    configScore -= Math.min(15, inactiveUsers.length * 3);
+    const topNames = ghostSeatData.slice(0,3).map(u => u.name + ' (' + u.daysSince + 'd)').join(', ');
+    issues.push({
+      severity: inactiveUsers.length > 3 ? 'warning' : 'info',
+      title: inactiveUsers.length + ' users have not logged in for 90+ days — $' + estMonthlySeatWaste.toLocaleString() + '/mo in ghost seats',
+      description: inactiveUsers.length + ' paid HubSpot seats have had zero activity for 90+ days. On Sales or Service Hub Professional that is $90-$120/seat/month going to waste. Ghost seats are also a security risk. Top inactive: ' + topNames + '.',
+      detail: 'Ghost seats are the easiest budget win in HubSpot: immediate savings with zero operational impact. User data, records, and activity history stay intact after deactivation — only login access is removed.',
+      impact: '~$' + estMonthlySeatWaste.toLocaleString() + '-$' + (inactiveUsers.length*120).toLocaleString() + '/mo in unused paid seat costs',
+      dimension: 'Configuration',
+      ghostSeatData: ghostSeatData,
+      guide: [
+        'Settings → Users → sort by last login date — oldest first to find ghost seats immediately',
+        'Top inactive: ' + ghostSeatData.slice(0,5).map(u => u.name + ' — ' + u.daysSince + ' days since login').join(' | '),
+        'Contact each inactive user: do they still need HubSpot access?',
+        'Deactivate users who have left — their data and records stay, only login is removed',
+        'Reassign open deals, contacts, and tasks before deactivating to avoid orphaned records'
+      ]
+    });
   }
 
   const undocProps = (cProps||[]).filter(p=>!p.hubspotDefined&&!p.description);
@@ -1787,11 +1892,102 @@ async function runFullAudit(token, auditId, meta) {
 
   await up(93, 'Checking team adoption…');
 
-  // ── TEAM ADOPTION ───────────────────────────────────────────
-  if(meetings.length===0&&calls.length===0&&tasks.length>0&&users.length>2){
-    issues.push({severity:'warning',title:`No meetings or calls logged — sales activity is completely dark`,description:`Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. This means you have zero visibility into rep activity, can\'t measure call volume, can\'t review meeting outcomes, and can\'t build any rep performance reports.`,detail:`The fix is a 5-minute calendar connection. Once Google Calendar or Outlook is connected, meetings log automatically with one click. Call logging via the HubSpot mobile app takes 10 seconds.`,impact:`Rep activity invisible · performance coaching impossible · activity-based reports all show zero`,dimension:'Team Adoption',guide:['Connect HubSpot to Google Calendar or Outlook: Settings → Integrations → Email & Calendar','Install HubSpot Sales Chrome Extension for one-click Gmail/Outlook logging','Create a weekly activity dashboard: calls made, emails sent, meetings booked — visibility drives adoption','FixOps sets up the full sales activity tracking stack in one 30-minute session']});
+  // ── TEAM ADOPTION + REP ACTIVITY SCORECARD ─────────────────
+  // Build per-rep activity scorecard from calls, meetings, tasks, deals
+  const repScorecard = {};
+  const WEEK = 7 * DAY;
+
+  // Map owner IDs to names
+  const ownerMap = {};
+  owners.forEach(o => {
+    ownerMap[o.id || o.ownerId] = [o.firstName||o.properties?.firstname||'', o.lastName||o.properties?.lastname||''].filter(Boolean).join(' ') || o.email || ('Owner ' + o.id);
+  });
+
+  // Count calls per rep (last 7 days)
+  calls.forEach(c => {
+    const ownerId = c.properties?.hubspot_owner_id;
+    const created = new Date(c.properties?.hs_createdate||0).getTime();
+    if(!ownerId) return;
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if((now - created) / DAY < 7) repScorecard[ownerId].calls++;
+  });
+
+  // Count meetings per rep (last 7 days)
+  meetings.forEach(m => {
+    const ownerId = m.properties?.hubspot_owner_id;
+    const ts = new Date(m.properties?.hs_timestamp||0).getTime();
+    if(!ownerId) return;
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if((now - ts) / DAY < 7) repScorecard[ownerId].meetings++;
+  });
+
+  // Count stale deals (no activity 14+ days) per rep
+  openDeals.forEach(d => {
+    const ownerId = d.properties?.hubspot_owner_id;
+    const lastMod = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
+    if(!ownerId) return;
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if((now - lastMod) / DAY > 14) repScorecard[ownerId].staleDealCount++;
+  });
+
+  const repList = Object.values(repScorecard).sort((a,b) => (b.calls+b.meetings) - (a.calls+a.meetings));
+  const totalActivity = repList.reduce((sum,r) => sum + r.calls + r.meetings, 0);
+  const darkReps = repList.filter(r => r.calls === 0 && r.meetings === 0);
+  const staleRepsCount = repList.filter(r => r.staleDealCount > 2).length;
+
+  if(meetings.length === 0 && calls.length === 0 && tasks.length > 0 && users.length > 2){
+    teamScore -= 20;
+    issues.push({
+      severity: 'warning',
+      title: 'No meetings or calls logged — sales activity is completely dark',
+      description: 'Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. Zero visibility into rep activity, call volume, meeting outcomes, or rep performance. The fix is a 5-minute calendar connection.',
+      detail: 'Once Google Calendar or Outlook is connected, meetings log automatically with one click. Call logging via the HubSpot mobile app takes 10 seconds per call.',
+      impact: 'Rep activity invisible · performance coaching impossible · activity-based reports all show zero',
+      dimension: 'Team Adoption',
+      guide: [
+        'Connect HubSpot to Google Calendar or Outlook: Settings → Integrations → Email & Calendar',
+        'Install HubSpot Sales Chrome Extension for one-click Gmail/Outlook logging',
+        'Create a weekly activity dashboard: calls made, emails sent, meetings booked',
+        'FixOps sets up the full sales activity tracking stack in one 30-minute session'
+      ]
+    });
+  } else if(darkReps.length > 0 && users.length > 2 && totalActivity > 0){
+    teamScore -= Math.min(15, darkReps.length * 4);
+    issues.push({
+      severity: darkReps.length > 2 ? 'warning' : 'info',
+      title: darkReps.length + ' reps logged zero calls or meetings this week',
+      description: darkReps.length + ' of your HubSpot users had no logged call or meeting activity in the last 7 days. Active reps averaged ' + (totalActivity / Math.max(repList.length - darkReps.length, 1)).toFixed(1) + ' activities. Silent reps: ' + darkReps.slice(0,4).map(r=>r.name).join(', ') + '.',
+      detail: 'Activity gaps are either a logging problem (rep is busy but not recording) or a performance problem (rep is not engaging). Both are invisible without this data. Weekly rep scorecards make this visible before it becomes a pipeline problem.',
+      impact: 'Pipeline at risk from ' + darkReps.length + ' rep' + (darkReps.length!==1?'s':'') + ' with no logged activity · coaching blind spot',
+      dimension: 'Team Adoption',
+      repScorecard: repList,
+      guide: [
+        'This week: ' + repList.slice(0,5).map(r => r.name + ' — ' + r.calls + ' calls, ' + r.meetings + ' meetings, ' + r.staleDealCount + ' stale deals').join(' | '),
+        'Silent reps: ' + darkReps.map(r=>r.name).join(', ') + ' — follow up directly',
+        'Set minimum weekly activity targets: 5 calls + 2 meetings per rep minimum',
+        'FixOps Rep Scorecard emails this breakdown to your sales manager every Monday automatically'
+      ]
+    });
   }
 
+  if(staleRepsCount > 0){
+    teamScore -= Math.min(10, staleRepsCount * 3);
+    const staleRepNames = repList.filter(r => r.staleDealCount > 2).slice(0,3).map(r => r.name + ' (' + r.staleDealCount + ' stale deals)').join(', ');
+    issues.push({
+      severity: 'warning',
+      title: 'Reps with stale deals: ' + staleRepNames,
+      description: staleRepsCount + ' rep' + (staleRepsCount!==1?'s':'') + ' have 2+ deals with no activity in 14+ days. Stale deals close at 11% vs 67% for actively worked deals (HubSpot research). These are revenue at risk right now.',
+      detail: 'Deal velocity is the most predictive pipeline metric. A deal that goes 14 days without activity has crossed the threshold where probability drops sharply. Catching this weekly prevents the end-of-quarter surprise.',
+      impact: 'Deals at risk · pipeline velocity dropping · forecast accuracy declining',
+      dimension: 'Team Adoption',
+      guide: [
+        'Stale deal owners: ' + staleRepNames,
+        'Set deal activity reminder: any deal with no activity in 10 days → task created automatically for rep',
+        'Weekly pipeline review: filter deals by last activity date — anything over 14 days needs immediate action',
+        'FixOps monitors deal activity weekly and flags stale deals in your Monday email before they fall through'
+      ]
+    });
+  }
 
   // ════════════════════════════════════════════════════
   // BONUS: HIGH-IMPACT WOW CHECKS
