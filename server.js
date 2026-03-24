@@ -2364,6 +2364,7 @@ ${critSection}${warnSection}${infoSection}
 </html>`;
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.send(html);
   } catch(e) {
     console.error('PDF generation error:', e);
