@@ -493,12 +493,68 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
 
   // Critical issues for email
   const criticals = issues.filter(i => i.severity === 'critical').slice(0,3);
+  // ── Deal Intelligence Brief ───────────────────────────────────────
+  const deals = result.issues ? [] : []; // issues proxy
+  const psDeals       = ps.openDealsCount || 0;
+  const psPipeline    = ps.openPipelineValue || 0;
+  const psStalled     = ps.stalledDeals || 0;
+  const psNoClose     = ps.dealsNoCloseDate || 0;
+  const psPastDue     = ps.pastDueDeals || 0;
+  const psZeroDollar  = ps.zeroDollarDeals || 0;
+  const psAvgDeal     = ps.avgDealSize || 0;
+
+  // Deals closing this week (from issues if available, otherwise from stats)
+  const closingThisWeek = psPastDue;  // overdue = was due and missed
+  const closingValue    = closingThisWeek * psAvgDeal;
+
+  // Pipeline risk summary
+  const pipelineRisk = psStalled > 0 || psNoClose > 0;
+  const stalledValue = Math.round(psStalled * psAvgDeal);
+
+  // Rep performance from repScorecard
+  const repData = ps.repScorecard || [];
+  const topRep = repData.length > 0 ? repData.reduce((a,b) =>
+    (a.calls+a.meetings) >= (b.calls+b.meetings) ? a : b, repData[0]) : null;
+  const darkRepCountBrief = (ps.darkRepNames || []).length;
+
+  // Build deal brief HTML rows
+  const dealBriefRows = [
+    psDeals > 0 ? { icon:'💼', label:'Open pipeline', val: '$'+Number(psPipeline||0).toLocaleString(), flag: false } : null,
+    psStalled > 0 ? { icon:'🧊', label: psStalled+' deal'+(psStalled!==1?'s':'') + ' stalled 21+ days', val: '$'+Number(stalledValue).toLocaleString()+' at risk', flag: true } : null,
+    psPastDue > 0 ? { icon:'🔴', label: psPastDue + ' deal'+(psPastDue!==1?'s':'')+' past close date', val: 'Action needed', flag: true } : null,
+    psNoClose > 0 ? { icon:'📅', label: psNoClose + ' deal'+(psNoClose!==1?'s':'')+' missing close date', val: 'Forecast blind spot', flag: true } : null,
+    psZeroDollar > 0 ? { icon:'🚫', label: psZeroDollar + ' deals with $0 value', val: 'Pipeline understated', flag: true } : null,
+    topRep ? { icon:'🏆', label: 'Top rep this week: '+ topRep.name, val: topRep.calls+' calls · '+topRep.meetings+' meetings', flag: false } : null,
+    darkRepCountBrief > 0 ? { icon:'👻', label: darkRepCountBrief + ' rep'+(darkRepCountBrief!==1?'s':'')+' with zero activity', val: 'Follow up needed', flag: true } : null,
+  ].filter(Boolean);
+
+  const dealBriefHtml = dealBriefRows.length > 0 ? `
+  <!-- Deal Intelligence Brief -->
+  <tr><td style="background:#fff;padding:0 32px 4px;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">
+    <div style="border-top:1px solid #f3f4f6;padding-top:20px;margin-bottom:4px;">
+      <div style="font-size:10px;font-weight:700;letter-spacing:2px;color:#7c3aed;text-transform:uppercase;margin-bottom:12px;">📊 Deal Intelligence Brief</div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        ${dealBriefRows.map(row => `
+        <tr>
+          <td style="padding:6px 0;border-bottom:1px solid #f9f9fb;">
+            <span style="font-size:13px;">${row.icon}</span>
+            <span style="font-size:12px;color:${row.flag?'#dc2626':'#374151'};font-weight:${row.flag?'600':'400'};margin-left:6px;">${row.label}</span>
+          </td>
+          <td align="right" style="padding:6px 0;border-bottom:1px solid #f9f9fb;">
+            <span style="font-size:11px;font-weight:700;color:${row.flag?'#dc2626':'#6b7280'};">${row.val}</span>
+          </td>
+        </tr>`).join('')}
+      </table>
+    </div>
+  </td></tr>` : '';
+
   const warnings = issues.filter(i => i.severity === 'warning').slice(0,3);
 
   // Portal report URL (token-gated by email)
   const reportToken = Buffer.from(JSON.stringify({email, auditId, ts: Date.now()})).toString('base64url');
-  const reportUrl = `${FRONTEND_URL}/pulse.html?token=${reportToken}&id=${auditId}`;
+  const reportUrl = `${FRONTEND_URL}/reporting.html?id=${auditId}`;
   const resultsUrl = `${FRONTEND_URL}/results.html?id=${auditId}`;
+  const leaksUrl    = `${FRONTEND_URL}/leaks.html?id=${auditId}`;
 
   // Week number
   const weekNum = history.length;
@@ -737,11 +793,14 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     </div>
   </td></tr>` : ''}
 
+  ${dealBriefHtml}
+
   <!-- CTAs -->
   <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
     <div style="text-align:center;margin-bottom:20px;">
       <a href="${reportUrl}" style="display:inline-block;padding:14px 30px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;margin-right:10px;">📊 View Full Report →</a>
       <a href="${resultsUrl}" style="display:inline-block;padding:14px 30px;background:rgba(124,58,237,.15);color:#a78bfa;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(124,58,237,.3);">View Audit Results →</a>
+      <a href="${leaksUrl}" style="display:inline-block;padding:14px 30px;background:rgba(255,59,59,.12);color:#ff6b6b;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(255,59,59,.3);">💸 Revenue Leak Report →</a>
     </div>
     ${(s.criticalCount||0) > 0 ? `
     <div style="margin-bottom:16px;padding:14px 16px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.2);border-radius:8px;text-align:center;">
@@ -1946,6 +2005,107 @@ app.get('/audit/status/:id', async (req, res) => {
     res.json(data);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Score Certificate — shareable SVG image ──────────────────────────────────
+app.get('/audit/certificate', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).send('Missing id');
+    const data = await getResult(id);
+    if (!data) return res.status(404).send('Not found');
+
+    const company = (data.portalInfo?.company || 'Your Portal').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    const score   = data.summary?.overallScore || 0;
+    const grade   = score>=85?'Excellent':score>=72?'Good':score>=55?'Needs Attention':'Critical';
+    const date    = new Date(data.portalInfo?.auditDate||Date.now()).toLocaleDateString('en-US',{month:'long',year:'numeric'});
+    const criticals = data.summary?.criticalCount || 0;
+    const checks  = data.summary?.checksRun || 185;
+    const color   = score>=75?'#10b981':score>=55?'#f59e0b':'#f43f5e';
+    const darkBg  = score>=75?'#022c22':score>=55?'#451a03':'#1f0a0a';
+    const ringW   = Math.round(score / 100 * 283); // circumference of r=45 circle
+
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="420" viewBox="0 0 800 420">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f0c29"/>
+      <stop offset="50%" style="stop-color:#302b63"/>
+      <stop offset="100%" style="stop-color:#24243e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:${color}"/>
+      <stop offset="100%" style="stop-color:${color}88"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="coloredBlur"/>
+      <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="420" fill="url(#bg)"/>
+  <rect width="800" height="4" fill="url(#accent)"/>
+
+  <!-- Decorative circles -->
+  <circle cx="700" cy="-30" r="200" fill="${color}" opacity="0.04"/>
+  <circle cx="720" cy="450" r="150" fill="#7c3aed" opacity="0.05"/>
+
+  <!-- FixOps logo -->
+  <rect x="48" y="36" width="28" height="28" rx="7" fill="#7c3aed"/>
+  <text x="62" y="55" font-family="Arial Black, sans-serif" font-size="14" fill="white" text-anchor="middle">⚡</text>
+  <text x="84" y="56" font-family="Arial, sans-serif" font-size="18" font-weight="800" fill="white">Fix<tspan fill="#a78bfa">Ops</tspan><tspan fill="rgba(255,255,255,0.35)" font-size="14" font-weight="400">.io</tspan></text>
+
+  <!-- Certificate label -->
+  <text x="48" y="100" font-family="Arial, sans-serif" font-size="10" font-weight="700" fill="${color}" letter-spacing="3" opacity="0.9">PORTAL HEALTH CERTIFICATE</text>
+  <line x1="48" y1="108" x2="${200}" y2="108" stroke="${color}" stroke-width="1" opacity="0.3"/>
+
+  <!-- Company name -->
+  <text x="48" y="150" font-family="Arial Black, sans-serif" font-size="${company.length > 20 ? 28 : 36}" font-weight="900" fill="white">${company}</text>
+  <text x="48" y="180" font-family="Arial, sans-serif" font-size="14" fill="rgba(255,255,255,0.45)">HubSpot Portal · Audited ${date}</text>
+
+  <!-- Score ring -->
+  <circle cx="660" cy="210" r="90" fill="${darkBg}" opacity="0.8"/>
+  <circle cx="660" cy="210" r="75" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="10"/>
+  <circle cx="660" cy="210" r="75" fill="none" stroke="${color}" stroke-width="10"
+    stroke-dasharray="${ringW} 283" stroke-dashoffset="70.75"
+    stroke-linecap="round" filter="url(#glow)" transform="rotate(-90 660 210)"/>
+  <text x="660" y="200" font-family="Arial Black, sans-serif" font-size="44" font-weight="900" fill="${color}" text-anchor="middle">${score}</text>
+  <text x="660" y="222" font-family="Arial, sans-serif" font-size="13" fill="rgba(255,255,255,0.45)" text-anchor="middle">out of 100</text>
+  <text x="660" y="248" font-family="Arial Black, sans-serif" font-size="16" font-weight="800" fill="white" text-anchor="middle">${grade}</text>
+
+  <!-- Stats row -->
+  <rect x="48" y="220" width="540" height="1" fill="rgba(255,255,255,0.08)"/>
+
+  <text x="70" y="270" font-family="Arial Black, sans-serif" font-size="28" font-weight="900" fill="${color}" text-anchor="middle">${checks}</text>
+  <text x="70" y="290" font-family="Arial, sans-serif" font-size="10" fill="rgba(255,255,255,0.4)" text-anchor="middle" letter-spacing="1">CHECKS RUN</text>
+
+  <text x="185" y="270" font-family="Arial Black, sans-serif" font-size="28" font-weight="900" fill="${criticals===0?color:'#f43f5e'}" text-anchor="middle">${criticals}</text>
+  <text x="185" y="290" font-family="Arial, sans-serif" font-size="10" fill="rgba(255,255,255,0.4)" text-anchor="middle" letter-spacing="1">CRITICAL ISSUES</text>
+
+  <text x="310" y="270" font-family="Arial Black, sans-serif" font-size="28" font-weight="900" fill="${color}" text-anchor="middle">185</text>
+  <text x="310" y="290" font-family="Arial, sans-serif" font-size="10" fill="rgba(255,255,255,0.4)" text-anchor="middle" letter-spacing="1">POINT AUDIT</text>
+
+  <text x="430" y="270" font-family="Arial Black, sans-serif" font-size="16" font-weight="900" fill="white" text-anchor="middle">${grade.toUpperCase()}</text>
+  <text x="430" y="290" font-family="Arial, sans-serif" font-size="10" fill="rgba(255,255,255,0.4)" text-anchor="middle" letter-spacing="1">OVERALL GRADE</text>
+
+  <!-- Footer -->
+  <rect x="48" y="355" width="704" height="1" fill="rgba(255,255,255,0.06)"/>
+  <text x="48" y="385" font-family="Arial, sans-serif" font-size="11" fill="rgba(255,255,255,0.3)">Verified by FixOps.io — Automated HubSpot Portal Intelligence</text>
+  <text x="752" y="385" font-family="Arial, sans-serif" font-size="11" fill="${color}" text-anchor="end" opacity="0.7">fixops.io/audit/${id}</text>
+
+  <!-- Certified badge -->
+  <rect x="48" y="310" width="110" height="28" rx="14" fill="${color}" opacity="0.15"/>
+  <rect x="48" y="310" width="110" height="28" rx="14" fill="none" stroke="${color}" stroke-width="1" opacity="0.4"/>
+  <text x="103" y="329" font-family="Arial, sans-serif" font-size="10" font-weight="700" fill="${color}" text-anchor="middle" letter-spacing="1">✓ VERIFIED ${new Date().getFullYear()}</text>
+</svg>`;
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(svg);
+  } catch(e) {
+    res.status(500).send('Error: ' + e.message);
+  }
+});
+
 
 // ── PDF Report — print-optimized HTML served as /audit/pdf?id=:id ──────────────
 app.get('/audit/pdf', async (req, res) => {
@@ -4202,6 +4362,11 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   // Warning penalty: each warning drops overall by 0.5pt (max -8)
   const warnPenalty = Math.min(8, Math.round(warningCount * 0.5));
   overallScore = Math.max(0, overallScore - critPenalty - warnPenalty);
+  // Hard grade caps based on critical issue count
+  if (criticalCount > 0 && overallScore > 84) overallScore = 84;
+  if (criticalCount >= 3 && overallScore > 71) overallScore = 71;
+  if (criticalCount >= 6 && overallScore > 59) overallScore = 59;
+
         // ── WASTE ESTIMATE ───────────────────────────────────────────────────────────
   // Conservative benchmarks: HubSpot billing + industry opportunity cost data
   const wasteDupes         = Math.round(dupes * 0.45);                          // Billing tier inflation
@@ -4230,7 +4395,24 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       portalStats:{
         contacts: contacts.length, companies: companies.length,
         deals: deals.length, tickets: tickets.length,
-        workflows: workflows.length, forms: forms.length, users: users.length,
+        workflows: workflows.length, forms: forms.length,
+        // ── Automation ROI ──────────────────────────────────────────────────────
+        automationROI: (() => {
+          if (!workflows.length) return null;
+          const AVG_TASK_MIN = 8;       // avg mins a workflow saves per enrollment
+          const HOURLY_RATE  = 35;      // avg HubSpot user hourly cost
+          const activeWfList = workflows.filter(w => w.properties?.hs_is_published !== 'false');
+          const totalEnrollments = activeWfList.reduce((sum,w) => sum + parseInt(w.properties?.hs_num_enrolled||0),0);
+          const hrsSaved = Math.round(totalEnrollments * AVG_TASK_MIN / 60);
+          const dollarSaved = Math.round(hrsSaved * HOURLY_RATE);
+          const deadWfCount = workflows.filter(w => parseInt(w.properties?.hs_num_enrolled||0)===0 && w.properties?.hs_is_published!=='false').length;
+          const erroredWfCount = workflows.filter(w => parseInt(w.properties?.hs_num_actions_errored||0)>0).length;
+          const efficiency = workflows.length > 0
+            ? Math.round(((workflows.length - deadWfCount - erroredWfCount) / workflows.length) * 100)
+            : 0;
+          const lostValue = Math.round(deadWfCount * AVG_TASK_MIN / 60 * HOURLY_RATE * 50); // 50 avg missed enrollments/mo
+          return { hrsSaved, dollarSaved, efficiency, deadWfCount, erroredWfCount, lostValue, totalEnrollments, activeCount: activeWfList.length };
+        })(), users: users.length,
         lists: lists.length, tasks: tasks.length, meetings: meetings.length,
         calls: calls.length, quotes: quotes.length, lineItems: lineItems.length,
         products: products.length, orders: orders.length,
@@ -4278,6 +4460,20 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
           String(q.properties?.hs_status||'').toLowerCase()==='accepted').length,
 
         // ── Contact engagement segmentation ──────────────────────
+        // ── Contact Decay Score ──────────────────────────────────────────────
+        // Age distribution of contacts by last activity
+        contactDecay: (() => {
+          const NINETY = 90 * DAY;
+          const ONE80  = 180 * DAY;
+          const YEAR   = 365 * DAY;
+          const fresh   = contacts.filter(c => { const l=c.properties?.hs_last_sales_activity_timestamp; return l&&(now-new Date(l).getTime())<NINETY; }).length;
+          const aging   = contacts.filter(c => { const l=c.properties?.hs_last_sales_activity_timestamp; return l&&(now-new Date(l).getTime())>=NINETY&&(now-new Date(l).getTime())<ONE80; }).length;
+          const stale   = contacts.filter(c => { const l=c.properties?.hs_last_sales_activity_timestamp; return l&&(now-new Date(l).getTime())>=ONE80&&(now-new Date(l).getTime())<YEAR; }).length;
+          const dead    = contacts.filter(c => { const l=c.properties?.hs_last_sales_activity_timestamp; return !l||(now-new Date(l).getTime())>=YEAR; }).length;
+          const billingWaste = Math.round(dead * 0.45); // avg billing cost of dead contacts
+          return { fresh, aging, stale, dead, total: contacts.length, billingWaste };
+        })(),
+
         hotContacts: contacts.filter(c=>{
           const last = c.properties?.hs_last_sales_activity_timestamp;
           return last && (now-new Date(last).getTime())/DAY < 30;
@@ -4384,6 +4580,35 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         // ── Pipeline schema ───────────────────────────────────────────────
         dealPipelines: dealPipelines.length,
         dealStagesTotal: dealPipelines.reduce((sum, p) => sum + (p.stages ? p.stages.length : 0), 0),
+
+        // ── Revenue Leak Analysis ──────────────────────────────────────────
+        // Map deals to pipeline stages to find where revenue dies
+        pipelineFunnel: (() => {
+          if (!dealPipelines.length || !openDeals.length) return null;
+          const mainPipeline = dealPipelines[0];
+          if (!mainPipeline?.stages?.length) return null;
+          const stages = mainPipeline.stages.sort((a,b) => (a.displayOrder||0)-(b.displayOrder||0));
+          return stages.map(stage => {
+            const stageDeals = openDeals.filter(d => d.properties?.dealstage === stage.id);
+            const stageValue = stageDeals.reduce((sum,d) => sum+parseFloat(d.properties?.amount||0),0);
+            const staleInStage = stageDeals.filter(d => {
+              const mod = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
+              return (now - mod)/DAY > 21;
+            });
+            // Avg days in stage (approx from createdate)
+            const avgDays = stageDeals.length > 0
+              ? Math.round(stageDeals.reduce((sum,d) => sum + (now - new Date(d.properties?.createdate||now).getTime())/DAY, 0) / stageDeals.length)
+              : 0;
+            return {
+              name: stage.label || stage.id,
+              count: stageDeals.length,
+              value: Math.round(stageValue),
+              stale: staleInStage.length,
+              avgDays,
+              probability: parseFloat(stage.probability || 0) * 100
+            };
+          }).filter(st => st.count > 0 || st.name);
+        })(),
 
         // ── Custom properties ─────────────────────────────────────────────
         customContactProps: contactProps.filter(p => p.createdUserId).length,
