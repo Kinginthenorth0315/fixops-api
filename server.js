@@ -2942,7 +2942,7 @@ async function runFullAudit(token, auditId, meta) {
 
   const issues = [];
   let dataScore=100, autoScore=100, pipelineScore=100, marketingScore=100;
-  let configScore=100, reportingScore=100, teamScore=100, serviceScore=100;
+  let configScore=88, reportingScore=100, teamScore=100, serviceScore=100;
   const now = Date.now(), DAY = 86400000;
 
 
@@ -4168,9 +4168,7 @@ async function runFullAudit(token, auditId, meta) {
 
     teamAdoption:     (users.length > 1 && hasActivityData)
       ? Math.max(0, Math.min(100, Math.round(teamScore)))
-      : users.length > 1
-        ? 50  // Has users but zero activity → neutral 50 (neither good nor bad — data gap)
-        : null,
+      : null,  // No activity data → can't score team adoption accurately
 
     serviceHealth:    hasServiceData 
       ? Math.max(0, Math.min(100, Math.round(serviceScore))) 
@@ -4180,15 +4178,31 @@ async function runFullAudit(token, auditId, meta) {
   const scores = Object.fromEntries(
     Object.entries(scoreMap).filter(([,v]) => v !== null)
   );
-  // Overall = average of scored dimensions only
-  const scoredValues = Object.values(scores);
-  const overallScore = scoredValues.length > 0
-    ? Math.round(scoredValues.reduce((a,b)=>a+b,0) / scoredValues.length)
-    : 70;
-  const criticalCount = issues.filter(i=>i.severity==='critical').length;
+const criticalCount = issues.filter(i=>i.severity==='critical').length;
   const warningCount  = issues.filter(i=>i.severity==='warning').length;
   const infoCount     = issues.filter(i=>i.severity==='info').length;
-  // ── WASTE ESTIMATE ───────────────────────────────────────────────────────────
+    // Overall = weighted average + critical penalty
+  // Pipeline and Data Integrity are weighted higher (revenue impact)
+  const WEIGHTS = {
+    dataIntegrity: 1.2, pipelineIntegrity: 1.3, automationHealth: 1.0,
+    marketingHealth: 1.0, configSecurity: 0.8, reportingQuality: 0.9,
+    teamAdoption: 1.0, serviceHealth: 1.0
+  };
+  let weightedSum = 0, weightTotal = 0;
+  Object.entries(scores).forEach(([k, v]) => {
+    const w = WEIGHTS[k] || 1.0;
+    weightedSum += v * w;
+    weightTotal += w;
+  });
+  let overallScore = weightTotal > 0
+    ? Math.round(weightedSum / weightTotal)
+    : 70;
+  // Critical penalty: each critical issue drops overall by 2pts (max -20)
+  const critPenalty = Math.min(20, criticalCount * 2);
+  // Warning penalty: each warning drops overall by 0.5pt (max -8)
+  const warnPenalty = Math.min(8, Math.round(warningCount * 0.5));
+  overallScore = Math.max(0, overallScore - critPenalty - warnPenalty);
+        // ── WASTE ESTIMATE ───────────────────────────────────────────────────────────
   // Conservative benchmarks: HubSpot billing + industry opportunity cost data
   const wasteDupes         = Math.round(dupes * 0.45);                          // Billing tier inflation
   const wasteStalledDeals  = Math.round(stalledVal * 0.02);                     // 2% of stalled pipeline/mo
@@ -4402,7 +4416,7 @@ async function runFullAudit(token, auditId, meta) {
     },
     summary:{
       overallScore,
-      grade: overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',
+      grade: overallScore>=85?'Excellent':overallScore>=72?'Good':overallScore>=55?'Needs Attention':'Critical',
       criticalCount, warningCount, infoCount, monthlyWaste,
       totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
       checksRun: 185, recordsScanned: totalRecordsScanned
