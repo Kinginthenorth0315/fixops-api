@@ -2737,7 +2737,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. Zero visibility into rep activity, call volume, meeting outcomes, or rep performance. The fix is a 5-minute calendar connection.',
       detail: 'Once Google Calendar or Outlook is connected, meetings log automatically with one click. Call logging via the HubSpot mobile app takes 10 seconds per call.',
       impact: 'Rep activity invisible · performance coaching impossible · activity-based reports all show zero',
-      dimension: 'Team Adoption',
+      dimension: 'Sales',
       guide: [
         'Connect HubSpot to Google Calendar or Outlook: Settings → Integrations → Email & Calendar',
         'Install HubSpot Sales Chrome Extension for one-click Gmail/Outlook logging',
@@ -2753,7 +2753,7 @@ async function runFullAudit(token, auditId, meta) {
       description: darkReps.length + ' of your HubSpot users had no logged call or meeting activity in the last 7 days. Active reps averaged ' + (totalActivity / Math.max(repList.length - darkReps.length, 1)).toFixed(1) + ' activities. Silent reps: ' + darkReps.slice(0,4).map(r=>r.name).join(', ') + '.',
       detail: 'Activity gaps are either a logging problem (rep is busy but not recording) or a performance problem (rep is not engaging). Both are invisible without this data. Weekly rep scorecards make this visible before it becomes a pipeline problem.',
       impact: 'Pipeline at risk from ' + darkReps.length + ' rep' + (darkReps.length!==1?'s':'') + ' with no logged activity · coaching blind spot',
-      dimension: 'Team Adoption',
+      dimension: 'Sales',
       repScorecard: repList,
       guide: [
         'This week: ' + repList.slice(0,5).map(r => r.name + ' — ' + r.calls + ' calls, ' + r.meetings + ' meetings, ' + r.staleDealCount + ' stale deals').join(' | '),
@@ -2773,7 +2773,7 @@ async function runFullAudit(token, auditId, meta) {
       description: staleRepsCount + ' rep' + (staleRepsCount!==1?'s':'') + ' have 2+ deals with no activity in 14+ days. Stale deals close at 11% vs 67% for actively worked deals (HubSpot research). These are revenue at risk right now.',
       detail: 'Deal velocity is the most predictive pipeline metric. A deal that goes 14 days without activity has crossed the threshold where probability drops sharply. Catching this weekly prevents the end-of-quarter surprise.',
       impact: 'Deals at risk · pipeline velocity dropping · forecast accuracy declining',
-      dimension: 'Team Adoption',
+      dimension: 'Sales',
       guide: [
         'Stale deal owners: ' + staleRepNames,
         'Set deal activity reminder: any deal with no activity in 10 days → task created automatically for rep',
@@ -2847,7 +2847,7 @@ async function runFullAudit(token, auditId, meta) {
             description: `When a single rep controls the majority of your pipeline, you have a critical business risk: if they leave, get sick, or go on vacation, your revenue forecast collapses. This is one of the first things investors and acquirers flag as a red flag in a revenue due diligence.`,
             detail: `Healthy pipeline distribution: no single rep should own more than 35-40% of total pipeline value. Above 55% is a warning. Above 70% is critical. Beyond the risk of losing the rep, concentrated pipelines also indicate CRM adoption problems across the rest of the team.`,
             impact: `$${topOwner[1].toLocaleString()} concentrated with one person · business continuity and valuation risk`,
-            dimension: 'Pipeline Integrity',
+            dimension: 'Pipeline',
             guide: [
               'Immediately: ensure deal notes, contact history, and next steps are documented for ALL deals in this the rep\'s pipeline',
               'Implement mandatory deal documentation: a "Key contacts" and "Next steps" required property on every open deal',
@@ -2909,7 +2909,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
       detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep does not know the deal exists.`,
       impact: `${newDealsNoActivity.length} leads assigned but never followed up — qualification rate dropping rapidly`,
-      dimension: 'Pipeline Integrity',
+      dimension: 'Pipeline',
       guide: [
         'Create a workflow: Deal is created → immediately create a "New deal — first contact required" task for the owner with a 2-hour due date',
         'Add a Slack notification when a new deal is created so reps see it in real time, not just in HubSpot',
@@ -2935,7 +2935,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Hard bounced emails mean these addresses definitively do not exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
       detail: `Email deliverability is invisible until it breaks catastrophically. Industry best practice: hard bounce rate above 2% triggers spam filter escalation. Above 5% can result in your sending domain being blacklisted.`,
       impact: `${highBounceRisk} hard bounces · sender reputation damage · emails landing in spam for entire list`,
-      dimension: 'Marketing Health',
+      dimension: 'Marketing',
       guide: [
         'Immediately: HubSpot auto-suppresses hard bounces from future sends — verify this is working in Marketing → Email → Bounced',
         'Export hard bounced contacts and permanently remove or archive them from your active database',
@@ -2966,7 +2966,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These quotes were sent to prospects but expired before they responded. No follow-up task was created, no rep was alerted. Each expired quote is a deal that likely went cold because nobody followed up when the deadline passed.`,
       detail: `Expired quotes with no follow-up are one of the clearest signs of pipeline neglect. A quote expiring should trigger an immediate rep task — this is a 5-minute workflow fix.`,
       impact: `${expiredQuotes.length} expired quotes · unknown pipeline value lost to inaction`,
-      dimension: 'Pipeline Integrity',
+      dimension: 'Pipeline',
       guide: [
         'Create a workflow: Quote expiration date is reached AND status is not Approved → create urgent task for deal owner',
         'Review each expired quote — many prospects just need a nudge, not a lost deal',
@@ -2986,7 +2986,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These line items were created manually instead of from your HubSpot product library. This means your product revenue reports are inaccurate, you cannot track which products are driving the most revenue, and forecasting by product line is impossible.`,
       detail: `Unlinked line items are a reporting blind spot. Every manually typed line item bypasses your product library analytics, making it impossible to answer "which product generates the most revenue?" without a spreadsheet.`,
       impact: `Product revenue reporting broken · pricing consistency at risk · forecast by product line impossible`,
-      dimension: 'Reporting Quality',
+      dimension: 'Reporting',
       guide: [
         'Settings → Products → build out your full product library with standardized names and pricing',
         'Train reps to always select from the product library when creating quotes and deals',
@@ -3010,7 +3010,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Your team is logging meetings but not recording what happened. Without outcomes (Completed, No Show, Cancelled), you cannot measure meeting effectiveness, identify which reps have the highest no-show rates, or use meeting data to improve forecast accuracy.`,
       detail: `Meeting outcomes are required for HubSpot's activity-based forecasting to work accurately. They are also essential for sales coaching — a rep with a 40% no-show rate needs different help than one with 90% completion.`,
       impact: `Activity-based forecasting inaccurate · coaching data incomplete · rep performance invisible`,
-      dimension: 'Team Adoption',
+      dimension: 'Sales',
       guide: [
         'Make meeting outcome a required field: Settings → Properties → Meeting Outcome → Required',
         'Create a workflow: Meeting is logged AND outcome is unknown → task for rep to update within 24 hours',
@@ -3030,7 +3030,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Your team is logging calls but not recording the result. Without call dispositions (Connected, Left Voicemail, No Answer, Wrong Number), you cannot track connect rates, measure rep call effectiveness, or identify which call times perform best.`,
       detail: `Call disposition data is the foundation of sales call analytics. Without it, you have a log of activity with no context — you know calls happened but not whether they produced anything.`,
       impact: `Call connect rate unknown · rep coaching data missing · call time optimization impossible`,
-      dimension: 'Team Adoption',
+      dimension: 'Sales',
       guide: [
         'Make call disposition required: Settings → Properties → Call Outcome → Required',
         'Install the HubSpot Sales mobile app — it prompts for disposition immediately after each call',
@@ -3090,7 +3090,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `Your ${openDeals.length} open deals average ${avgDealAge} days old. Industry benchmark is 30–45 days. ${oldDeals.length} deals are over 90 days old. Deals inactive for 21+ days close at 11% vs 67% for deals touched weekly — every extra day costs you real revenue.`,
         detail: `Pipeline velocity is the most predictive revenue health metric most HubSpot users never track. Slow velocity means deals are stuck at a specific stage, close dates are being pushed without action, or reps are hoarding pipeline. Each has a different fix — but none are fixable if you can't see the data.`,
         impact: `${oldDeals.length} deals over 90 days old · close rate declining on each stalled deal · forecast accuracy degrading`,
-        dimension: 'Pipeline Integrity',
+        dimension: 'Pipeline',
         guide: [
           'Build a pipeline age report: filter open deals by Create Date → group by stage → oldest average age = your bottleneck stage',
           'Set deal age SLA alerts: any deal > 21 days without activity → automated task for rep + Slack notification to manager',
@@ -3167,7 +3167,7 @@ async function runFullAudit(token, auditId, meta) {
           description: `Your team closed ${closedLost.length} lost deals but ${lostNoReason.length} have no reason recorded. Win rate is ${winRate}%${avgWonValue > 0 ? ` with avg deal value $${avgWonValue.toLocaleString()}` : ''}. Without loss reasons, you cannot identify whether you lose on price, timing, competition, or fit — making rep coaching and process improvement impossible.`,
           detail: `Loss reason data is the most valuable coaching asset a sales manager has. Teams that track loss reasons systematically improve win rate by 12% within 2 quarters according to Gong research. "Lost to competitor" requires completely different action than "lost — no budget" or "lost — wrong timing."`,
           impact: `Win rate improvement blocked · rep coaching impossible · competitive intelligence blind · product feedback loop broken`,
-          dimension: 'Reporting Quality',
+          dimension: 'Reporting',
           guide: [
             'Add required Close Lost Reason dropdown: Price, Competitor, Timing, No Budget, No Decision, Product Gap, Other',
             'Workflow: Deal stage = Closed Lost AND reason is unknown → task to rep: fill in reason within 24 hours',
@@ -3258,13 +3258,14 @@ async function runFullAudit(token, auditId, meta) {
         description: `HubSpot's State of Customer Service research shows 67% of customers expect resolution within 3 hours, and 32% within the same day. ${oldTickets.length} of your ${tickets.length} tickets exceed 3 days open. Each unresolved ticket is a customer whose trust is actively declining — and whose renewal is at risk.`,
         detail: `Ticket age directly correlates with churn probability. A ticket open 3 days has 2x the churn risk of a same-day resolution. A ticket open 7+ days increases churn probability by 340% according to HubSpot's customer success research. This is a revenue retention problem disguised as a support problem.`,
         impact: `Customer churn risk elevated · NPS declining · ${oldTickets.length} customers waiting too long · renewal conversations starting from deficit`,
-        dimension: 'Service Health',
+        dimension: 'Service',
         guide: [
           'Set ticket SLA rules: Service Hub → Settings → SLA → define response and resolution targets by priority tier',
           'Escalation workflow: Ticket open > 24 hours with no reply → notify manager + reassign to available rep',
           'Create priority tiers: Critical (2hr SLA), High (4hr), Normal (24hr), Low (72hr) — not all tickets are equal',
           'FixOps builds the full ticket SLA system with escalation workflows, manager dashboards, and customer health scoring'
-        ]
+        ],
+        dimension: 'Service'
       });
     }
   }
@@ -3290,7 +3291,7 @@ async function runFullAudit(token, auditId, meta) {
         title: churnRate + '% subscription churn rate — revenue retention at risk',
         description: cancelledSubs.length + ' of ' + subscriptions.length + ' subscriptions are cancelled. Industry benchmark is under 5% monthly churn. At ' + churnRate + '% your MRR is actively shrinking.',
         impact: 'MRR at risk · customer lifetime value declining · growth offset by churn',
-        dimension: 'Reporting Quality',
+        dimension: 'Reporting',
         guide: [
           'Map cancelled subscriptions to contact records — identify churn patterns',
           'Set up a churn prevention workflow: trigger at 60 days before renewal with proactive check-in',
@@ -3304,7 +3305,7 @@ async function runFullAudit(token, auditId, meta) {
         title: renewNext30.length + ' subscription' + (renewNext30.length!==1?'s':'') + ' renewing in the next 30 days — proactive outreach window',
         description: 'You have ' + renewNext30.length + ' active subscriptions renewing within 30 days. This is the highest-leverage customer success window: a proactive check-in before renewal reduces churn by 40% vs reactive handling after cancellation.',
         impact: 'MRR renewal window · proactive outreach opportunity',
-        dimension: 'Team Adoption',
+        dimension: 'Sales',
         guide: [
           'Create a renewal sequence: 30-day, 14-day, and 7-day pre-renewal touch points',
           'Assign each renewal to a CSM or account owner with a task due this week',
@@ -3328,7 +3329,7 @@ async function runFullAudit(token, auditId, meta) {
         title: expiredQuotes.length + ' quote' + (expiredQuotes.length!==1?'s':'') + ' expired without being accepted — lost revenue signal',
         description: 'Expired unaccepted quotes indicate deals that stalled at the proposal stage. Each expired quote is a buyer who evaluated your offer and did not convert — without follow-up, this is silent churn in your pipeline.',
         impact: 'Proposal conversion gap · unworked pipeline · revenue intelligence missing',
-        dimension: 'Pipeline Integrity',
+        dimension: 'Pipeline',
         guide: [
           'Review all expired quotes — were these deals lost, delayed, or forgotten?',
           'Set quote expiration reminders: 3 days before expiry → task to rep to follow up',
@@ -3349,7 +3350,7 @@ async function runFullAudit(token, auditId, meta) {
         title: overdueInvoices.length + ' overdue invoice' + (overdueInvoices.length!==1?'s':'') + ' — cash flow risk',
         description: overdueInvoices.length + ' invoices are past due (' + overdueRate + '% of all invoices). Uncollected invoices are cash that should already be in your account. Each day overdue increases collection difficulty exponentially.',
         impact: 'Cash flow at risk · accounts receivable aging · collection cost rising',
-        dimension: 'Reporting Quality',
+        dimension: 'Reporting',
         guide: [
           'Set up automated payment reminder sequences: 7 days before due, on due date, 3 days after, 7 days after',
           'Review overdue invoices by amount — prioritize largest for immediate personal outreach',
@@ -3627,7 +3628,7 @@ async function runFullAudit(token, auditId, meta) {
         title: 'Low rep activity logging — avg ' + avgPerUser + ' engagements per user in last 30 days',
         description: 'Across ' + users.length + ' users, FixOps found an average of ' + avgPerUser + ' logged engagements (calls, emails, meetings, notes) per user. Low logging means your CRM does not reflect reality — pipeline data is unreliable and managers cannot coach from actual activity.',
         impact: 'Pipeline forecasting unreliable · manager coaching blind · deal risk invisible',
-        dimension: 'Team Adoption',
+        dimension: 'Sales',
         activityData: {
           emailsLogged: emailEngs.length,
           notesLogged: notes.length,
@@ -3658,7 +3659,7 @@ async function runFullAudit(token, auditId, meta) {
         title: expiredGoals.length + ' expired sales goal' + (expiredGoals.length!==1?'s':'') + ' — rep targets not updated',
         description: 'Sales goals past their end date without replacement mean reps are working without active targets. Pipeline discipline and accountability drop without current goals.',
         impact: 'No active targets · pipeline discipline drops · forecasting accuracy suffers',
-        dimension: 'Team Adoption',
+        dimension: 'Sales',
         guide: ['Sales Goals — review expired entries', 'Set new quarterly targets per rep', 'Add goal reporting to team dashboards']
       });
     }
