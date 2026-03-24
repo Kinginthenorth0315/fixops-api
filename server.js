@@ -3051,8 +3051,6 @@ async function runFullAudit(token, auditId, meta) {
       });
     }
 
-    // AutoDoc availability flag  -  tell the UI workflows are available for docs
-    finalResult && (finalResult.hasWorkflowData = true);
   }
 
   // 5. TICKET SLA — 67% of customers expect resolution within 3 hours (HubSpot State of Service)
