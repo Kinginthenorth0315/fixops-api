@@ -1626,12 +1626,11 @@ const buildAuthUrl = (req, res, params) => {
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
     pendingAudits.set(state, { email, company, plan, paid: !!paid, codeVerifier, createdAt: Date.now() });
-    const url = new URL('https://mcp.hubspot.com/oauth/authorize');
+    // Standard Public App OAuth — counts as marketplace install
+    const url = new URL('https://app.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
     url.searchParams.set('redirect_uri', HUBSPOT_REDIRECT_URI);
     url.searchParams.set('state', state);
-    url.searchParams.set('code_challenge', codeChallenge);
-    url.searchParams.set('code_challenge_method', 'S256');
     console.log(`Auth URL: ${email} | plan: ${plan} | paid: ${paid}`);
     res.json({ url: url.toString(), state });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1658,19 +1657,11 @@ app.get('/auth/callback', async (req, res) => {
       client_secret: HUBSPOT_CLIENT_SECRET,
       redirect_uri: HUBSPOT_REDIRECT_URI,
       code,
-      code_verifier: pending.codeVerifier,
     });
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
 
-    let tokenRes;
-    try {
-      tokenRes = await axios.post('https://mcp.hubspot.com/oauth/v3/token', body, { headers });
-      console.log('MCP token success');
-    } catch(e) {
-      console.log('MCP failed, trying standard...');
-      tokenRes = await axios.post('https://api.hubapi.com/oauth/v1/token', body, { headers });
-      console.log('Standard token success');
-    }
+    const tokenRes = await axios.post('https://api.hubapi.com/oauth/v1/token', body, { headers });
+    console.log('Public App OAuth token success');
 
     await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Connecting to HubSpot...' });
 
