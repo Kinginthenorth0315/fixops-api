@@ -91,6 +91,29 @@ async function initDb() {
   for (const col of newCols) {
     await db.query(`ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS ${col}`).catch(()=>{});
   }
+  // Agency multi-portal support
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS portals (
+      id              SERIAL PRIMARY KEY,
+      customer_id     INT REFERENCES customers(id),
+      portal_token    TEXT NOT NULL,
+      company         VARCHAR(255),
+      portal_id       VARCHAR(100),
+      plan            VARCHAR(50) DEFAULT 'command',
+      last_audit_id   VARCHAR(24),
+      last_audit_at   TIMESTAMP,
+      last_score      INT,
+      critical_count  INT DEFAULT 0,
+      monthly_waste   INT DEFAULT 0,
+      is_active       BOOLEAN DEFAULT true,
+      nickname        VARCHAR(100),
+      created_at      TIMESTAMP DEFAULT NOW(),
+      updated_at      TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
+  await db.query(`ALTER TABLE portals ADD COLUMN IF NOT EXISTS nickname VARCHAR(100)`).catch(()=>{});
+  await db.query(`ALTER TABLE portals ADD COLUMN IF NOT EXISTS portal_id VARCHAR(100)`).catch(()=>{});
+
   // Cleanup: free results after 7 days, paid after 365
   await db.query(`
     DELETE FROM audit_results
@@ -163,184 +186,234 @@ const cleanText = (obj) => {
 
 // ── Email helpers ─────────────────────────────────────────────────────────────
 const sendClientEmail = async (email, result, auditId) => {
-  const s = result.summary || {};
-  const pi = result.portalInfo || {};
+  const s   = result.summary || {};
+  const pi  = result.portalInfo || {};
   const issues = result.issues || [];
   const scores = result.scores || {};
-  const col = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#f43f5e';
   const plan = result.plan || 'free';
-  const planLabel = {
-    'free':'Free Snapshot','deep':'Deep Audit','pro-audit':'Pro Audit',
-    'pulse':'Pulse','pro':'Pro Plan','command':'Command'
-  }[plan] || 'Audit';
   const company = pi.company || 'Your Portal';
   const ps = pi.portalStats || {};
+
+  const col   = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#ef4444';
   const grade = s.overallScore >= 85 ? 'Excellent' : s.overallScore >= 70 ? 'Good' : s.overallScore >= 55 ? 'Needs Attention' : 'Critical';
+  const planLabel = { free:'Free Snapshot', deep:'Deep Audit', 'pro-audit':'Pro Audit', pulse:'Pulse', pro:'Pro Plan', command:'Agency' }[plan] || 'Audit';
 
-  // Get top 3 critical issues for preview
+  // Top issues — max 5, criticals first
   const criticals = issues.filter(i => i.severity === 'critical').slice(0, 3);
-  const warnings = issues.filter(i => i.severity === 'warning').slice(0, 2);
-  const previewIssues = [...criticals, ...warnings].slice(0, 4);
+  const warnings  = issues.filter(i => i.severity === 'warning').slice(0, 2);
+  const topIssues = [...criticals, ...warnings].slice(0, 5);
+  const moreCount = issues.length - topIssues.length;
 
-  // Build dimension score bars
-  const dims = [
-    ['Data Integrity', scores.dataIntegrity],
-    ['Automation', scores.automationHealth],
-    ['Pipeline', scores.pipelineIntegrity],
-    ['Configuration', scores.configSecurity],
-    ['Reporting', scores.reportingQuality],
-    ['Team Adoption', scores.teamAdoption],
-  ].filter(d => d[1] !== undefined);
-
-  const dimBarsHtml = dims.slice(0,6).map(([name, score]) => {
-    const sc = score || 0;
-    const bc = sc >= 80 ? '#10b981' : sc >= 60 ? '#f59e0b' : '#ef4444';
-    const pct = Math.round(sc);
-    return `<tr>
-      <td style="font-size:12px;color:#555;padding:4px 0;width:140px;">${name}</td>
-      <td style="padding:4px 8px;">
-        <div style="background:#f0f0f0;border-radius:4px;height:8px;width:160px;">
-          <div style="background:${bc};height:8px;border-radius:4px;width:${pct}%;"></div>
-        </div>
-      </td>
-      <td style="font-size:12px;font-weight:700;color:${bc};padding:4px 0;text-align:right;width:36px;">${pct}</td>
-    </tr>`;
+  // Issue rows HTML
+  const issueRowsHtml = topIssues.map(i => {
+    const isCrit = i.severity === 'critical';
+    const badgeColor = isCrit ? '#ef4444' : '#f59e0b';
+    const badgeBg    = isCrit ? '#fff1f1' : '#fffbeb';
+    const label      = isCrit ? 'CRITICAL' : 'WARNING';
+    const title      = (i.title || '').length > 90 ? i.title.substring(0, 90) + '…' : (i.title || '');
+    const impact     = (i.impact || '').length > 110 ? i.impact.substring(0, 110) + '…' : (i.impact || '');
+    return '<tr>' +
+      '<td style="padding:14px 20px;border-bottom:1px solid #f3f4f6;">' +
+        '<div style="display:flex;align-items:flex-start;gap:12px;">' +
+          '<span style="flex-shrink:0;margin-top:2px;padding:2px 8px;background:' + badgeBg + ';color:' + badgeColor + ';font-size:9px;font-weight:800;letter-spacing:1.2px;border-radius:4px;font-family:monospace;">' + label + '</span>' +
+          '<div>' +
+            '<div style="font-size:13px;font-weight:700;color:#111;line-height:1.4;margin-bottom:3px;">' + title + '</div>' +
+            (impact ? '<div style="font-size:11px;color:#888;line-height:1.5;">' + impact + '</div>' : '') +
+          '</div>' +
+        '</div>' +
+      '</td>' +
+    '</tr>';
   }).join('');
 
-  // Build issue preview
-  const issuePreviewHtml = previewIssues.length > 0 ? previewIssues.map(i => {
-    const ic = i.severity === 'critical' ? '#ef4444' : '#f59e0b';
-    const ib = i.severity === 'critical' ? '#fff5f5' : '#fffbeb';
-    const ib2 = i.severity === 'critical' ? '#fee2e2' : '#fef3c7';
-    const label = i.severity === 'critical' ? 'CRITICAL' : 'WARNING';
-    const title = i.title || '';
-    const impact = i.impact || '';
-    return `<div style="background:${ib};border:1px solid ${ib2};border-left:3px solid ${ic};border-radius:6px;padding:10px 14px;margin-bottom:8px;">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-        <span style="font-size:9px;font-weight:700;color:${ic};letter-spacing:1px;">${label}</span>
-      </div>
-      <div style="font-size:13px;font-weight:600;color:#111;margin-bottom:3px;">${title.length > 80 ? title.substring(0,80)+'…' : title}</div>
-      ${impact ? `<div style="font-size:11px;color:#666;">${impact.length > 100 ? impact.substring(0,100)+'…' : impact}</div>` : ''}
-    </div>`;
-  }).join('') : '';
+  // Ghost seats section — computed, NOT inside template literal expression
+  let ghostHtml = '';
+  const ghostIssue = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
+  if (ghostIssue) {
+    const gd = ghostIssue.ghostSeatData;
+    const gwaste = gd.length * 90;
+    const ghostRows = gd.slice(0, 5).map(u =>
+      '<tr>' +
+        '<td style="padding:8px 16px;font-size:12px;color:#374151;border-bottom:1px solid #f9fafb;">' + u.name + '</td>' +
+        '<td style="padding:8px 16px;font-size:12px;font-weight:700;color:#ef4444;text-align:right;border-bottom:1px solid #f9fafb;">' + u.daysSince + 'd inactive</td>' +
+      '</tr>'
+    ).join('');
+    ghostHtml =
+      '<tr><td style="padding:0 20px 20px;">' +
+        '<div style="background:#fff8f8;border:1px solid #fee2e2;border-radius:10px;overflow:hidden;">' +
+          '<div style="padding:12px 16px;background:#fff1f1;border-bottom:1px solid #fee2e2;display:flex;align-items:center;justify-content:space-between;">' +
+            '<span style="font-size:12px;font-weight:700;color:#dc2626;">👻 Ghost Seats Detected</span>' +
+            '<span style="font-size:11px;font-weight:700;color:#dc2626;background:#fff;padding:3px 10px;border-radius:20px;border:1px solid #fca5a5;">$' + gwaste.toLocaleString() + '/mo wasted</span>' +
+          '</div>' +
+          '<div style="padding:8px 0;">' +
+            '<table style="width:100%;border-collapse:collapse;">' +
+              '<tr style="background:#fef2f2;">' +
+                '<th style="padding:6px 16px;font-size:10px;color:#9ca3af;font-weight:600;text-align:left;text-transform:uppercase;letter-spacing:.06em;">User</th>' +
+                '<th style="padding:6px 16px;font-size:10px;color:#9ca3af;font-weight:600;text-align:right;text-transform:uppercase;letter-spacing:.06em;">Last Login</th>' +
+              '</tr>' +
+              ghostRows +
+            '</table>' +
+          '</div>' +
+          '<div style="padding:10px 16px;font-size:11px;color:#b91c1c;">Deactivate these users in Settings → Users to recover $' + gwaste.toLocaleString() + '/mo immediately.</div>' +
+        '</div>' +
+      '</td></tr>';
+  }
 
-  const moreCount = issues.length - previewIssues.length;
+  // Dimension score bars
+  const dimData = [
+    ['Data Integrity',  scores.dataIntegrity],
+    ['Automation',      scores.automationHealth],
+    ['Pipeline',        scores.pipelineIntegrity],
+    ['Config & Security', scores.configSecurity],
+    ['Reporting',       scores.reportingQuality],
+    ['Team Adoption',   scores.teamAdoption],
+  ].filter(d => d[1] !== undefined);
+
+  const dimBarsHtml = dimData.map(([name, sc]) => {
+    const v  = Math.round(sc || 0);
+    const bc = v >= 80 ? '#10b981' : v >= 60 ? '#f59e0b' : '#ef4444';
+    return '<tr>' +
+      '<td style="font-size:12px;color:#555;padding:5px 0;width:130px;font-weight:500;">' + name + '</td>' +
+      '<td style="padding:5px 10px;">' +
+        '<div style="background:#f3f4f6;border-radius:4px;height:7px;overflow:hidden;">' +
+          '<div style="background:' + bc + ';height:100%;width:' + v + '%;border-radius:4px;"></div>' +
+        '</div>' +
+      '</td>' +
+      '<td style="font-size:12px;font-weight:800;color:' + bc + ';padding:5px 0;text-align:right;width:32px;">' + v + '</td>' +
+    '</tr>';
+  }).join('');
+
+  // Strategy call note for paid one-time audits
+  const strategyCallHtml = (plan === 'deep' || plan === 'pro-audit')
+    ? '<tr><td style="padding:0 20px 20px;">' +
+        '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:14px 16px;font-size:13px;color:#166534;">' +
+          '<strong>📅 Strategy Call Included</strong><br>' +
+          '<span style="font-size:12px;color:#15803d;">Our team will email you within a few hours to schedule your ' + (plan === 'pro-audit' ? '60' : '30') + '-minute strategy call and written action plan.</span>' +
+        '</div>' +
+      '</td></tr>'
+    : '';
+
+  const subject = s.criticalCount > 0
+    ? '⚠️ ' + company + ' — ' + s.criticalCount + ' critical issue' + (s.criticalCount !== 1 ? 's' : '') + ' found · Score ' + s.overallScore + '/100'
+    : '✅ ' + company + ' — Portal audit complete · Score ' + s.overallScore + '/100';
+
+  const html =
+    '<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>' +
+    '<body style="margin:0;padding:0;background:#f4f4f7;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;">' +
+    '<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f7;padding:32px 16px;">' +
+    '<tr><td align="center">' +
+    '<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">' +
+
+    // ── HEADER ────────────────────────────────────────────────────────────────
+    '<tr><td style="background:#08061a;border-radius:14px 14px 0 0;padding:28px 32px;text-align:center;">' +
+      '<div style="font-size:22px;font-weight:800;color:#fff;letter-spacing:-0.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span><span style="color:rgba(255,255,255,.35);font-weight:400;font-size:16px;">.io</span></div>' +
+      '<div style="font-size:10px;color:rgba(255,255,255,.35);letter-spacing:2.5px;margin-top:5px;text-transform:uppercase;font-family:monospace;">HubSpot Portal Intelligence</div>' +
+    '</td></tr>' +
+
+    // ── SCORE HERO ────────────────────────────────────────────────────────────
+    '<tr><td style="background:#fff;padding:32px 32px 20px;text-align:center;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">' +
+      '<div style="font-size:11px;color:#999;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:10px;">' + company + ' · Portal Health Score</div>' +
+      '<div style="display:inline-block;width:100px;height:100px;border-radius:50%;border:5px solid ' + col + ';line-height:90px;text-align:center;margin-bottom:12px;">' +
+        '<span style="font-size:36px;font-weight:900;color:' + col + ';">' + s.overallScore + '</span>' +
+      '</div>' +
+      '<div style="font-size:13px;color:#999;margin-bottom:10px;">out of 100 · <strong style="color:#333;">' + grade + '</strong></div>' +
+      '<span style="display:inline-block;padding:4px 14px;background:' + col + '15;color:' + col + ';border:1px solid ' + col + '35;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;">' + planLabel + '</span>' +
+    '</td></tr>' +
+
+    // ── STATS ROW ─────────────────────────────────────────────────────────────
+    '<tr><td style="background:#fff;padding:0 20px 20px;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">' +
+      '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+        '<td width="33%" style="padding:0 6px 0 0;">' +
+          '<div style="background:#fff5f5;border:1px solid #fee2e2;border-radius:10px;padding:16px;text-align:center;">' +
+            '<div style="font-size:30px;font-weight:900;color:#ef4444;line-height:1;">' + (s.criticalCount || 0) + '</div>' +
+            '<div style="font-size:10px;color:#ef4444;font-weight:700;letter-spacing:1px;margin-top:4px;">CRITICAL</div>' +
+          '</div>' +
+        '</td>' +
+        '<td width="33%" style="padding:0 3px;">' +
+          '<div style="background:#fffbeb;border:1px solid #fef3c7;border-radius:10px;padding:16px;text-align:center;">' +
+            '<div style="font-size:30px;font-weight:900;color:#f59e0b;line-height:1;">' + (s.warningCount || 0) + '</div>' +
+            '<div style="font-size:10px;color:#f59e0b;font-weight:700;letter-spacing:1px;margin-top:4px;">WARNINGS</div>' +
+          '</div>' +
+        '</td>' +
+        '<td width="33%" style="padding:0 0 0 6px;">' +
+          '<div style="background:#f5f3ff;border:1px solid #ede9fe;border-radius:10px;padding:16px;text-align:center;">' +
+            '<div style="font-size:30px;font-weight:900;color:#7c3aed;line-height:1;">$' + Number(s.monthlyWaste || 0).toLocaleString() + '</div>' +
+            '<div style="font-size:10px;color:#7c3aed;font-weight:700;letter-spacing:1px;margin-top:4px;">WASTE / MO</div>' +
+          '</div>' +
+        '</td>' +
+      '</tr></table>' +
+    '</td></tr>' +
+
+    // ── RECORDS SCANNED ───────────────────────────────────────────────────────
+    '<tr><td style="background:#fff;padding:0 20px 20px;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">' +
+      '<div style="background:#f9fafb;border-radius:8px;padding:11px 16px;font-size:12px;color:#888;text-align:center;">' +
+        '📊 Scanned <strong style="color:#444;">' + Number(s.recordsScanned || 0).toLocaleString() + ' records</strong>' +
+        (ps.contacts ? ' across <strong style="color:#444;">' + Number(ps.contacts).toLocaleString() + ' contacts</strong>' : '') +
+        (ps.deals    ? ' · <strong style="color:#444;">' + Number(ps.deals).toLocaleString() + ' deals</strong>' : '') +
+        (ps.tickets  ? ' · <strong style="color:#444;">' + Number(ps.tickets).toLocaleString() + ' tickets</strong>' : '') +
+      '</div>' +
+    '</td></tr>' +
+
+    // ── TOP ISSUES ────────────────────────────────────────────────────────────
+    (topIssues.length > 0
+      ? '<tr><td style="background:#fff;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">' +
+          '<div style="padding:4px 20px 0;">' +
+            '<div style="font-size:10px;font-weight:800;color:#999;letter-spacing:1.5px;text-transform:uppercase;padding:16px 0 8px;">Top Issues Found</div>' +
+          '</div>' +
+          '<table width="100%" cellpadding="0" cellspacing="0">' +
+            issueRowsHtml +
+          '</table>' +
+          (moreCount > 0
+            ? '<div style="padding:12px 20px 16px;font-size:12px;color:#999;text-align:center;">+ ' + moreCount + ' more issue' + (moreCount !== 1 ? 's' : '') + ' in your full report</div>'
+            : '') +
+        '</td></tr>'
+      : '') +
+
+    // ── GHOST SEATS (pre-computed, no template expression) ────────────────────
+    (ghostHtml
+      ? '<tr><td style="background:#fff;padding:0 0 0 0;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;"><table width="100%" cellpadding="0" cellspacing="0">' + ghostHtml + '</table></td></tr>'
+      : '') +
+
+    // ── DIMENSION SCORES ──────────────────────────────────────────────────────
+    (dimBarsHtml
+      ? '<tr><td style="background:#fff;padding:20px 20px;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;">' +
+          '<div style="font-size:10px;font-weight:800;color:#999;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">Health Dimensions</div>' +
+          '<table width="100%" cellpadding="0" cellspacing="0">' + dimBarsHtml + '</table>' +
+        '</td></tr>'
+      : '') +
+
+    // ── STRATEGY CALL (paid audits) ───────────────────────────────────────────
+    (strategyCallHtml
+      ? '<tr><td style="background:#fff;padding:0 0 0 0;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;"><table width="100%" cellpadding="0" cellspacing="0">' + strategyCallHtml + '</table></td></tr>'
+      : '') +
+
+    // ── CTA ───────────────────────────────────────────────────────────────────
+    '<tr><td style="background:#fff;padding:24px 32px 28px;border-left:1px solid #e8e8ee;border-right:1px solid #e8e8ee;text-align:center;">' +
+      '<a href="' + (process.env.FRONTEND_URL || 'https://fixops.io') + '/results.html?id=' + auditId + '" style="display:inline-block;padding:15px 36px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:11px;font-weight:700;font-size:15px;letter-spacing:-0.2px;">View Full Audit Results →</a>' +
+      '<div style="margin-top:10px;font-size:12px;color:#aaa;">Every issue includes a dollar impact estimate and a step-by-step fix guide</div>' +
+      '<div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:10px;padding:14px 16px;font-size:12px;color:#5b21b6;text-align:left;">' +
+        '<strong>💡 Want this fixed for you?</strong> Every issue has a "Fix It For Me" button in your results — click it and we\'ll scope and quote a fix within 24 hours. No commitment.' +
+      '</div>' +
+    '</td></tr>' +
+
+    // ── FOOTER ────────────────────────────────────────────────────────────────
+    '<tr><td style="background:#f9f9f9;border:1px solid #e8e8ee;border-top:none;border-radius:0 0 14px 14px;padding:18px 32px;text-align:center;font-size:11px;color:#bbb;">' +
+      '<a href="' + (process.env.FRONTEND_URL || 'https://fixops.io') + '" style="color:#7c3aed;text-decoration:none;font-weight:700;">fixops.io</a>' +
+      ' &nbsp;·&nbsp; <a href="mailto:matthew@fixops.io" style="color:#bbb;text-decoration:none;">matthew@fixops.io</a>' +
+      ' &nbsp;·&nbsp; HubSpot Systems. Fixed.' +
+    '</td></tr>' +
+
+    '</table>' +
+    '</td></tr></table>' +
+    '</body></html>';
 
   await resend.emails.send({
     from: 'FixOps Reports <reports@fixops.io>',
-    to: email,
-    subject: s.criticalCount > 0
-      ? `⚠️ ${company} — ${s.criticalCount} critical issue${s.criticalCount!==1?'s':''} found · Score ${s.overallScore}/100`
-      : `✅ ${company} — Portal audit complete · Score ${s.overallScore}/100`,
-    html: `<!DOCTYPE html><html><body style="font-family:system-ui,-apple-system,sans-serif;background:#f0f0f5;margin:0;padding:24px 12px;">
-<div style="max-width:580px;margin:0 auto;">
-
-<!-- Header -->
-<div style="background:#08061a;border-radius:16px 16px 0 0;padding:28px 32px;text-align:center;">
-  <div style="font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.5px;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
-  <div style="font-size:11px;color:rgba(255,255,255,.35);font-family:monospace;letter-spacing:2px;margin-top:4px;text-transform:uppercase;">HubSpot Portal Intelligence</div>
-</div>
-
-<!-- Score hero -->
-<div style="background:#fff;padding:32px 32px 24px;text-align:center;border-left:1px solid #eee;border-right:1px solid #eee;">
-  <div style="font-size:13px;color:#888;font-weight:500;margin-bottom:8px;">Portal Health Score · ${company}</div>
-  <div style="font-size:80px;font-weight:900;color:${col};line-height:1;letter-spacing:-3px;">${s.overallScore}</div>
-  <div style="font-size:14px;color:#999;margin-top:4px;">out of 100 · ${grade}</div>
-  <div style="display:inline-block;margin-top:12px;padding:5px 16px;background:${col}12;color:${col};border:1px solid ${col}33;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px;">${planLabel}</div>
-</div>
-
-<!-- Stats row -->
-<div style="background:#fff;padding:0 24px 24px;border-left:1px solid #eee;border-right:1px solid #eee;">
-  <table style="width:100%;border-collapse:separate;border-spacing:8px 0;">
-    <tr>
-      <td style="background:#fff5f5;border:1px solid #fee2e2;border-radius:10px;padding:16px;text-align:center;width:33%;">
-        <div style="font-size:28px;font-weight:900;color:#ef4444;">${s.criticalCount||0}</div>
-        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">CRITICAL</div>
-      </td>
-      <td style="background:#fffbeb;border:1px solid #fef3c7;border-radius:10px;padding:16px;text-align:center;width:33%;">
-        <div style="font-size:28px;font-weight:900;color:#f59e0b;">${s.warningCount||0}</div>
-        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">WARNINGS</div>
-      </td>
-      <td style="background:#f5f3ff;border:1px solid #ede9fe;border-radius:10px;padding:16px;text-align:center;width:33%;">
-        <div style="font-size:28px;font-weight:900;color:#7c3aed;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
-        <div style="font-size:11px;color:#999;margin-top:2px;font-weight:600;">EST. WASTE/MO</div>
-      </td>
-    </tr>
-  </table>
-</div>
-
-<!-- Records scanned -->
-<div style="background:#fff;padding:0 32px 20px;border-left:1px solid #eee;border-right:1px solid #eee;">
-  <div style="background:#f9f9f9;border-radius:8px;padding:12px 16px;font-size:12px;color:#888;text-align:center;">
-    📊 Scanned <strong style="color:#444;">${Number(s.recordsScanned||0).toLocaleString()} records</strong> across
-    ${ps.contacts ? `<strong style="color:#444;">${Number(ps.contacts).toLocaleString()} contacts</strong>` : ''}
-    ${ps.deals ? ` · <strong style="color:#444;">${Number(ps.deals).toLocaleString()} deals</strong>` : ''}
-    ${ps.tickets ? ` · <strong style="color:#444;">${Number(ps.tickets).toLocaleString()} tickets</strong>` : ''}
-  </div>
-</div>
-
-<!-- Issues preview -->
-${previewIssues.length > 0 ? `
-<div style="background:#fff;padding:0 32px 8px;border-left:1px solid #eee;border-right:1px solid #eee;">
-  <div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;padding-top:4px;">Top Issues Found</div>
-  ${issuePreviewHtml}
-  ${moreCount > 0 ? `<div style="font-size:12px;color:#888;text-align:center;padding:8px 0 16px;">+ ${moreCount} more issue${moreCount!==1?'s':''} in your full report</div>` : ''}
-</div>` : ''}
-
-<!-- Ghost Seats Alert -->
-\${(()=>{
-  const ghostIssue = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
-  if(!ghostIssue) return '';
-  const ghostData = ghostIssue.ghostSeatData;
-  const waste = ghostData.length * 90;
-  const rows = ghostData.slice(0,5).map(u =>
-    '<tr>' +
-      '<td style="font-size:12px;color:#374151;padding:4px 8px;border-bottom:1px solid #f3f4f6;">' + u.name + '</td>' +
-      '<td align="center" style="font-size:12px;color:#ef4444;font-weight:700;padding:4px 8px;border-bottom:1px solid #f3f4f6;">' + u.daysSince + 'd</td>' +
-    '</tr>'
-  ).join('');
-  return '<div style="background:#fff;padding:16px 32px;border-left:1px solid #eee;border-right:1px solid #eee;">' +
-    '<div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">👻 Ghost Seats — $' + waste.toLocaleString() + '/mo Wasted</div>' +
-    '<div style="font-size:11px;color:#666;margin-bottom:10px;">' + ghostData.length + ' paid users with zero logins in 90+ days</div>' +
-    '<table style="width:100%;border-collapse:collapse;">' +
-      '<tr style="background:#f9fafb;"><th style="font-size:10px;color:#6b7280;padding:4px 8px;text-align:left;font-weight:600;">User</th><th style="font-size:10px;color:#6b7280;padding:4px 8px;text-align:center;font-weight:600;">Days Inactive</th></tr>' +
-      rows +
-    '</table>' +
-  '</div>';
-})()}
-
-<!-- Dimension scores -->
-${dims.length > 0 ? `
-<div style="background:#fff;padding:16px 32px 24px;border-left:1px solid #eee;border-right:1px solid #eee;">
-  <div style="font-size:12px;font-weight:700;color:#333;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">Health Dimensions</div>
-  <table style="width:100%;border-collapse:collapse;">
-    ${dimBarsHtml}
-  </table>
-</div>` : ''}
-
-<!-- CTA -->
-<div style="background:#fff;padding:24px 32px 32px;border-left:1px solid #eee;border-right:1px solid #eee;text-align:center;">
-  <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="display:inline-block;padding:15px 36px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:12px;font-weight:700;font-size:15px;letter-spacing:-0.2px;">View Full Audit Results →</a>
-  <div style="margin-top:12px;font-size:12px;color:#999;">Every issue includes a dollar impact estimate and a step-by-step fix guide</div>
-  ${plan === 'deep' || plan === 'pro-audit' ? `
-  <div style="margin-top:16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px;font-size:13px;color:#166534;text-align:left;">
-    <strong>📅 Your strategy call:</strong> Our team will email you within a few hours to schedule your ${plan === 'pro-audit' ? '60' : '30'}-minute strategy call and written action plan.
-  </div>` : ''}
-  <div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px;font-size:12px;color:#5b21b6;text-align:left;">
-    <strong>💡 Want this fixed?</strong> Every issue has a "Fix It For Me" button in your results — click it and we'll scope and quote a fix within 24 hours. No commitment required.
-  </div>
-</div>
-
-<!-- Footer -->
-<div style="background:#f9f9f9;border:1px solid #eee;border-top:none;border-radius:0 0 16px 16px;padding:20px 32px;text-align:center;font-size:11px;color:#aaa;">
-  <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · 
-  <a href="mailto:matthew@fixops.io" style="color:#aaa;text-decoration:none;">matthew@fixops.io</a> · 
-  HubSpot Systems. Fixed.
-</div>
-
-</div></body></html>`
+    to:    email,
+    subject,
+    html
   });
 };
+
 
 const notifyMatthew = async (result, auditId, plan) => {
   const s = result.summary || {};
@@ -629,72 +702,13 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
   </td></tr>` : ''}
 
   <!-- Rep Activity Scorecard -->
-  ${(()=>{
-    const repIssue = issues.find(i => i.repScorecard && i.repScorecard.length > 0);
-    const repData = repIssue ? repIssue.repScorecard.slice(0,8) : [];
-    if(repData.length === 0) return '';
-    const rows = repData.map(r => {
-      const actColor = (r.calls + r.meetings) > 5 ? '#10b981' : (r.calls + r.meetings) > 1 ? '#f59e0b' : '#f43f5e';
-      return '<tr>' +
-        '<td style="font-size:12px;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.name + '</td>' +
-        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.calls + '</td>' +
-        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.meetings + '</td>' +
-        '<td align="center" style="font-size:12px;font-weight:700;color:' + (r.staleDealCount > 2 ? '#f43f5e' : '#374151') + ';padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + r.staleDealCount + '</td>' +
-        '<td align="center" style="padding:5px 8px;border-bottom:1px solid #f3f4f6;"><span style="font-size:11px;font-weight:700;color:' + actColor + ';">' + (r.calls+r.meetings > 5 ? 'Active' : r.calls+r.meetings > 0 ? 'Low' : 'Dark') + '</span></td>' +
-      '</tr>';
-    }).join('');
-    return '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
-      '<div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">👥 Rep Activity This Week</div>' +
-      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
-        '<tr style="background:#f9fafb;">' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;letter-spacing:.05em;">Rep</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Calls</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Meetings</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Stale Deals</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;letter-spacing:.05em;">Status</th>' +
-        '</tr>' +
-        rows +
-      '</table>' +
-    '</td></tr>';
-  })()}
+  ${pulseRepHtml}
 
   <!-- Ghost Seats Alert -->
-  ${(()=>{
-    const ghostIssue = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
-    const ghostData = ghostIssue ? ghostIssue.ghostSeatData : [];
-    if(ghostData.length === 0) return '';
-    const waste = ghostData.length * 90;
-    const rows = ghostData.slice(0,6).map(u =>
-      '<tr>' +
-        '<td style="font-size:12px;color:#374151;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + u.name + '</td>' +
-        '<td align="center" style="font-size:12px;color:#f43f5e;font-weight:700;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + u.daysSince + ' days</td>' +
-        '<td style="font-size:11px;color:#9ca3af;padding:5px 8px;border-bottom:1px solid #f3f4f6;">' + (u.email||'') + '</td>' +
-      '</tr>'
-    ).join('');
-    return '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
-      '<div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;">👻 Ghost Seats — $' + waste.toLocaleString() + '/mo Wasted</div>' +
-      '<div style="font-size:11px;color:#6b7280;margin-bottom:12px;">' + ghostData.length + ' paid users with zero logins in 90+ days</div>' +
-      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
-        '<tr style="background:#f9fafb;">' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;">User</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:center;text-transform:uppercase;">Last Login</th>' +
-          '<th style="font-size:10px;color:#6b7280;font-weight:600;padding:5px 8px;text-align:left;text-transform:uppercase;">Email</th>' +
-        '</tr>' +
-        rows +
-      '</table>' +
-    '</td></tr>';
-  })()}
+  ${pulseGhostHtml}
 
   <!-- Ticket SLA Section -->
-  ${(()=>{
-    const ticketIssue = issues.find(i => i.title && i.title.includes('support tickets open more than'));
-    if(!ticketIssue) return '';
-    return '<tr><td style="background:#fffbeb;padding:18px 32px;border-bottom:1px solid #fef3c7;border-left:3px solid #f59e0b;">' +
-      '<div style="font-size:11px;font-weight:700;color:#92400e;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;">🎫 Ticket SLA Alert</div>' +
-      '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:4px;">' + ticketIssue.title + '</div>' +
-      '<div style="font-size:12px;color:#92400e;opacity:.8;">' + (ticketIssue.impact||'') + '</div>' +
-    '</td></tr>';
-  })()}
+  ${pulseTicketHtml}
 
   <!-- CTAs -->
   <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
@@ -736,6 +750,85 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     subject = '⚡ FixOps — ' + pi.company + ' — Score ↓' + Math.abs(scoreDiff) + ' · ' + newIssues.length + ' new issue' + (newIssues.length!==1?'s':'') + ' found';
   } else {
     subject = '⚡ FixOps — ' + pi.company + ' — Score ' + s.overallScore + '/100 · ' + s.criticalCount + ' critical · Weekly Report';
+  }
+
+
+  // ── Pre-compute dynamic email sections (avoids IIFE expressions inside template) ──
+  // Rep scorecard section
+  let pulseRepHtml = '';
+  const repIssue2 = issues.find(i => i.repScorecard && i.repScorecard.length > 0);
+  if (repIssue2) {
+    const repData = repIssue2.repScorecard.slice(0, 8);
+    const repRows = repData.map(r => {
+      const actColor = (r.calls + r.meetings) > 5 ? '#10b981' : (r.calls + r.meetings) > 1 ? '#f59e0b' : '#f43f5e';
+      const statusLabel = (r.calls + r.meetings) > 5 ? 'Active' : (r.calls + r.meetings) > 0 ? 'Low' : 'Dark';
+      return '<tr>' +
+        '<td style="font-size:12px;color:#374151;padding:6px 8px;border-bottom:1px solid #f3f4f6;">' + r.name + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:6px 8px;border-bottom:1px solid #f3f4f6;">' + r.calls + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:#374151;padding:6px 8px;border-bottom:1px solid #f3f4f6;">' + r.meetings + '</td>' +
+        '<td align="center" style="font-size:12px;font-weight:700;color:' + (r.staleDealCount > 2 ? '#f43f5e' : '#374151') + ';padding:6px 8px;border-bottom:1px solid #f3f4f6;">' + r.staleDealCount + '</td>' +
+        '<td align="center" style="padding:6px 8px;border-bottom:1px solid #f3f4f6;"><span style="font-size:10px;font-weight:700;color:' + actColor + ';">' + statusLabel + '</span></td>' +
+      '</tr>';
+    }).join('');
+    pulseRepHtml = '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+      '<div style="font-size:10px;font-weight:800;color:#6b7280;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">👥 Rep Activity This Week</div>' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
+        '<tr style="background:#f9fafb;">' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 8px;text-align:left;">Rep</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 8px;text-align:center;">Calls</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 8px;text-align:center;">Meetings</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 8px;text-align:center;">Stale Deals</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 8px;text-align:center;">Status</th>' +
+        '</tr>' +
+        repRows +
+      '</table>' +
+    '</td></tr>';
+  }
+
+  // Ghost seats section
+  let pulseGhostHtml = '';
+  const ghostIssue2 = issues.find(i => i.ghostSeatData && i.ghostSeatData.length > 0);
+  if (ghostIssue2) {
+    const gd2 = ghostIssue2.ghostSeatData;
+    const gw2 = gd2.length * 90;
+    const ghostRows2 = gd2.slice(0, 6).map(u =>
+      '<tr>' +
+        '<td style="font-size:12px;color:#374151;padding:6px 10px;border-bottom:1px solid #f3f4f6;">' + u.name + '</td>' +
+        '<td style="font-size:11px;color:#9ca3af;padding:6px 10px;border-bottom:1px solid #f3f4f6;">' + (u.email || '') + '</td>' +
+        '<td align="right" style="font-size:12px;font-weight:700;color:#f43f5e;padding:6px 10px;border-bottom:1px solid #f3f4f6;">' + u.daysSince + 'd</td>' +
+      '</tr>'
+    ).join('');
+    pulseGhostHtml = '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
+        '<span style="font-size:10px;font-weight:800;color:#6b7280;letter-spacing:1.5px;text-transform:uppercase;">👻 Ghost Seats</span>' +
+        '<span style="font-size:11px;font-weight:700;color:#f43f5e;background:#fff5f5;padding:3px 10px;border-radius:20px;">$' + gw2.toLocaleString() + '/mo wasted</span>' +
+      '</div>' +
+      '<div style="font-size:11px;color:#6b7280;margin-bottom:10px;">' + gd2.length + ' paid users — zero logins in 90+ days</div>' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">' +
+        '<tr style="background:#f9fafb;">' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 10px;text-align:left;">User</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 10px;text-align:left;">Email</th>' +
+          '<th style="font-size:10px;color:#9ca3af;padding:5px 10px;text-align:right;">Inactive</th>' +
+        '</tr>' +
+        ghostRows2 +
+      '</table>' +
+    '</td></tr>';
+  }
+
+  // Ticket SLA section
+  let pulseTicketHtml = '';
+  const ticketIssue2 = issues.find(i => i.title && i.title.includes('support tickets open more than'));
+  if (ticketIssue2) {
+    pulseTicketHtml = '<tr><td style="background:#fffbeb;padding:16px 32px;border-bottom:1px solid #fef3c7;">' +
+      '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+        '<td style="width:28px;font-size:18px;vertical-align:top;padding-top:2px;">🎫</td>' +
+        '<td>' +
+          '<div style="font-size:10px;font-weight:800;color:#92400e;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px;">Ticket SLA Alert</div>' +
+          '<div style="font-size:13px;font-weight:700;color:#92400e;margin-bottom:3px;">' + (ticketIssue2.title || '') + '</div>' +
+          '<div style="font-size:11px;color:#b45309;">' + (ticketIssue2.impact || '') + '</div>' +
+        '</td>' +
+      '</tr></table>' +
+    '</td></tr>';
   }
 
   await resend.emails.send({
@@ -864,6 +957,14 @@ app.post('/auth/refresh', async (req, res) => {
         ).catch(e => console.error('History insert:', e.message));
 
         // Send email for monthly plans
+        // Workflow error alert — fire immediately if errors found (Pro/Agency only)
+        if (['pro','command'].includes(cust.plan)) {
+          const errWfs = (result.issues||[]).find(i => i.erroredWorkflows)?.erroredWorkflows || [];
+          if (errWfs.length > 0) {
+            await sendWorkflowAlertEmail(cust.email, cust.company||'Your Portal', errWfs, auditId).catch(e => console.error('WF alert email err:', e.message));
+          }
+        }
+
         if (['pulse','pro','command'].includes(cust.plan)) {
           await sendPulseEmail(cust.email, result, auditId, prevHist.rows, cust);
         } else {
@@ -1141,6 +1242,117 @@ Respond in this exact JSON format (no markdown, no backticks, no extra text):
   }
 });
 
+
+// ── AutoDoc — AI Workflow Documentation Generator ─────────────────────────────
+// Pro/Agency: reads workflows from audit data and generates plain-English docs
+app.post('/ai/autodoc', async (req, res) => {
+  try {
+    const { auditId, email } = req.body;
+    if (!auditId) return res.status(400).json({ error: 'auditId required' });
+
+    // Verify customer is Pro or Agency
+    if (email) {
+      const custRes = await db.query('SELECT plan FROM customers WHERE email = $1', [email]);
+      const plan = custRes.rows[0]?.plan || 'free';
+      if (!['pro','command','pro-audit'].includes(plan)) {
+        return res.status(403).json({ error: 'AutoDoc requires Pro or Agency plan' });
+      }
+    }
+
+    const result = await getResult(auditId);
+    if (!result) return res.status(404).json({ error: 'Audit not found' });
+
+    const issues = result.issues || [];
+    const ps = result.portalInfo?.portalStats || {};
+    const company = result.portalInfo?.company || 'Your Portal';
+
+    // Extract workflow intelligence from audit issues
+    const workflowIssues = issues.filter(i =>
+      i.title?.toLowerCase().includes('workflow') ||
+      i.dimension === 'Automation'
+    );
+
+    // Build workflow context from what we know
+    const workflowContext = {
+      totalWorkflows: ps.workflows || 0,
+      workflowIssues: workflowIssues.map(i => ({
+        title: i.title,
+        severity: i.severity,
+        description: i.description,
+        impact: i.impact,
+        guide: i.guide
+      })),
+      scores: result.scores || {},
+      portalStats: ps,
+      company
+    };
+
+    // Generate AutoDoc via Claude
+    const prompt = `You are a HubSpot automation expert writing documentation for a portal health report.
+
+PORTAL: ${company}
+WORKFLOW DATA: ${JSON.stringify(workflowContext, null, 2)}
+
+Generate a comprehensive AutoDoc report covering:
+1. Automation Health Summary — overall state of their workflows
+2. Issues Found — each workflow issue with plain-English explanation of what's broken and why it matters
+3. What Each Issue Costs — dollar/business impact in plain language
+4. Fix Priority Order — ranked list of what to fix first and why
+5. Best Practices Checklist — 8-10 HubSpot automation best practices with pass/fail for this portal
+6. Recommended Next Steps — 3 concrete actions to take this week
+
+Write in clear, direct language that a sales manager (not a developer) can understand.
+Use plain language. No jargon. Explain what workflows DO, not just that they exist.
+
+Return ONLY valid JSON, no markdown:
+{
+  "company": "${company}",
+  "generatedAt": "${new Date().toISOString()}",
+  "automationHealthScore": <0-100 based on issues>,
+  "summary": "<2-3 sentence executive summary>",
+  "sections": [
+    {
+      "title": "<section title>",
+      "content": "<detailed content>",
+      "severity": "critical|warning|info|good"
+    }
+  ],
+  "priorityFixes": [
+    { "rank": 1, "action": "<specific action>", "impact": "<business impact>", "effort": "low|medium|high" }
+  ],
+  "bestPractices": [
+    { "check": "<best practice description>", "status": "pass|fail|unknown", "note": "<context>" }
+  ],
+  "nextSteps": ["<step 1>", "<step 2>", "<step 3>"]
+}`;
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      }
+    });
+
+    const text = response.data.content?.map(b => b.text||'').join('') || '';
+    let doc;
+    try {
+      doc = JSON.parse(text.replace(/```json|```/g,'').trim());
+    } catch(e) {
+      doc = { summary: text, sections: [], priorityFixes: [], bestPractices: [], nextSteps: [] };
+    }
+
+    res.json({ success: true, doc });
+  } catch(e) {
+    console.error('AutoDoc error:', e.response?.data || e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Fix request email ─────────────────────────────────────────────────────────
 app.post('/fix-request', async (req, res) => {
   try {
@@ -1163,6 +1375,181 @@ app.post('/fix-request', async (req, res) => {
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────
+
+// ── Agency Multi-Portal Management ───────────────────────────────────────────
+
+// List all portals for an agency customer
+app.get('/agency/portals', async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    const cust = custRes.rows[0];
+    if (!cust) return res.status(404).json({ error: 'customer not found' });
+    if (cust.plan !== 'command') return res.status(403).json({ error: 'Agency plan required' });
+
+    const portalsRes = await db.query(
+      'SELECT * FROM portals WHERE customer_id = $1 AND is_active = true ORDER BY created_at DESC',
+      [cust.id]
+    );
+
+    // Get latest audit data for each portal
+    const portals = portalsRes.rows;
+    const enriched = await Promise.all(portals.map(async p => {
+      let latestResult = null;
+      if (p.last_audit_id) {
+        latestResult = await getResult(p.last_audit_id).catch(() => null);
+      }
+      return {
+        ...p,
+        score: p.last_score || latestResult?.summary?.overallScore || null,
+        criticalCount: p.critical_count || latestResult?.summary?.criticalCount || 0,
+        monthlyWaste: p.monthly_waste || latestResult?.summary?.monthlyWaste || 0,
+        grade: p.last_score >= 85 ? 'Excellent' : p.last_score >= 70 ? 'Good' : p.last_score >= 55 ? 'Needs Work' : 'Critical',
+        lastAuditDate: p.last_audit_at ? new Date(p.last_audit_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : null
+      };
+    }));
+
+    const MAX_PORTALS = 25;
+    res.json({
+      portals: enriched,
+      count: enriched.length,
+      maxPortals: MAX_PORTALS,
+      slotsRemaining: MAX_PORTALS - enriched.length,
+      customer: { email: cust.email, company: cust.company, plan: cust.plan }
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Add a new portal to agency account (after OAuth connect)
+app.post('/agency/portals/add', async (req, res) => {
+  try {
+    const { email, token, company, nickname } = req.body;
+    if (!email || !token) return res.status(400).json({ error: 'email and token required' });
+
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    const cust = custRes.rows[0];
+    if (!cust) return res.status(404).json({ error: 'customer not found' });
+    if (cust.plan !== 'command') return res.status(403).json({ error: 'Agency plan required' });
+
+    // Check portal limit
+    const countRes = await db.query(
+      'SELECT COUNT(*) FROM portals WHERE customer_id = $1 AND is_active = true',
+      [cust.id]
+    );
+    if (parseInt(countRes.rows[0].count) >= 25) {
+      return res.status(400).json({ error: 'Portal limit reached (25 max). Contact support to expand.' });
+    }
+
+    // Try to get portal info to verify token works
+    let portalInfo = { company: company || 'Client Portal', portalId: null };
+    try {
+      const infoRes = await axios.get('https://api.hubapi.com/account-info/v3/details', {
+        headers: { Authorization: 'Bearer ' + token }
+      });
+      portalInfo.portalId = String(infoRes.data?.portalId || '');
+      if (!company) portalInfo.company = infoRes.data?.companyName || 'Client Portal';
+    } catch(e) {
+      console.log('Could not verify portal token:', e.message);
+    }
+
+    // Check for duplicate portal
+    if (portalInfo.portalId) {
+      const dupCheck = await db.query(
+        'SELECT id FROM portals WHERE customer_id = $1 AND portal_id = $2 AND is_active = true',
+        [cust.id, portalInfo.portalId]
+      );
+      if (dupCheck.rows.length > 0) {
+        return res.status(400).json({ error: 'This portal is already connected to your account' });
+      }
+    }
+
+    // Insert portal
+    const insertRes = await db.query(
+      `INSERT INTO portals (customer_id, portal_token, company, portal_id, nickname, plan, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'command', NOW()) RETURNING id`,
+      [cust.id, token, portalInfo.company, portalInfo.portalId, nickname || null]
+    );
+    const portalId = insertRes.rows[0].id;
+
+    // Kick off initial audit for this portal
+    const auditId = require('crypto').randomBytes(12).toString('hex');
+    await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Running initial audit...' });
+    setImmediate(async () => {
+      try {
+        const meta = { email, company: portalInfo.company, plan: 'command' };
+        const result = await runFullAudit(token, auditId, meta);
+        await db.query(
+          `UPDATE portals SET last_audit_id = $1, last_audit_at = NOW(), last_score = $2, critical_count = $3, monthly_waste = $4, updated_at = NOW() WHERE id = $5`,
+          [auditId, result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.monthlyWaste||0, portalId]
+        );
+        console.log('[Agency] Initial audit complete for portal', portalId);
+      } catch(e) {
+        console.error('[Agency] Initial audit failed:', e.message);
+      }
+    });
+
+    res.json({ success: true, portalId, auditId, company: portalInfo.company, message: 'Portal added and audit started' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Remove a portal from agency account
+app.delete('/agency/portals/:portalId', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const { portalId } = req.params;
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    const custRes = await db.query('SELECT id FROM customers WHERE email = $1 AND plan = $2', [email, 'command']);
+    if (!custRes.rows[0]) return res.status(403).json({ error: 'Agency customer not found' });
+
+    await db.query(
+      'UPDATE portals SET is_active = false, updated_at = NOW() WHERE id = $1 AND customer_id = $2',
+      [portalId, custRes.rows[0].id]
+    );
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Agency bulk rescan — rescan all connected portals
+app.post('/agency/rescan-all', async (req, res) => {
+  try {
+    const { email, secret } = req.body;
+    if (secret !== process.env.RESCAN_SECRET && !email) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const emailToUse = email || req.body.agencyEmail;
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1 AND plan = $2', [emailToUse, 'command']);
+    if (!custRes.rows[0]) return res.status(404).json({ error: 'Agency customer not found' });
+    const cust = custRes.rows[0];
+
+    const portalsRes = await db.query(
+      'SELECT * FROM portals WHERE customer_id = $1 AND is_active = true',
+      [cust.id]
+    );
+
+    const results = [];
+    for (const portal of portalsRes.rows) {
+      const auditId = require('crypto').randomBytes(12).toString('hex');
+      setImmediate(async () => {
+        try {
+          const meta = { email: emailToUse, company: portal.company, plan: 'command' };
+          const result = await runFullAudit(portal.portal_token, auditId, meta);
+          await db.query(
+            `UPDATE portals SET last_audit_id = $1, last_audit_at = NOW(), last_score = $2, critical_count = $3, monthly_waste = $4, updated_at = NOW() WHERE id = $5`,
+            [auditId, result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.monthlyWaste||0, portal.id]
+          );
+        } catch(e) { console.error('[AgencyRescan] portal', portal.id, e.message); }
+      });
+      results.push({ portalId: portal.id, company: portal.company, auditId });
+      await new Promise(r => setTimeout(r, 3000)); // 3s between scans
+    }
+
+    res.json({ success: true, portalsTriggered: results.length, results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', async (req, res) => {
   let dbOk = false;
   try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
@@ -1585,6 +1972,67 @@ const triggerRescan = async (customer) => {
 };
 
 // ── Weekly Pulse cron — runs every Monday 9am ET ──────────────────────────────
+
+// ── Workflow Error Alert Email ─────────────────────────────────────────────────
+const sendWorkflowAlertEmail = async (email, company, erroredWorkflows, auditId) => {
+  if (!erroredWorkflows || erroredWorkflows.length === 0) return;
+  const rows = erroredWorkflows.slice(0,10).map(wf =>
+    '<tr style="border-bottom:1px solid #f3f4f6;">' +
+      '<td style="padding:10px 12px;font-size:13px;font-weight:600;color:#111;">' + (wf.name||wf.id||'Unknown') + '</td>' +
+      '<td style="padding:10px 12px;text-align:center;"><span style="font-size:11px;font-weight:700;padding:2px 8px;background:rgba(244,63,94,.1);color:#f43f5e;border-radius:5px;">ERROR</span></td>' +
+      '<td style="padding:10px 12px;text-align:center;font-size:12px;color:#666;">' + (wf.errorCount||0) + ' contacts affected</td>' +
+    '</tr>'
+  ).join('');
+
+  const subject = erroredWorkflows.length === 1
+    ? '🚨 FixOps Alert — 1 workflow broken in ' + company + ' — contacts dropping'
+    : '🚨 FixOps Alert — ' + erroredWorkflows.length + ' workflows broken in ' + company;
+
+  await resend.emails.send({
+    from: 'FixOps Alerts <reports@fixops.io>',
+    to: email,
+    subject,
+    html: '<!DOCTYPE html><html><body style="margin:0;padding:0;font-family:system-ui,sans-serif;background:#f9fafb;">' +
+      '<div style="max-width:600px;margin:0 auto;padding:32px 16px;">' +
+        '<div style="background:#08061a;border-radius:14px 14px 0 0;padding:24px 32px;text-align:center;">' +
+          '<div style="font-size:22px;font-weight:800;color:#fff;">⚡ FixOps <span style="color:#a78bfa;">Alert</span></div>' +
+          '<div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:4px;font-family:monospace;letter-spacing:2px;">WORKFLOW ERROR DETECTED</div>' +
+        '</div>' +
+        '<div style="background:#fff;border:1px solid #eee;border-top:none;padding:28px 32px;">' +
+          '<div style="font-size:32px;font-weight:900;color:#f43f5e;text-align:center;margin-bottom:8px;">' + erroredWorkflows.length + '</div>' +
+          '<div style="text-align:center;font-size:15px;font-weight:700;color:#111;margin-bottom:4px;">' +
+            'Workflow' + (erroredWorkflows.length!==1?'s':'') + ' in error state in ' + company +
+          '</div>' +
+          '<div style="text-align:center;font-size:13px;color:#666;margin-bottom:24px;">Enrolled contacts may be dropping silently. Act before more are affected.</div>' +
+          '<table style="width:100%;border-collapse:collapse;margin-bottom:20px;">' +
+            '<thead><tr style="background:#f9fafb;">' +
+              '<th style="padding:8px 12px;text-align:left;font-size:11px;color:#888;font-weight:600;text-transform:uppercase;">Workflow</th>' +
+              '<th style="padding:8px 12px;text-align:center;font-size:11px;color:#888;font-weight:600;text-transform:uppercase;">Status</th>' +
+              '<th style="padding:8px 12px;text-align:center;font-size:11px;color:#888;font-weight:600;text-transform:uppercase;">Affected</th>' +
+            '</tr></thead>' +
+            '<tbody>' + rows + '</tbody>' +
+          '</table>' +
+          '<div style="background:#fff5f5;border:1px solid #fee2e2;border-radius:8px;padding:14px 16px;margin-bottom:20px;">' +
+            '<div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:4px;">Why this matters</div>' +
+            '<div style="font-size:12px;color:#7f1d1d;line-height:1.7;">When a workflow errors, HubSpot stops processing enrolled contacts. Every hour it stays broken is another hour of leads, nurture emails, or follow-ups that never happened. Fix immediately.</div>' +
+          '</div>' +
+          '<div style="background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px 16px;margin-bottom:20px;">' +
+            '<div style="font-size:12px;color:#4c1d95;"><strong>To fix:</strong> HubSpot → Automation → Workflows → find the broken workflow → click the error tab → read the error → fix the root cause → re-enroll affected contacts.</div>' +
+          '</div>' +
+          '<div style="text-align:center;margin-top:16px;">' +
+            '<a href="' + (process.env.FRONTEND_URL||'https://fixops.io') + '/results.html?id=' + auditId + '" style="display:inline-block;padding:13px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;">View Audit + Fix Plan →</a>' +
+          '</div>' +
+          '<div style="text-align:center;margin-top:12px;">' +
+            '<a href="mailto:matthew@fixops.io?subject=Workflow Repair - ' + encodeURIComponent(company) + '" style="font-size:12px;color:#999;text-decoration:none;">Need help? Request workflow repair →</a>' +
+          '</div>' +
+        '</div>' +
+        '<div style="text-align:center;font-size:11px;color:#999;padding:16px;">fixops.io · HubSpot Systems. Fixed.</div>' +
+      '</div>' +
+    '</body></html>'
+  });
+  console.log('[WorkflowAlert] Sent to', email, '- ' + erroredWorkflows.length + ' errors');
+};
+
 cron.schedule('0 14 * * 1', async () => {
   console.log('🕐 Weekly Pulse scan starting...');
   try {
@@ -1604,6 +2052,51 @@ cron.schedule('0 14 * * 1', async () => {
     console.error('Cron error:', e.message);
   }
 }, { timezone: 'America/New_York' });
+
+// Agency portal weekly rescan — runs 30 min after main cron
+cron.schedule('30 14 * * 1', async () => {
+  console.log('🏢 Agency portal scan starting...');
+  try {
+    const agencyRes = await db.query(`
+      SELECT c.*, p.id as portal_id_db, p.portal_token as portal_token_agency,
+             p.company as portal_company, p.id as portal_row_id
+      FROM customers c
+      JOIN portals p ON p.customer_id = c.id
+      WHERE c.plan = 'command' AND c.plan_status = 'active'
+        AND p.is_active = true
+        AND (p.last_audit_at IS NULL OR p.last_audit_at < NOW() - INTERVAL '6 days')
+    `);
+    console.log('[AgencyCron] ' + agencyRes.rows.length + ' portal scans to run');
+
+    for (const row of agencyRes.rows) {
+      try {
+        const auditId = require('crypto').randomBytes(12).toString('hex');
+        await saveResult(auditId, { status: 'running', progress: 5, currentTask: 'Agency weekly scan...' });
+        const meta = { email: row.email, company: row.portal_company, plan: 'command' };
+        const result = await runFullAudit(row.portal_token_agency, auditId, meta);
+        await db.query(
+          'UPDATE portals SET last_audit_id = $1, last_audit_at = NOW(), last_score = $2, critical_count = $3, monthly_waste = $4, updated_at = NOW() WHERE id = $5',
+          [auditId, result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.monthlyWaste||0, row.portal_row_id]
+        );
+
+        // Workflow error alert for agency portals
+        const errWfs = (result.issues||[]).find(i => i.erroredWorkflows)?.erroredWorkflows || [];
+        if (errWfs.length > 0) {
+          await sendWorkflowAlertEmail(row.email, row.portal_company, errWfs, auditId).catch(e => console.error('Agency WF alert:', e.message));
+        }
+
+        await new Promise(r => setTimeout(r, 5000));
+      } catch(e) {
+        console.error('[AgencyCron] Portal', row.portal_row_id, 'failed:', e.message);
+      }
+    }
+    console.log('✅ Agency portal scan complete');
+  } catch(e) {
+    console.error('[AgencyCron] Error:', e.message);
+  }
+}, { timezone: 'America/New_York' });
+
+
 
 
 
@@ -1736,9 +2229,15 @@ async function runFullAudit(token, auditId, meta) {
   const meetingsR = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
   const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
 
-  // These require Public App scopes — not available via MCP beta
-  const workflowsR = {data:{workflows:[]}}; // Requires automation scope — Public App only
-  const formsR     = {data:{results:[]}}; // Requires marketing scope — Public App only
+  // Workflows and forms — attempt with Public App scope, fall back gracefully
+  const workflowsR = await safe(
+    () => hs.get('/automation/v3/workflows?limit=100'),
+    {data:{workflows:[]}}
+  );
+  const formsR = await safe(
+    () => hs.get('/marketing/v3/forms?limit=50'),
+    {data:{results:[]}}
+  );
   // Users available via MCP crm.objects.users.read
   const usersR     = await safe(()=>hs.get('/crm/v3/objects/users?limit=100'), {data:{results:[]}});
   const listsR     = {data:{lists:[]}}; // Not available via MCP beta
@@ -2441,6 +2940,71 @@ async function runFullAudit(token, auditId, meta) {
         });
       }
     }
+  }
+
+  // 4. WORKFLOW ERRORS  -  detect broken workflows when Public App scope available
+  if (workflows.length > 0) {
+    const erroredWorkflows = workflows.filter(wf => {
+      const status = wf.executionState || wf.status || '';
+      const hasErrors = wf.errorCount > 0 || wf.errorsCount > 0 ||
+        ['ERROR', 'FAILED', 'PAUSED_DUE_TO_ERROR'].includes(String(status).toUpperCase());
+      return hasErrors;
+    });
+
+    if (erroredWorkflows.length > 0) {
+      const totalErrored = erroredWorkflows.length;
+      const errorNames = erroredWorkflows.slice(0,3).map(wf => wf.name || wf.id || 'Unknown').join(', ');
+      autoScore -= Math.min(25, totalErrored * 8);
+      issues.push({
+        severity: totalErrored > 2 ? 'critical' : 'warning',
+        title: totalErrored + ' workflow' + (totalErrored!==1?'s':'') + ' in error state  -  contacts may be dropping silently',
+        description: 'These workflows are actively failing: ' + errorNames + '. When a workflow errors, HubSpot typically stops processing enrolled contacts  -  meaning leads, nurture sequences, or follow-ups may be silently falling through. Most teams do not know a workflow is broken until a rep asks why a lead never got a follow-up email.',
+        detail: 'Workflow errors are the #1 source of silent revenue loss in HubSpot. A workflow broken for 30 days on a 500-contact list means 500 people never got the message you intended them to receive.',
+        impact: totalErrored + ' broken workflow' + (totalErrored!==1?'s':'')+' · contacts dropping silently · automation ROI destroyed',
+        dimension: 'Automation',
+        erroredWorkflows: erroredWorkflows.slice(0,10).map(wf => ({
+          name: wf.name || wf.id,
+          id: wf.id,
+          errorCount: wf.errorCount || wf.errorsCount || 0,
+          status: wf.executionState || wf.status || 'ERROR'
+        })),
+        guide: [
+          'Go to HubSpot → Automation → Workflows → filter by "Needs attention"',
+          'Broken: ' + errorNames + '  -  open each and check the error details tab',
+          'Common cause: a required property was deleted, or a connected integration lost auth',
+          'For each error: read the error message, fix the root cause, re-enroll affected contacts',
+          'FixOps Workflow Repair fixes and re-enrolls affected contacts same day'
+        ]
+      });
+    }
+
+    // Dead workflows  -  active but zero enrollments in 90 days
+    const deadWorkflows = workflows.filter(wf => {
+      const lastEnrollment = wf.lastEnrollmentDate || wf.updatedAt;
+      const isActive = ['ACTIVE', 'PUBLISHED'].includes(String(wf.status||wf.executionState||'').toUpperCase());
+      if (!isActive || !lastEnrollment) return false;
+      return (now - new Date(lastEnrollment).getTime()) / DAY > 90;
+    });
+
+    if (deadWorkflows.length > 0) {
+      autoScore -= Math.min(10, deadWorkflows.length * 2);
+      issues.push({
+        severity: 'info',
+        title: deadWorkflows.length + ' active workflow' + (deadWorkflows.length!==1?'s':'') + ' with no enrollments in 90+ days',
+        description: 'These workflows are marked active but have not enrolled anyone in 90+ days. Either the trigger criteria never fires, the audience is empty, or the workflow was abandoned without being turned off. Dead workflows create confusion, consume your workflow limit, and make portal audits harder.',
+        impact: 'Workflow limit consumed · portal complexity inflated · team confusion',
+        dimension: 'Automation',
+        guide: [
+          'Review each: does it still serve a business purpose?',
+          'If yes  -  check the trigger: is the enrollment criteria too narrow?',
+          'If no  -  turn it off to reduce clutter and free up your workflow limit',
+          'Dead workflows at scale indicate no workflow governance process exists'
+        ]
+      });
+    }
+
+    // AutoDoc availability flag  -  tell the UI workflows are available for docs
+    finalResult && (finalResult.hasWorkflowData = true);
   }
 
   // 5. TICKET SLA — 67% of customers expect resolution within 3 hours (HubSpot State of Service)
