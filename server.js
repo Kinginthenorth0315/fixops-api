@@ -4612,6 +4612,11 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
 
         // ── Custom properties ─────────────────────────────────────────────
         customContactProps: contactProps.filter(p => p.createdUserId).length,
+        // Audit shortcut counts — used by Revenue Leak Calculator
+        deadWorkflowCount: deadWf ? deadWf.length : 0,
+        duplicateContactCount: dupes || 0,
+        noEmailContactCount: noEmail ? noEmail.length : 0,
+
         // Custom objects (Enterprise)
         customObjectCount: customSchemas.filter(s => !['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail'].includes(s.name)).length,
         customObjectNames: customSchemas
