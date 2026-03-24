@@ -2435,6 +2435,10 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/crm/v3/pipelines/deals'),
     {data:{results:[]}}
   );
+  const customSchemasR = await safe(
+    () => hs.get('/crm/v3/schemas?limit=100'),
+    {data:{results:[]}}
+  );
   const contactPropsR = await safe(
     () => hs.get('/crm/v3/properties/contacts?limit=500'),
     {data:{results:[]}}
@@ -2482,6 +2486,7 @@ async function runFullAudit(token, auditId, meta) {
   const currencies      = currencyR.data?.currencies||[];
   const settingsUsers   = settingsUsersR.data?.results||[];
   const dealPipelines   = dealPipelinesR.data?.results||[];
+  const customSchemas   = customSchemasR.data?.results||[];
   const contactProps    = contactPropsR.data?.results||[];
   const emailEngs       = emailEngR.data?.results||[];
   const notes           = notesR.data?.results||[];
@@ -3550,7 +3555,7 @@ async function runFullAudit(token, auditId, meta) {
           title: 'NPS score ' + nps + ' — customer sentiment below healthy threshold (benchmark: 31+)',
           description: 'B2B SaaS NPS benchmark is 31+. Scores below 20 mean more detractors than promoters. Detractors churn faster and share negative experiences more than promoters share positive ones.',
           impact: 'Churn risk elevated · expansion revenue blocked · referral pipeline damaged',
-          dimension: 'Configuration',
+          dimension: 'Service',
           npsData: { score: nps, promoters, detractors, total: scores2.length },
           guide: ['Close loop with every detractor within 48 hours', 'Build churn-risk workflow triggered by NPS < 7', 'Track NPS monthly and tie to renewal risk scoring']
         });
@@ -3896,6 +3901,12 @@ async function runFullAudit(token, auditId, meta) {
 
         // ── Custom properties ─────────────────────────────────────────────
         customContactProps: contactProps.filter(p => p.createdUserId).length,
+        // Custom objects (Enterprise)
+        customObjectCount: customSchemas.filter(s => !['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail'].includes(s.name)).length,
+        customObjectNames: customSchemas
+          .filter(s => !['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail'].includes(s.name))
+          .map(s => s.labels?.singular || s.name)
+          .slice(0, 5),
         undocumentedProps: contactProps.filter(p => p.createdUserId && !p.description).length,
 
         // ── Engagement completeness ───────────────────────────────────────
