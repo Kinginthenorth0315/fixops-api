@@ -609,6 +609,15 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     </div>`).join('')}
   </td></tr>` : ''}
 
+  <!-- Week-over-Week Delta Banner -->
+  ${pulseDeltaHtml}
+
+  <!-- New Issues This Week -->
+  ${pulseNewIssuesHtml}
+
+  <!-- Portal Snapshot Data -->
+  ${pulseNewDataHtml}
+
   <!-- Resolved Issues -->
   ${resolvedIssues.length > 0 ? `
   <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
@@ -666,13 +675,21 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
           ['Deals', ps.deals],
           ['Tickets', ps.tickets],
           ['Workflows', ps.workflows],
+          ['Forms', ps.forms],
+          ['Sequences', ps.sequences],
+          ['Lists', ps.listCount],
+          ['Leads', ps.leads],
           ['Users', ps.users]
-        ].filter(([,v])=>v!==undefined&&v!==null).map(([l,v])=>`
+        ].filter(([,v])=>v!==undefined&&v!==null&&v!==0).slice(0,6).map(([l,v])=>`
         <td align="center" style="padding:8px;">
           <div style="font-size:18px;font-weight:800;color:#111;">${Number(v||0).toLocaleString()}</div>
           <div style="font-size:10px;color:#9ca3af;font-family:monospace;text-transform:uppercase;margin-top:2px;">${l}</div>
         </td>`).join('')}
       </tr>
+      ${(ps.openPipelineValue||0)>0||((ps.mrrTotal||0)>0) ? `<tr>
+        ${ps.openPipelineValue>0?`<td colspan="3" style="padding:8px;text-align:center;"><div style="font-size:11px;color:#6b7280;margin-bottom:2px;">Open Pipeline</div><div style="font-size:16px;font-weight:800;color:#3b82f6;">$${Number(ps.openPipelineValue).toLocaleString()}</div></td>`:''}
+        ${ps.mrrTotal>0?`<td colspan="3" style="padding:8px;text-align:center;"><div style="font-size:11px;color:#6b7280;margin-bottom:2px;">MRR</div><div style="font-size:16px;font-weight:800;color:#10b981;">$${Number(ps.mrrTotal).toLocaleString()}</div></td>`:''}
+      </tr>` : ''}
     </table>
   </td></tr>
 
@@ -710,18 +727,33 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
   <!-- Ticket SLA Section -->
   ${pulseTicketHtml}
 
+  <!-- Upgrade nudge for Pulse — show Pro benefits if not already on Pro -->
+  ${plan === 'pulse' ? `
+  <tr><td style="background:#120f30;padding:20px 32px;border-bottom:1px solid rgba(255,255,255,.06);">
+    <div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.25);border-radius:10px;padding:16px 20px;">
+      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $549/mo</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.7);margin-bottom:12px;">Get 15 intelligence views, score trends, ROI tracking, revenue health, contact engagement analysis, and the full snapshot dashboard for your team.</div>
+      <a href="${FRONTEND_URL}/#pricing" style="display:inline-block;padding:10px 22px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12px;">See Pro Features →</a>
+    </div>
+  </td></tr>` : ''}
+
   <!-- CTAs -->
   <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
     <div style="text-align:center;margin-bottom:20px;">
-      <a href="${reportUrl}" style="display:inline-block;padding:13px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;margin-right:10px;">📊 View Full Report →</a>
-      <a href="${resultsUrl}" style="display:inline-block;padding:13px 28px;background:rgba(124,58,237,.15);color:#a78bfa;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(124,58,237,.3);">View Audit Results →</a>
+      <a href="${reportUrl}" style="display:inline-block;padding:14px 30px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;margin-right:10px;">📊 View Full Report →</a>
+      <a href="${resultsUrl}" style="display:inline-block;padding:14px 30px;background:rgba(124,58,237,.15);color:#a78bfa;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(124,58,237,.3);">View Audit Results →</a>
     </div>
+    ${(s.criticalCount||0) > 0 ? `
+    <div style="margin-bottom:16px;padding:14px 16px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.2);border-radius:8px;text-align:center;">
+      <div style="font-size:12px;color:rgba(255,255,255,.6);margin-bottom:8px;">${s.criticalCount} critical issue${s.criticalCount!==1?'s':''} found — we can fix these for you</div>
+      <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="font-size:12px;font-weight:700;color:#f43f5e;text-decoration:none;">View Fix-It Options → </a>
+    </div>` : ''}
     <div style="text-align:center;margin-bottom:16px;">
-      <a href="https://calendly.com/matthew-fixops/30min" style="font-size:12px;color:rgba(255,255,255,.4);text-decoration:none;">📅 Book a strategy call to discuss these findings</a>
+      <a href="https://calendly.com/matthew-fixops/30min" style="font-size:12px;color:rgba(255,255,255,.4);text-decoration:none;">📅 Book a 30-min strategy call to discuss these findings</a>
     </div>
     <div style="border-top:1px solid rgba(255,255,255,.06);padding-top:16px;text-align:center;font-size:11px;color:rgba(255,255,255,.25);">
       <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.<br>
-      <span style="font-size:10px;">Your portal is scanned every Monday at 9am ET · <a href="mailto:matthew@fixops.io" style="color:rgba(255,255,255,.4);text-decoration:none;font-size:10px;">matthew@fixops.io</a><!--w@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);">Pause monitoring</a></span>
+      <span style="font-size:10px;">Your portal is scanned every Monday · 177 checkpoints · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);text-decoration:none;">Pause monitoring</a></span>
     </div>
   </td></tr>
 
@@ -829,6 +861,89 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
         '</td>' +
       '</tr></table>' +
     '</td></tr>';
+  }
+
+  // ── Week-over-week delta banner ─────────────────────────────────────────
+  let pulseDeltaHtml = '';
+  if (scoreDiff !== null) {
+    const critDelta  = (s.criticalCount||0) - (prev ? (prev.critical_count||0) : 0);
+    const warnDelta  = (s.warningCount||0)  - (prev ? (prev.warning_count||0)  : 0);
+    const wasteDelta = (s.monthlyWaste||0)  - (prev ? (prev.monthly_waste||0)  : 0);
+
+    const dCell = (label, val, invertGood) => {
+      const good = invertGood ? val < 0 : val > 0;
+      const bad  = invertGood ? val > 0 : val < 0;
+      const col  = val === 0 ? '#9ca3af' : good ? '#10b981' : '#f43f5e';
+      const arrow = val > 0 ? '↑' : val < 0 ? '↓' : '→';
+      const disp  = label === 'Waste' ? '$' + Math.abs(wasteDelta).toLocaleString() : Math.abs(val);
+      return '<td align="center" style="padding:12px 8px;width:25%;">' +
+        '<div style="font-size:20px;font-weight:900;color:' + col + ';">' + arrow + disp + '</div>' +
+        '<div style="font-size:9px;color:rgba(255,255,255,.35);margin-top:3px;text-transform:uppercase;letter-spacing:.05em;">' + label + '</div>' +
+      '</td>';
+    };
+
+    pulseDeltaHtml =
+      '<tr><td style="background:#08061a;padding:16px 32px;border-bottom:1px solid rgba(255,255,255,.06);">' +
+        '<div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.3);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">vs last week</div>' +
+        '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+          dCell('Score', scoreDiff, false) +
+          dCell('Critical', critDelta, true) +
+          dCell('Warnings', warnDelta, true) +
+          dCell('Waste', wasteDelta, true) +
+        '</tr></table>' +
+      '</td></tr>';
+  }
+
+  // ── New issues this week ─────────────────────────────────────────────────
+  let pulseNewIssuesHtml = '';
+  if (newIssues.length > 0) {
+    const newCritical = newIssues.filter(i => i.severity === 'critical');
+    const newWarning  = newIssues.filter(i => i.severity === 'warning');
+    const showNew = newCritical.concat(newWarning).slice(0, 4);
+    pulseNewIssuesHtml =
+      '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+        '<div style="font-size:10px;font-weight:800;color:#dc2626;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">🆕 New Issues This Week (' + newIssues.length + ')</div>' +
+        showNew.map(i => {
+          const isCrit = i.severity === 'critical';
+          const bc = isCrit ? '#fff1f1' : '#fffbeb';
+          const tc = isCrit ? '#dc2626' : '#d97706';
+          const lc = isCrit ? '#fca5a5' : '#fde68a';
+          return '<div style="padding:12px 14px;background:' + bc + ';border-radius:8px;margin-bottom:8px;border-left:3px solid ' + lc + ';">' +
+            '<div style="font-size:12px;font-weight:700;color:' + tc + ';margin-bottom:3px;">' + (i.title || '') + '</div>' +
+            (i.impact ? '<div style="font-size:11px;color:#666;">' + i.impact.substring(0, 100) + (i.impact.length > 100 ? '…' : '') + '</div>' : '') +
+          '</div>';
+        }).join('') +
+        (newIssues.length > 4 ? '<div style="font-size:11px;color:#9ca3af;text-align:center;margin-top:8px;">+ ' + (newIssues.length - 4) + ' more new issues in full report</div>' : '') +
+      '</td></tr>';
+  }
+
+  // ── New scope data highlights ─────────────────────────────────────────────
+  let pulseNewDataHtml = '';
+  const hasNewData = ps.sequences > 0 || ps.leads > 0 || ps.npsResponses > 0 || ps.campaigns > 0 || ps.listCount > 0;
+  if (hasNewData) {
+    const dataItems = [];
+    if (ps.sequences > 0)    dataItems.push({ icon: '📧', label: 'Sequences', val: ps.sequences, sub: ps.activeSequences + ' active' });
+    if (ps.leads > 0)        dataItems.push({ icon: '🎯', label: 'Leads', val: ps.leads, sub: ps.unownedLeads > 0 ? ps.unownedLeads + ' unowned' : 'all assigned', alert: ps.unownedLeads > 0 });
+    if (ps.npsResponses > 0) dataItems.push({ icon: '⭐', label: 'NPS Responses', val: ps.npsResponses, sub: 'feedback collected' });
+    if (ps.campaigns > 0)    dataItems.push({ icon: '📣', label: 'Campaigns', val: ps.campaigns, sub: 'marketing campaigns' });
+    if (ps.listCount > 0)    dataItems.push({ icon: '📋', label: 'Lists', val: ps.listCount, sub: ps.emptyLists > 0 ? ps.emptyLists + ' empty' : 'all populated', alert: ps.emptyLists > 5 });
+
+    if (dataItems.length > 0) {
+      pulseNewDataHtml =
+        '<tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">' +
+          '<div style="font-size:10px;font-weight:800;color:#374151;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">📊 Portal Snapshot</div>' +
+          '<table width="100%" cellpadding="0" cellspacing="0"><tr>' +
+          dataItems.slice(0, 5).map(d =>
+            '<td align="center" style="padding:8px;">' +
+              '<div style="font-size:18px;margin-bottom:4px;">' + d.icon + '</div>' +
+              '<div style="font-size:16px;font-weight:800;color:' + (d.alert ? '#f59e0b' : '#111') + ';">' + d.val + '</div>' +
+              '<div style="font-size:10px;color:#6b7280;">' + d.label + '</div>' +
+              '<div style="font-size:9px;color:' + (d.alert ? '#f59e0b' : '#9ca3af') + ';">' + d.sub + '</div>' +
+            '</td>'
+          ).join('') +
+          '</tr></table>' +
+        '</td></tr>';
+    }
   }
 
   await resend.emails.send({
@@ -2286,9 +2401,42 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/marketing/v3/forms?limit=50'),
     {data:{results:[]}}
   );
-  // Users available via MCP crm.objects.users.read
-  const usersR     = await safe(()=>hs.get('/crm/v3/objects/users?limit=100'), {data:{results:[]}});
-  const listsR     = {data:{lists:[]}}; // Not available via MCP beta
+  const usersR = await safe(()=>hs.get('/crm/v3/objects/users?limit=100'), {data:{results:[]}});
+  const listsR = await safe(()=>hs.get('/crm/v3/lists?count=100&offset=0'), {data:{lists:[]}});
+
+  // ── New scope data — sequences, campaigns, opt-outs, conversations, NPS ────
+  const sequencesR = await safe(
+    () => hs.get('/automation/v4/sequences?limit=100'),
+    {data:{results:[]}}
+  );
+  const campaignsR = await safe(
+    () => hs.get('/marketing/v3/campaigns?limit=50'),
+    {data:{results:[]}}
+  );
+  const optOutsR = await safe(
+    () => hs.get('/communication-preferences/v3/definitions'),
+    {data:{subscriptionDefinitions:[]}}
+  );
+  const leadsR = await safe(
+    () => hs.get('/crm/v3/objects/leads?limit=100&properties=hs_lead_status,hs_createdate,hubspot_owner_id,hs_lead_label'),
+    {data:{results:[]}}
+  );
+  const goalsR = await safe(
+    () => hs.get('/crm/v3/objects/goal_targets?limit=50&properties=hs_goal_name,hs_target_amount,hs_current_amount,hs_end_datetime,hs_goal_type_id'),
+    {data:{results:[]}}
+  );
+  const feedbackR = await safe(
+    () => hs.get('/crm/v3/objects/feedback_submissions?limit=100&properties=hs_survey_type,hs_response,hs_submission_name,hs_createdate'),
+    {data:{results:[]}}
+  );
+  const conversationsR = await safe(
+    () => hs.get('/conversations/v3/conversations?limit=50'),
+    {data:{results:[]}}
+  );
+  const currencyR = await safe(
+    () => hs.get('/settings/v3/currencies'),
+    {data:{currencies:[]}}
+  );
 
   // ── Unwrap all results — enforce hard limits for free plan ──────────────────
   const contacts      = (contactsR.data?.results||[]).slice(0, contactLimit);
@@ -2301,7 +2449,15 @@ async function runFullAudit(token, auditId, meta) {
   const users         = usersR.data?.results||[];
   const pipelines     = pipelinesR.data?.results||[];
   const cProps        = cPropsR.data?.results||[];
-  const lists         = listsR.data?.lists||[];
+  const lists         = listsR.data?.lists||listsR.data?.results||[];
+  const sequences     = sequencesR.data?.results||[];
+  const campaigns     = campaignsR.data?.results||[];
+  const optOutDefs    = optOutsR.data?.subscriptionDefinitions||[];
+  const leads         = leadsR.data?.results||[];
+  const goals         = goalsR.data?.results||[];
+  const feedback      = feedbackR.data?.results||[];
+  const conversations = conversationsR.data?.results||[];
+  const currencies    = currencyR.data?.currencies||[];
   const tasks         = tasksR.data?.results||[];
   const meetings      = meetingsR.data?.results||[];
   const calls         = callsR.data?.results||[];
@@ -2318,6 +2474,8 @@ async function runFullAudit(token, auditId, meta) {
     orders=${orders.length} | invoices=${invoices.length} | subscriptions=${subscriptions.length}
     tasks=${tasks.length} | meetings=${meetings.length} | calls=${calls.length}
     workflows=${workflows.length} | forms=${forms.length} | users=${users.length} | owners=${owners.length}
+    sequences=${sequences.length} | campaigns=${campaigns.length} | leads=${leads.length}
+    goals=${goals.length} | feedback=${feedback.length} | lists=${lists.length}
   `);
 
   const issues = [];
@@ -3169,6 +3327,164 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+
+  // ── 6. SEQUENCES — Sales Hub Pro/Enterprise ──────────────────────────────
+  if (sequences.length > 0) {
+    const noStepSeqs = sequences.filter(seq => !seq.steps || seq.steps.length === 0);
+    const lowReplySeqs = sequences.filter(seq => {
+      const rate = parseFloat(seq.replyRate || seq.reply_rate || 0);
+      return rate > 0 && rate < 5;
+    });
+    if (noStepSeqs.length > 0) {
+      autoScore -= Math.min(10, noStepSeqs.length * 3);
+      issues.push({
+        severity: 'warning',
+        title: noStepSeqs.length + ' sequence' + (noStepSeqs.length!==1?'s':'') + ' with no steps configured',
+        description: 'These sequences are active but have no steps. Any contact enrolled receives nothing — a silent fail that damages sender reputation and wastes rep time.',
+        impact: noStepSeqs.length + ' empty sequences · enrolled contacts get no messages',
+        dimension: 'Automation',
+        guide: ['Go to Sales Sequences', 'Add minimum 3 steps to each empty sequence', 'Re-enroll any contacts who missed messages']
+      });
+    }
+    if (lowReplySeqs.length > 0) {
+      issues.push({
+        severity: 'info',
+        title: lowReplySeqs.length + ' sequence' + (lowReplySeqs.length!==1?'s':'') + ' under 5% reply rate — copy needs work',
+        description: 'Industry benchmark for cold outreach reply rates is 8-12%. Under 5% means you are burning sending reputation on contacts who will not respond.',
+        impact: 'Sender reputation risk · rep time wasted · deals not progressing',
+        dimension: 'Automation',
+        guide: ['Shorten step 1 to under 75 words', 'Add personalization tokens in body', 'Test subject lines — avoid "Following up"', 'Reduce to 3-4 steps max for cold outreach']
+      });
+    }
+  }
+
+  // ── 7. LISTS — Contact list health ───────────────────────────────────────
+  if (lists.length > 0) {
+    const staticLists = lists.filter(l => l.listType === 'STATIC' || l.dynamic === false);
+    const emptyLists  = lists.filter(l => (l.metaData?.size || l.size || 0) === 0);
+    if (emptyLists.length > 5) {
+      marketingScore -= Math.min(8, emptyLists.length);
+      issues.push({
+        severity: 'info',
+        title: emptyLists.length + ' empty contact lists cluttering your portal',
+        description: 'Empty lists signal abandoned segmentation. They slow down list selection in workflows and emails and confuse new team members.',
+        impact: emptyLists.length + ' empty lists · portal complexity inflated',
+        dimension: 'Data Integrity',
+        guide: ['Marketing Lists — sort by contacts ascending', 'Archive lists empty for 90+ days', 'Document the purpose of each active list in its description']
+      });
+    }
+    if (staticLists.length > lists.length * 0.7 && lists.length > 10) {
+      issues.push({
+        severity: 'info',
+        title: Math.round(staticLists.length / lists.length * 100) + '% of lists are static — missing auto-segmentation',
+        description: 'Most lists are manually managed rather than auto-updating. Static lists go stale — contacts graduate out of criteria but stay listed until someone removes them manually.',
+        impact: 'Wrong contacts getting wrong messages · reporting inaccurate · manual overhead',
+        dimension: 'Data Integrity',
+        guide: ['Identify static lists used in active workflows or emails', 'Convert to active lists using the same criteria', 'Static lists are fine for one-off sends only']
+      });
+    }
+  }
+
+  // ── 8. MARKETING CAMPAIGNS ────────────────────────────────────────────────
+  if (campaigns.length > 0) {
+    const noBudgetCampaigns = campaigns.filter(c => !c.budget && !c.budgetMicros);
+    if (noBudgetCampaigns.length > 0) {
+      issues.push({
+        severity: 'info',
+        title: noBudgetCampaigns.length + ' campaign' + (noBudgetCampaigns.length!==1?'s':'') + ' with no budget tracked — ROI reporting blind spot',
+        description: 'Campaigns without budget data make true ROI uncalculable. HubSpot shows revenue influenced but cannot show cost-per-acquisition without spend tracked.',
+        impact: 'Marketing ROI uncalculable · board reporting missing cost data · budget decisions made blind',
+        dimension: 'Reporting',
+        guide: ['Marketing Campaigns — open each active campaign', 'Add budget amount to each', 'Even rough estimates enable ROI tracking']
+      });
+    }
+  }
+
+  // ── 9. NPS / CSAT FEEDBACK ───────────────────────────────────────────────
+  if (feedback.length > 0) {
+    const npsResponses = feedback.filter(f => f.properties?.hs_survey_type === 'NPS');
+    if (npsResponses.length >= 5) {
+      const scores2 = npsResponses.map(f => parseFloat(f.properties?.hs_response || 0)).filter(n => !isNaN(n) && n >= 0);
+      const promoters = scores2.filter(n => n >= 9).length;
+      const detractors = scores2.filter(n => n <= 6).length;
+      const nps = scores2.length > 0 ? Math.round(((promoters - detractors) / scores2.length) * 100) : null;
+      if (nps !== null && nps < 20) {
+        configScore -= 10;
+        issues.push({
+          severity: nps < 0 ? 'critical' : 'warning',
+          title: 'NPS score ' + nps + ' — customer sentiment below healthy threshold (benchmark: 31+)',
+          description: 'B2B SaaS NPS benchmark is 31+. Scores below 20 mean more detractors than promoters. Detractors churn faster and share negative experiences more than promoters share positive ones.',
+          impact: 'Churn risk elevated · expansion revenue blocked · referral pipeline damaged',
+          dimension: 'Configuration',
+          npsData: { score: nps, promoters, detractors, total: scores2.length },
+          guide: ['Close loop with every detractor within 48 hours', 'Build churn-risk workflow triggered by NPS < 7', 'Track NPS monthly and tie to renewal risk scoring']
+        });
+      }
+    }
+  }
+
+  // ── 10. EMAIL SUBSCRIPTION HEALTH ────────────────────────────────────────
+  if (optOutDefs.length > 20) {
+    issues.push({
+      severity: 'info',
+      title: optOutDefs.length + ' email subscription types — preference center too complex',
+      description: 'Most contacts see ' + optOutDefs.length + ' subscription types as overwhelming and unsubscribe from everything. Best practice is 4-6 meaningful categories.',
+      impact: 'Higher unsubscribe rates · contacts opting out of all email rather than unwanted types only',
+      dimension: 'Data Integrity',
+      guide: ['Marketing Settings Email Subscriptions', 'Consolidate to 4-6 categories: Marketing, Product Updates, Events, Newsletter', 'Map old types to new ones before deleting']
+    });
+  }
+
+  // ── 11. SALES GOALS ──────────────────────────────────────────────────────
+  if (goals.length > 0) {
+    const expiredGoals = goals.filter(g => {
+      const end = g.properties?.hs_end_datetime;
+      return end && new Date(end).getTime() < now;
+    });
+    if (expiredGoals.length > 0) {
+      issues.push({
+        severity: 'info',
+        title: expiredGoals.length + ' expired sales goal' + (expiredGoals.length!==1?'s':'') + ' — rep targets not updated',
+        description: 'Sales goals past their end date without replacement mean reps are working without active targets. Pipeline discipline and accountability drop without current goals.',
+        impact: 'No active targets · pipeline discipline drops · forecasting accuracy suffers',
+        dimension: 'Team Adoption',
+        guide: ['Sales Goals — review expired entries', 'Set new quarterly targets per rep', 'Add goal reporting to team dashboards']
+      });
+    }
+  }
+
+  // ── 12. LEADS OBJECT (Sales Hub Pro) ─────────────────────────────────────
+  if (leads.length > 0) {
+    const unownedLeads = leads.filter(l => !l.properties?.hubspot_owner_id);
+    const stalledLeads = leads.filter(l => {
+      const created = l.properties?.hs_createdate;
+      return created && (now - new Date(created).getTime()) / DAY > 14 &&
+        String(l.properties?.hs_lead_status||'').toUpperCase() === 'NEW';
+    });
+    if (unownedLeads.length > 0) {
+      dataScore -= Math.min(10, unownedLeads.length * 2);
+      issues.push({
+        severity: 'warning',
+        title: unownedLeads.length + ' unowned lead' + (unownedLeads.length!==1?'s':'') + ' — falling through the cracks',
+        description: 'Unowned leads have no rep responsible for them. In a healthy setup, every lead is assigned the same day it is created.',
+        impact: unownedLeads.length + ' unowned leads · speed-to-lead broken · pipeline leak',
+        dimension: 'Data Integrity',
+        guide: ['CRM Leads — filter by No owner', 'Assign each to the right rep immediately', 'Build round-robin assignment workflow for new leads']
+      });
+    }
+    if (stalledLeads.length > 0) {
+      pipelineScore -= Math.min(12, stalledLeads.length * 3);
+      issues.push({
+        severity: 'warning',
+        title: stalledLeads.length + ' lead' + (stalledLeads.length!==1?'s':'') + ' stuck in New status for 14+ days',
+        description: 'Leads in New status for over 2 weeks are either forgotten or being worked without updates. Healthy conversion time is 3-5 days for qualified leads.',
+        impact: stalledLeads.length + ' stalled leads · pipeline velocity destroyed',
+        dimension: 'Pipeline',
+        guide: ['Review each stalled lead', 'Update status to Qualified, Unqualified, or Attempted Contact', 'Build escalation: Lead >7 days New → manager notification task']
+      });
+    }
+  }
+
 // ── SCORES ──────────────────────────────────────────────────
   const scores = {
     dataIntegrity:    Math.max(20,Math.min(100,Math.round(dataScore))),
@@ -3285,6 +3601,40 @@ async function runFullAudit(token, auditId, meta) {
         companiesCount: companies.length,
         companiesWithRevenue: companies.filter(c=>parseFloat(c.properties?.annualrevenue||0)>0).length,
         companiesNoOwner: companies.filter(c=>!c.properties?.hubspot_owner_id).length,
+
+        // ── Sequences & Campaigns ─────────────────────────────────────────
+        sequences: sequences.length,
+        activeSequences: sequences.filter(seq=>String(seq.status||'').toUpperCase()==='ACTIVE').length,
+        campaigns: campaigns.length,
+
+        // ── Lists ─────────────────────────────────────────────────────────
+        listCount: lists.length,
+        staticLists: lists.filter(l=>l.listType==='STATIC'||l.dynamic===false).length,
+        emptyLists: lists.filter(l=>(l.metaData?.size||l.size||0)===0).length,
+
+        // ── Leads ─────────────────────────────────────────────────────────
+        leads: leads.length,
+        unownedLeads: leads.filter(l=>!l.properties?.hubspot_owner_id).length,
+        newLeads: leads.filter(l=>String(l.properties?.hs_lead_status||'').toUpperCase()==='NEW').length,
+
+        // ── Goals ─────────────────────────────────────────────────────────
+        goals: goals.length,
+        activeGoals: goals.filter(g=>{ const end=g.properties?.hs_end_datetime; return !end||new Date(end).getTime()>now; }).length,
+
+        // ── NPS / CSAT ────────────────────────────────────────────────────
+        npsResponses: feedback.filter(f=>f.properties?.hs_survey_type==='NPS').length,
+        csatResponses: feedback.filter(f=>f.properties?.hs_survey_type==='CSAT').length,
+
+        // ── Email subscription health ─────────────────────────────────────
+        emailSubTypes: optOutDefs.length,
+
+        // ── Conversations ─────────────────────────────────────────────────
+        openConversations: conversations.filter(c=>String(c.status||'').toUpperCase()==='OPEN').length,
+        totalConversations: conversations.length,
+
+        // ── Multi-currency ────────────────────────────────────────────────
+        hasMultiCurrency: currencies.length > 1,
+        currencyCount: currencies.length,
       },
       isLimited: !isPaid,
       limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
@@ -3294,7 +3644,7 @@ async function runFullAudit(token, auditId, meta) {
       grade: overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',
       criticalCount, warningCount, infoCount, monthlyWaste,
       totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
-      checksRun: 165, recordsScanned: totalRecordsScanned
+      checksRun: 177, recordsScanned: totalRecordsScanned
     },
     scores, issues
   };
