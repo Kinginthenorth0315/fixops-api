@@ -4176,7 +4176,19 @@ async function runFullAudit(token, auditId, meta) {
   const criticalCount = issues.filter(i=>i.severity==='critical').length;
   const warningCount  = issues.filter(i=>i.severity==='warning').length;
   const infoCount     = issues.filter(i=>i.severity==='info').length;
-  const monthlyWaste  = Math.round((dupes*0.38)+(stalled.length*18)+(deadWf.length*10)+(inactiveUsers.length*75)+(noEmail.length*0.5));
+  // ── WASTE ESTIMATE ───────────────────────────────────────────────────────────
+  // Conservative benchmarks: HubSpot billing + industry opportunity cost data
+  const wasteDupes         = Math.round(dupes * 0.45);                          // Billing tier inflation
+  const wasteStalledDeals  = Math.round(stalledVal * 0.02);                     // 2% of stalled pipeline/mo
+  const wasteDeadWorkflows = Math.round(deadWf.length * 22);                    // Rep time + missed automation
+  const wasteGhostSeats    = Math.round(inactiveUsers.length * 75);             // ~$75/seat/mo HubSpot avg
+  const wasteNoEmail       = Math.round(noEmail.length * 1.2);                  // Missed marketing value
+  const wasteOverdueInv    = overdueInvoices ? Math.round(overdueInvoices.length * 35) : 0;
+  const wasteExpiredQ      = expiredQuotes   ? Math.round(expiredQuotes.length * 28)   : 0;
+  const monthlyWaste  = Math.round(
+    wasteDupes + wasteStalledDeals + wasteDeadWorkflows +
+    wasteGhostSeats + wasteNoEmail + wasteOverdueInv + wasteExpiredQ
+  );
 
   const totalRecordsScanned =
     contacts.length + companies.length + deals.length + tickets.length +
