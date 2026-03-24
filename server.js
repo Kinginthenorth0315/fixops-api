@@ -1947,6 +1947,420 @@ app.get('/audit/status/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── PDF Report — print-optimized HTML served as /audit/pdf?id=:id ──────────────
+app.get('/audit/pdf', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).send('<p>Missing audit ID</p>');
+    const data = await getResult(id);
+    if (!data) return res.status(404).send('<p>Audit not found</p>');
+
+    const portal   = data.portalInfo || {};
+    const summary  = data.summary   || {};
+    const scores   = data.scores    || {};
+    const issues   = data.issues    || [];
+    const ps       = portal.portalStats || {};
+    const company  = portal.company || 'Your Portal';
+    const date     = new Date(portal.auditDate || Date.now()).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+    const ovr      = summary.overallScore || 0;
+    const grade    = ovr>=85?'Excellent':ovr>=70?'Good':ovr>=55?'Needs Attention':'Critical';
+    const gradeColor = ovr>=80?'#059669':ovr>=60?'#d97706':'#dc2626';
+    const waste    = summary.monthlyWaste || 0;
+
+    const fmtMoney = n => '$' + Number(n||0).toLocaleString();
+    const fmt      = n => Number(n||0).toLocaleString();
+
+    // Dimension display names
+    const DIM_LABELS = {
+      dataIntegrity:'Data Integrity', automationHealth:'Automation',
+      pipelineIntegrity:'Pipeline', marketingHealth:'Marketing',
+      configSecurity:'Configuration', reportingQuality:'Reporting',
+      teamAdoption:'Team Adoption', serviceHealth:'Service'
+    };
+    const DIM_ICONS = {
+      dataIntegrity:'⬡', automationHealth:'⬡', pipelineIntegrity:'⬡',
+      marketingHealth:'⬡', configSecurity:'⬡', reportingQuality:'⬡',
+      teamAdoption:'⬡', serviceHealth:'⬡'
+    };
+
+    // Build dimension rows
+    const dimRows = Object.entries(DIM_LABELS).map(([key, label]) => {
+      const score = scores[key];
+      if (score === null || score === undefined) return '';
+      const sc = Number(score);
+      const col = sc>=80?'#059669':sc>=60?'#d97706':'#dc2626';
+      const barW = sc;
+      return `<div class="dim-row">
+        <div class="dim-label">${label}</div>
+        <div class="dim-bar-wrap">
+          <div class="dim-bar" style="width:${barW}%;background:${col};"></div>
+        </div>
+        <div class="dim-score" style="color:${col}">${sc}<span class="dim-100">/100</span></div>
+      </div>`;
+    }).join('');
+
+    // Sort issues: critical first, then warning, then info
+    const sorted = [...issues].sort((a,b)=>{
+      const o={critical:0,warning:1,info:2};
+      return (o[a.severity]||1)-(o[b.severity]||1);
+    });
+
+    const criticals = sorted.filter(i=>i.severity==='critical');
+    const warnings  = sorted.filter(i=>i.severity==='warning');
+    const infoIssues= sorted.filter(i=>i.severity==='info');
+
+    const renderIssues = (list) => list.map((issue, idx) => {
+      const sevColor = issue.severity==='critical'?'#dc2626':issue.severity==='warning'?'#d97706':'#2563eb';
+      const sevBg    = issue.severity==='critical'?'#fef2f2':issue.severity==='warning'?'#fffbeb':'#eff6ff';
+      const sevLabel = (issue.severity||'info').toUpperCase();
+      const guideHtml = issue.guide && issue.guide.length
+        ? `<div class="guide-block">
+            <div class="guide-title">How to Fix</div>
+            ${issue.guide.map((step,i)=>`<div class="guide-step"><span class="step-num">${i+1}</span><span>${step.replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</span></div>`).join('')}
+           </div>`
+        : '';
+      const cleanTitle = (issue.title||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+      const cleanDesc  = (issue.description||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+      const cleanImpact= (issue.impact||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+      return `<div class="issue-block" style="border-left:4px solid ${sevColor};">
+        <div class="issue-header">
+          <div class="issue-title">${cleanTitle}</div>
+          <span class="sev-badge" style="background:${sevBg};color:${sevColor};">${sevLabel}</span>
+        </div>
+        <div class="issue-desc">${cleanDesc}</div>
+        ${cleanImpact?`<div class="issue-impact">💸 ${cleanImpact}</div>`:''}
+        ${issue.dimension?`<span class="issue-dim">${issue.dimension}</span>`:''}
+        ${guideHtml}
+      </div>`;
+    }).join('');
+
+    const critSection  = criticals.length  ? `<div class="section-header critical">🔴 Critical Issues (${criticals.length})</div>${renderIssues(criticals)}` : '';
+    const warnSection  = warnings.length   ? `<div class="section-header warning">🟡 Warnings (${warnings.length})</div>${renderIssues(warnings)}` : '';
+    const infoSection  = infoIssues.length ? `<div class="section-header info">🔵 Observations (${infoIssues.length})</div>${renderIssues(infoIssues)}` : '';
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FixOps Report — ${company}</title>
+<style>
+  /* ── Reset & Base ── */
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a2e;
+    background: #ffffff;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 0;
+  }
+
+  /* ── Print settings ── */
+  @page {
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+  }
+  @media print {
+    .no-print { display: none !important; }
+    .page-break { page-break-before: always; }
+    body { padding: 0; }
+  }
+
+  /* ── Print button (screen only) ── */
+  .print-btn {
+    position: fixed; top: 16px; right: 16px; z-index: 999;
+    background: #7c3aed; color: #fff; border: none;
+    padding: 10px 22px; border-radius: 8px; font-size: 13px;
+    font-weight: 700; cursor: pointer; font-family: inherit;
+    box-shadow: 0 4px 14px rgba(124,58,237,.35);
+    transition: background .15s;
+  }
+  .print-btn:hover { background: #6d28d9; }
+
+  /* ── Cover Page ── */
+  .cover {
+    min-height: 240px;
+    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    color: #fff;
+    padding: 40px 44px 36px;
+    border-radius: 0 0 16px 16px;
+    margin-bottom: 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute; top: -60px; right: -60px;
+    width: 280px; height: 280px;
+    background: radial-gradient(circle, rgba(124,58,237,.25), transparent 70%);
+  }
+  .cover-logo {
+    font-size: 13pt; font-weight: 800; letter-spacing: -.2px;
+    opacity: .85; margin-bottom: 28px;
+  }
+  .cover-company { font-size: 28pt; font-weight: 800; letter-spacing: -.5px; margin-bottom: 6px; }
+  .cover-sub { font-size: 12pt; opacity: .65; font-weight: 300; margin-bottom: 24px; }
+  .cover-meta {
+    display: flex; gap: 32px; flex-wrap: wrap;
+  }
+  .cover-stat { }
+  .cover-stat-val { font-size: 26pt; font-weight: 900; letter-spacing: -1px; line-height: 1; }
+  .cover-stat-lbl { font-size: 8.5pt; opacity: .6; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 3px; }
+  .cover-grade {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    font-size: 10pt; font-weight: 700; letter-spacing: .5px;
+    background: rgba(255,255,255,.15); margin-bottom: 20px;
+  }
+
+  /* ── Section headers ── */
+  h2 {
+    font-size: 14pt; font-weight: 800; color: #1a1a2e;
+    margin: 28px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #f0f0f0;
+    letter-spacing: -.2px;
+  }
+  h2:first-of-type { margin-top: 0; }
+
+  /* ── Summary grid ── */
+  .summary-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 12px; margin-bottom: 24px;
+  }
+  .summary-card {
+    background: #f8f9fc; border: 1px solid #e8ecf3;
+    border-radius: 10px; padding: 14px 16px; text-align: center;
+  }
+  .summary-val { font-size: 20pt; font-weight: 900; letter-spacing: -.5px; color: #1a1a2e; }
+  .summary-lbl {
+    font-size: 8pt; color: #6b7280; text-transform: uppercase;
+    letter-spacing: 1px; margin-top: 3px;
+  }
+
+  /* ── Portal stats ── */
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 8px; margin-bottom: 24px;
+  }
+  .stat-box {
+    background: #f8f9fc; border: 1px solid #e8ecf3;
+    border-radius: 8px; padding: 10px 12px; text-align: center;
+  }
+  .stat-val { font-size: 15pt; font-weight: 800; color: #1a1a2e; }
+  .stat-lbl { font-size: 7.5pt; color: #9ca3af; text-transform: uppercase; letter-spacing: .8px; margin-top: 2px; }
+
+  /* ── Dimension bars ── */
+  .dims-list { margin-bottom: 24px; }
+  .dim-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 0; border-bottom: 1px solid #f3f4f6;
+  }
+  .dim-row:last-child { border-bottom: none; }
+  .dim-label { font-size: 10pt; font-weight: 600; width: 140px; flex-shrink: 0; color: #374151; }
+  .dim-bar-wrap { flex: 1; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+  .dim-bar { height: 100%; border-radius: 3px; }
+  .dim-score { font-size: 12pt; font-weight: 800; width: 52px; text-align: right; flex-shrink: 0; }
+  .dim-100 { font-size: 8.5pt; color: #9ca3af; font-weight: 400; }
+
+  /* ── Section headers for issues ── */
+  .section-header {
+    font-size: 11pt; font-weight: 800; padding: 9px 14px;
+    border-radius: 6px; margin: 20px 0 12px;
+    letter-spacing: -.1px;
+  }
+  .section-header.critical { background: #fef2f2; color: #dc2626; border-left: 4px solid #dc2626; }
+  .section-header.warning  { background: #fffbeb; color: #92400e; border-left: 4px solid #d97706; }
+  .section-header.info     { background: #eff6ff; color: #1e40af; border-left: 4px solid #2563eb; }
+
+  /* ── Issue blocks ── */
+  .issue-block {
+    background: #fafafa; border: 1px solid #e5e7eb;
+    border-radius: 8px; padding: 14px 16px;
+    margin-bottom: 10px; page-break-inside: avoid;
+  }
+  .issue-header {
+    display: flex; align-items: flex-start;
+    justify-content: space-between; gap: 12px; margin-bottom: 7px;
+  }
+  .issue-title {
+    font-size: 10.5pt; font-weight: 700; color: #111827;
+    line-height: 1.35; flex: 1;
+  }
+  .sev-badge {
+    font-size: 7.5pt; font-weight: 800; padding: 2px 7px;
+    border-radius: 4px; flex-shrink: 0; letter-spacing: .5px;
+    white-space: nowrap; margin-top: 1px;
+  }
+  .issue-desc { font-size: 9.5pt; color: #4b5563; line-height: 1.6; margin-bottom: 6px; }
+  .issue-impact {
+    font-size: 8.5pt; color: #d97706; font-weight: 600;
+    font-family: 'Courier New', monospace; margin-bottom: 6px;
+  }
+  .issue-dim {
+    display: inline-block; font-size: 7.5pt; font-weight: 700;
+    background: #f0ebff; color: #6d28d9;
+    padding: 2px 7px; border-radius: 4px;
+  }
+
+  /* ── Guide ── */
+  .guide-block {
+    background: #f0fdf4; border: 1px solid #bbf7d0;
+    border-radius: 6px; padding: 10px 12px; margin-top: 8px;
+  }
+  .guide-title {
+    font-size: 8pt; font-weight: 800; color: #065f46;
+    text-transform: uppercase; letter-spacing: 1.2px; margin-bottom: 7px;
+  }
+  .guide-step {
+    display: flex; gap: 8px; margin-bottom: 5px;
+    font-size: 9pt; color: #1f2937; line-height: 1.4;
+  }
+  .guide-step:last-child { margin-bottom: 0; }
+  .step-num {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #059669; color: #fff;
+    font-size: 7.5pt; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+
+  /* ── Footer ── */
+  .footer {
+    margin-top: 40px; padding: 20px 0 8px;
+    border-top: 1px solid #e5e7eb;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 8.5pt; color: #9ca3af;
+  }
+  .footer strong { color: #6d28d9; }
+
+  /* ── Waste callout ── */
+  .waste-callout {
+    background: linear-gradient(135deg, #fef3c7, #fde68a);
+    border: 1px solid #fcd34d; border-radius: 10px;
+    padding: 16px 20px; margin-bottom: 24px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .waste-icon { font-size: 24pt; flex-shrink: 0; }
+  .waste-title { font-size: 11pt; font-weight: 800; color: #78350f; margin-bottom: 3px; }
+  .waste-sub { font-size: 9pt; color: #92400e; line-height: 1.4; }
+
+  /* ── Screen padding ── */
+  @media screen {
+    body { padding: 24px; }
+    .cover { border-radius: 12px; margin-top: 8px; }
+  }
+</style>
+</head>
+<body>
+
+<button class="print-btn no-print" onclick="window.print()">⬇ Save as PDF</button>
+
+<!-- Cover -->
+<div class="cover">
+  <div class="cover-logo">⚡ FixOps Intelligence Report</div>
+  <div class="cover-company">${company}</div>
+  <div class="cover-sub">185-Point Portal Audit · ${date}</div>
+  <div class="cover-grade" style="background:${gradeColor}22;color:${gradeColor};">${grade}</div>
+  <div class="cover-meta">
+    <div class="cover-stat">
+      <div class="cover-stat-val">${ovr}<span style="font-size:14pt;opacity:.6;">/100</span></div>
+      <div class="cover-stat-lbl">Health Score</div>
+    </div>
+    <div class="cover-stat">
+      <div class="cover-stat-val" style="color:#f87171;">${criticals.length}</div>
+      <div class="cover-stat-lbl">Critical Issues</div>
+    </div>
+    <div class="cover-stat">
+      <div class="cover-stat-val" style="color:#fbbf24;">${warnings.length}</div>
+      <div class="cover-stat-lbl">Warnings</div>
+    </div>
+    <div class="cover-stat">
+      <div class="cover-stat-val" style="color:#34d399;">${fmtMoney(waste)}</div>
+      <div class="cover-stat-lbl">Est. Monthly Waste</div>
+    </div>
+  </div>
+</div>
+
+<!-- Waste callout if significant -->
+${waste > 500 ? `<div class="waste-callout">
+  <div class="waste-icon">💸</div>
+  <div>
+    <div class="waste-title">Estimated Monthly Waste: ${fmtMoney(waste)}/mo · ${fmtMoney(waste * 12)}/yr</div>
+    <div class="waste-sub">Revenue leaking from duplicate contacts, inactive seats, stalled deals, and broken workflows. These are addressable issues — not normal operating costs.</div>
+  </div>
+</div>` : ''}
+
+<!-- Portal snapshot -->
+<h2>Portal Snapshot</h2>
+<div class="stats-grid">
+  <div class="stat-box"><div class="stat-val">${fmt(ps.contacts)}</div><div class="stat-lbl">Contacts</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.companies)}</div><div class="stat-lbl">Companies</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.deals)}</div><div class="stat-lbl">Deals</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.tickets)}</div><div class="stat-lbl">Tickets</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.workflows)}</div><div class="stat-lbl">Workflows</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.forms)}</div><div class="stat-lbl">Forms</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.users)}</div><div class="stat-lbl">Users</div></div>
+  <div class="stat-box"><div class="stat-val">${fmt(ps.lists)}</div><div class="stat-lbl">Lists</div></div>
+</div>
+
+<!-- Health score summary -->
+<h2>Health Score Summary</h2>
+<div class="summary-grid">
+  <div class="summary-card">
+    <div class="summary-val" style="color:${gradeColor}">${ovr}</div>
+    <div class="summary-lbl">Overall Score</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-val" style="color:#dc2626">${criticals.length}</div>
+    <div class="summary-lbl">Critical</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-val" style="color:#d97706">${warnings.length}</div>
+    <div class="summary-lbl">Warnings</div>
+  </div>
+  <div class="summary-card">
+    <div class="summary-val" style="color:#6b7280">${summary.checksRun || 185}</div>
+    <div class="summary-lbl">Checks Run</div>
+  </div>
+</div>
+
+<!-- Dimension scores -->
+<h2>Hub Health Breakdown</h2>
+<div class="dims-list">${dimRows}</div>
+
+<!-- Issues -->
+<div class="page-break"></div>
+<h2>All Findings (${sorted.length} Issues)</h2>
+${critSection}${warnSection}${infoSection}
+
+<!-- Footer -->
+<div class="footer">
+  <div>Generated by <strong>FixOps.io</strong> · ${date}</div>
+  <div>${portal.email || ''}</div>
+  <div>fixops.io</div>
+</div>
+
+<script>
+  // Auto-print on load when accessed directly
+  if (window.location.search.includes('print=1')) {
+    window.addEventListener('load', () => setTimeout(() => window.print(), 800));
+  }
+</script>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch(e) {
+    console.error('PDF generation error:', e);
+    res.status(500).send('<p>Error generating report: ' + e.message + '</p>');
+  }
+});
+
+
 // ── Snapshot endpoint — returns audit + history for reporting.html ─────────────
 // Used by reporting.html when a token is present (Pulse/Pro subscribers)
 app.get('/snapshot/:id', async (req, res) => {
