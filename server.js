@@ -753,7 +753,7 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     </div>
     <div style="border-top:1px solid rgba(255,255,255,.06);padding-top:16px;text-align:center;font-size:11px;color:rgba(255,255,255,.25);">
       <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.<br>
-      <span style="font-size:10px;">Your portal is scanned every Monday · 177 checkpoints · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);text-decoration:none;">Pause monitoring</a></span>
+      <span style="font-size:10px;">Your portal is scanned every Monday · 185 checkpoints · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);text-decoration:none;">Pause monitoring</a></span>
     </div>
   </td></tr>
 
@@ -1756,16 +1756,10 @@ const buildAuthUrl = (req, res, params) => {
       'crm.objects.invoices.read',
       'crm.objects.orders.read',
       'crm.objects.subscriptions.read',
-      'crm.objects.carts.read',
       'crm.objects.goals.read',
-      'crm.objects.marketing_events.read',
       'crm.schemas.contacts.read',
       'crm.schemas.deals.read',
-      'crm.schemas.companies.read',
-      'crm.schemas.line_items.read',
-      'crm.schemas.quotes.read',
       'crm.lists.read',
-      'crm.pipelines.orders.read',
       'tickets',
       'sales-email-read',
       'e-commerce',
@@ -1781,22 +1775,12 @@ const buildAuthUrl = (req, res, params) => {
       'automation',
       'automation.sequences.read',
       'forms',
-      'content',
-      'social',
       'marketing.campaigns.read',
       'marketing.campaigns.revenue.read',
-      'marketing-email',
-      'cms.knowledge_base.articles.read',
-      'cms.knowledge_base.settings.read',
       'crm.objects.feedback_submissions.read',
       'crm.objects.leads.read',
       'crm.objects.custom.read',
-      'crm.schemas.custom.read',
-      'crm.dealsplits.read_write',
-      'crm.objects.projects.read',
-      'settings.users.teams.read',
     ].join(' ');
-
     const url = new URL('https://app.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
     url.searchParams.set('redirect_uri', HUBSPOT_REDIRECT_URI);
@@ -2413,6 +2397,12 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/marketing/v3/campaigns?limit=50'),
     {data:{results:[]}}
   );
+  // Marketing emails — requires content scope (Marketing Hub Pro+)
+  // Reads email list, performance stats, open/click/bounce rates
+  const marketingEmailsR = await safe(
+    () => hs.get('/marketing/v3/emails?limit=50&orderBy=-updatedAt'),
+    {data:{results:[]}}
+  );
   const optOutsR = await safe(
     () => hs.get('/communication-preferences/v3/definitions'),
     {data:{subscriptionDefinitions:[]}}
@@ -2437,6 +2427,38 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/settings/v3/currencies'),
     {data:{currencies:[]}}
   );
+  const settingsUsersR = await safe(
+    () => hs.get('/settings/v3/users?limit=100'),
+    {data:{results:[]}}
+  );
+  const dealPipelinesR = await safe(
+    () => hs.get('/crm/v3/pipelines/deals'),
+    {data:{results:[]}}
+  );
+  const contactPropsR = await safe(
+    () => hs.get('/crm/v3/properties/contacts?limit=500'),
+    {data:{results:[]}}
+  );
+  const emailEngR = await safe(
+    () => hs.get('/crm/v3/objects/emails?limit=100&properties=hs_email_direction,hs_email_status,hs_createdate,hubspot_owner_id'),
+    {data:{results:[]}}
+  );
+  const notesR = await safe(
+    () => hs.get('/crm/v3/objects/notes?limit=100&properties=hs_note_body,hs_createdate,hubspot_owner_id'),
+    {data:{results:[]}}
+  );
+  const cartsR = await safe(
+    () => hs.get('/crm/v3/objects/carts?limit=100&properties=hs_cart_status,hs_createdate,hs_lastmodifieddate'),
+    {data:{results:[]}}
+  );
+  const communicationsR = await safe(
+    () => hs.get('/crm/v3/objects/communications?limit=100&properties=hs_communication_channel_type,hs_createdate,hubspot_owner_id'),
+    {data:{results:[]}}
+  );
+  const marketingEventsR = await safe(
+    () => hs.get('/crm/v3/objects/marketing_events?limit=50&properties=hs_event_name,hs_event_type,hs_start_datetime,hs_end_datetime,hs_event_cancelled'),
+    {data:{results:[]}}
+  );
 
   // ── Unwrap all results — enforce hard limits for free plan ──────────────────
   const contacts      = (contactsR.data?.results||[]).slice(0, contactLimit);
@@ -2457,7 +2479,16 @@ async function runFullAudit(token, auditId, meta) {
   const goals         = goalsR.data?.results||[];
   const feedback      = feedbackR.data?.results||[];
   const conversations = conversationsR.data?.results||[];
-  const currencies    = currencyR.data?.currencies||[];
+  const currencies      = currencyR.data?.currencies||[];
+  const settingsUsers   = settingsUsersR.data?.results||[];
+  const dealPipelines   = dealPipelinesR.data?.results||[];
+  const contactProps    = contactPropsR.data?.results||[];
+  const emailEngs       = emailEngR.data?.results||[];
+  const notes           = notesR.data?.results||[];
+  const carts           = cartsR.data?.results||[];
+  const communications  = communicationsR.data?.results||[];
+  const marketingEvents  = marketingEventsR.data?.results||[];
+  const marketingEmails  = marketingEmailsR.data?.results||[];
   const tasks         = tasksR.data?.results||[];
   const meetings      = meetingsR.data?.results||[];
   const calls         = callsR.data?.results||[];
@@ -3385,7 +3416,30 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
-  // ── 8. MARKETING CAMPAIGNS ────────────────────────────────────────────────
+  // ── 8. CART ABANDONMENT (ecommerce portals) ─────────────────────────────
+  if (carts.length > 0) {
+    const abandoned = carts.filter(c => String(c.properties?.hs_cart_status||'').toLowerCase() === 'abandoned');
+    if (abandoned.length > 0) {
+      const pct = Math.round(abandoned.length / carts.length * 100);
+      if (pct > 30) {
+        pipelineScore -= Math.min(10, Math.round(pct / 10));
+        issues.push({
+          severity: pct > 60 ? 'critical' : 'warning',
+          title: pct + '% cart abandonment rate — ' + abandoned.length + ' of ' + carts.length + ' carts not completed',
+          description: 'Over ' + pct + '% of shopping carts are being abandoned before purchase. Industry average is 70% — but abandoned carts still represent recoverable revenue through automated follow-up sequences.',
+          impact: abandoned.length + ' abandoned carts · unrecovered revenue · no automated recovery in place',
+          dimension: 'Pipeline',
+          guide: [
+            'Create an abandoned cart workflow: trigger 1 hour after cart created with no purchase',
+            'Send 3-step recovery sequence: reminder email, discount offer, final reminder',
+            'Review cart pages for friction: slow load times, required account creation, limited payment options'
+          ]
+        });
+      }
+    }
+  }
+
+  // ── 9. MARKETING CAMPAIGNS ────────────────────────────────────────────────
   if (campaigns.length > 0) {
     const noBudgetCampaigns = campaigns.filter(c => !c.budget && !c.budgetMicros);
     if (noBudgetCampaigns.length > 0) {
@@ -3400,7 +3454,86 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
-  // ── 9. NPS / CSAT FEEDBACK ───────────────────────────────────────────────
+  // ── 10. MARKETING EMAIL HEALTH (content scope) ───────────────────────────
+  if (marketingEmails.length > 0) {
+    const sentEmails = marketingEmails.filter(e => {
+      const stats = e.stats || e.counters || {};
+      return (stats.sent || stats.delivered || 0) > 0;
+    });
+
+    // High bounce rate emails
+    const highBounce = marketingEmails.filter(e => {
+      const stats = e.stats || e.counters || {};
+      const sent = stats.sent || stats.delivered || 0;
+      const bounced = stats.bounced || stats.hardBounced || 0;
+      return sent > 100 && bounced / sent > 0.05;
+    });
+
+    if (highBounce.length > 0) {
+      marketingScore -= Math.min(15, highBounce.length * 5);
+      issues.push({
+        severity: highBounce.length > 2 ? 'critical' : 'warning',
+        title: highBounce.length + ' marketing email' + (highBounce.length!==1?'s':'') + ' with bounce rate over 5% — deliverability at risk',
+        description: 'Bounce rates above 5% signal list health problems and damage your sending domain reputation. HubSpot automatically suppresses addresses after bounces, but the underlying cause — bad data, purchased lists, or old contacts — needs to be fixed.',
+        impact: 'Sender reputation damage · deliverability dropping · future emails landing in spam',
+        dimension: 'Marketing',
+        guide: [
+          'Marketing Emails — check the Performance tab of each affected email',
+          'Review the bounced contacts list — are these old, imported, or purchased addresses?',
+          'Run a list cleanup: remove contacts with no engagement in 12+ months',
+          'Use double opt-in on all new form submissions going forward'
+        ]
+      });
+    }
+
+    // Low open rate emails
+    const lowOpen = sentEmails.filter(e => {
+      const stats = e.stats || e.counters || {};
+      const sent = stats.sent || stats.delivered || 0;
+      const opens = stats.open || stats.opened || 0;
+      return sent > 500 && opens / sent * 100 < 15;
+    });
+
+    if (lowOpen.length > 3) {
+      issues.push({
+        severity: 'info',
+        title: lowOpen.length + ' marketing emails below 15% open rate — subject lines or list targeting needs work',
+        description: 'Industry benchmark for marketing email open rates is 20-25%. Consistently low open rates indicate subject line problems, wrong audience targeting, or sending frequency issues.',
+        impact: 'Low engagement · wasted sends · risk of contacts unsubscribing',
+        dimension: 'Marketing',
+        guide: [
+          'Test subject lines with A/B testing on your next 3 sends',
+          'Segment your list — send to engaged contacts first to protect sender score',
+          'Check send frequency — are you sending too often?',
+          'Preview text should complement subject, not repeat it'
+        ]
+      });
+    }
+
+    // Stale drafts
+    const staleDrafts = marketingEmails.filter(e => {
+      const isDraft = e.state === 'DRAFT' || e.currentState === 'DRAFT';
+      const updated = e.updatedAt || e.updated;
+      return isDraft && updated && (now - new Date(updated).getTime()) / DAY > 90;
+    });
+
+    if (staleDrafts.length > 5) {
+      issues.push({
+        severity: 'info',
+        title: staleDrafts.length + ' marketing email drafts untouched for 90+ days',
+        description: 'Stale drafts clutter the email tool and often represent abandoned campaigns. They can confuse team members and inflate your email count metrics.',
+        impact: 'Portal clutter · team confusion · abandoned campaigns never completed',
+        dimension: 'Marketing',
+        guide: [
+          'Marketing Emails — filter by Draft status',
+          'Review each: is it still needed?',
+          'Delete or archive stale drafts to keep the email tool clean'
+        ]
+      });
+    }
+  }
+
+  // ── 10. NPS / CSAT FEEDBACK ───────────────────────────────────────────────
   if (feedback.length > 0) {
     const npsResponses = feedback.filter(f => f.properties?.hs_survey_type === 'NPS');
     if (npsResponses.length >= 5) {
@@ -3435,7 +3568,84 @@ async function runFullAudit(token, auditId, meta) {
     });
   }
 
-  // ── 11. SALES GOALS ──────────────────────────────────────────────────────
+  // ── 11. SUPER ADMIN AUDIT (settings.users.read) ──────────────────────────
+  if (settingsUsers.length > 0) {
+    const superAdminUsers = settingsUsers.filter(u => u.superAdmin === true);
+    if (superAdminUsers.length > 5) {
+      configScore -= Math.min(15, (superAdminUsers.length - 5) * 3);
+      issues.push({
+        severity: superAdminUsers.length > 10 ? 'critical' : 'warning',
+        title: superAdminUsers.length + ' super admins — too many users with full portal access',
+        description: 'You have ' + superAdminUsers.length + ' super admins. HubSpot best practice is 2-3 maximum. Super admins can delete records, change billing, modify all settings, and access all data. Each unnecessary super admin is a security and compliance risk.',
+        impact: superAdminUsers.length + ' users with unrestricted portal access · security risk · compliance concern',
+        dimension: 'Configuration',
+        guide: [
+          'Settings → Users & Teams → filter by Super Admin',
+          'Review each: does this person actually need super admin?',
+          'Downgrade to the minimum role needed for their job function',
+          'Keep 2-3 super admins maximum — one primary, one backup, one for emergencies'
+        ]
+      });
+    }
+  }
+
+  // ── 12. UNDOCUMENTED CUSTOM PROPERTIES (crm.schemas.contacts.read) ────────
+  if (contactProps.length > 0) {
+    const customProps = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false);
+    const undocumented = customProps.filter(p => !p.description || p.description.trim() === '');
+    if (undocumented.length > 10) {
+      dataScore -= Math.min(8, Math.round(undocumented.length / customProps.length * 20));
+      issues.push({
+        severity: 'info',
+        title: undocumented.length + ' custom properties have no description — data model undocumented',
+        description: 'Custom properties without descriptions are invisible to new team members, make reporting harder, and signal a portal that has grown without governance. When a rep or marketer cannot find the right property, they create a duplicate.',
+        impact: undocumented.length + ' undocumented properties · onboarding friction · duplicate properties created over time',
+        dimension: 'Data Integrity',
+        customProps: customProps.length,
+        undocumentedProps: undocumented.length,
+        guide: [
+          'Settings → Properties — filter by "Created by user"',
+          'Add a description to each custom property explaining what it captures and when it should be set',
+          'Consider using property groups to organize related custom properties',
+          'Audit for duplicates while you are there — merge any that capture the same data'
+        ]
+      });
+    }
+  }
+
+  // ── 13. REP ACTIVITY COMPLETENESS (emails, notes, communications) ─────────
+  if (users.length > 0 && (emailEngs.length > 0 || notes.length > 0 || communications.length > 0)) {
+    const totalEngagements = (emailEngs.length || 0) + (notes.length || 0) + (calls.length || 0) +
+                             (meetings.length || 0) + (communications.length || 0);
+    const avgPerUser = users.length > 0 ? Math.round(totalEngagements / users.length) : 0;
+
+    if (avgPerUser < 5 && users.length > 3) {
+      teamScore -= Math.min(15, Math.max(0, 15 - avgPerUser * 3));
+      issues.push({
+        severity: 'warning',
+        title: 'Low rep activity logging — avg ' + avgPerUser + ' engagements per user in last 30 days',
+        description: 'Across ' + users.length + ' users, FixOps found an average of ' + avgPerUser + ' logged engagements (calls, emails, meetings, notes) per user. Low logging means your CRM does not reflect reality — pipeline data is unreliable and managers cannot coach from actual activity.',
+        impact: 'Pipeline forecasting unreliable · manager coaching blind · deal risk invisible',
+        dimension: 'Team Adoption',
+        activityData: {
+          emailsLogged: emailEngs.length,
+          notesLogged: notes.length,
+          callsLogged: calls.length,
+          meetingsLogged: meetings.length,
+          commsLogged: communications.length,
+          avgPerUser
+        },
+        guide: [
+          'Set a minimum activity logging expectation: 3+ activities per active deal per week',
+          'Enable HubSpot Sales Email Extension so emails auto-log from Gmail/Outlook',
+          'Review deals with zero activity in 14 days — are they real or pipeline bloat?',
+          'Build a rep activity dashboard visible to the whole team for accountability'
+        ]
+      });
+    }
+  }
+
+  // ── 14. SALES GOALS ──────────────────────────────────────────────────────
   if (goals.length > 0) {
     const expiredGoals = goals.filter(g => {
       const end = g.properties?.hs_end_datetime;
@@ -3602,6 +3812,38 @@ async function runFullAudit(token, auditId, meta) {
         companiesWithRevenue: companies.filter(c=>parseFloat(c.properties?.annualrevenue||0)>0).length,
         companiesNoOwner: companies.filter(c=>!c.properties?.hubspot_owner_id).length,
 
+        // ── Carts & Communications ───────────────────────────────────────
+        cartCount: carts.length,
+        abandonedCarts: carts.filter(c => String(c.properties?.hs_cart_status||'').toLowerCase() === 'abandoned').length,
+        communicationsLogged: communications.length,
+        communicationsByChannel: communications.reduce((acc, c) => {
+          const ch = c.properties?.hs_communication_channel_type || 'unknown';
+          acc[ch] = (acc[ch] || 0) + 1;
+          return acc;
+        }, {}),
+
+        // ── Marketing Emails ──────────────────────────────────────────────
+        marketingEmailCount: marketingEmails.length,
+        publishedEmails: marketingEmails.filter(e => e.state === 'PUBLISHED' || e.currentState === 'PUBLISHED').length,
+        draftEmails: marketingEmails.filter(e => e.state === 'DRAFT' || e.currentState === 'DRAFT').length,
+        avgOpenRate: marketingEmails.length > 0
+          ? Math.round(marketingEmails.reduce((sum, e) => {
+              const stats = e.stats || e.counters || {};
+              const sent = stats.sent || stats.delivered || 0;
+              const opens = stats.open || stats.opened || 0;
+              return sum + (sent > 0 ? opens / sent * 100 : 0);
+            }, 0) / marketingEmails.filter(e => {
+              const stats = e.stats || e.counters || {};
+              return (stats.sent || stats.delivered || 0) > 0;
+            }).length || 1)
+          : 0,
+        highBounceEmails: marketingEmails.filter(e => {
+          const stats = e.stats || e.counters || {};
+          const sent = stats.sent || stats.delivered || 0;
+          const bounced = stats.bounced || stats.hardBounced || 0;
+          return sent > 100 && bounced / sent > 0.05;
+        }).length,
+
         // ── Sequences & Campaigns ─────────────────────────────────────────
         sequences: sequences.length,
         activeSequences: sequences.filter(seq=>String(seq.status||'').toUpperCase()==='ACTIVE').length,
@@ -3635,6 +3877,23 @@ async function runFullAudit(token, auditId, meta) {
         // ── Multi-currency ────────────────────────────────────────────────
         hasMultiCurrency: currencies.length > 1,
         currencyCount: currencies.length,
+
+        // ── Pipeline schema ───────────────────────────────────────────────
+        dealPipelines: dealPipelines.length,
+        dealStagesTotal: dealPipelines.reduce((sum, p) => sum + (p.stages ? p.stages.length : 0), 0),
+
+        // ── Custom properties ─────────────────────────────────────────────
+        customContactProps: contactProps.filter(p => p.createdUserId).length,
+        undocumentedProps: contactProps.filter(p => p.createdUserId && !p.description).length,
+
+        // ── Engagement completeness ───────────────────────────────────────
+        emailEngagements: emailEngs.length,
+        notes: notes.length,
+        marketingEventsCount: marketingEvents.length,
+        cancelledEvents: marketingEvents.filter(e => e.properties?.hs_event_cancelled === 'true').length,
+
+        // ── Settings users ────────────────────────────────────────────────
+        superAdmins: settingsUsers.filter(u => u.superAdmin === true || u.roleIds?.includes('superAdmin')).length,
       },
       isLimited: !isPaid,
       limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
@@ -3644,7 +3903,7 @@ async function runFullAudit(token, auditId, meta) {
       grade: overallScore>=85?'Excellent':overallScore>=70?'Good':overallScore>=55?'Needs Attention':'Critical',
       criticalCount, warningCount, infoCount, monthlyWaste,
       totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
-      checksRun: 177, recordsScanned: totalRecordsScanned
+      checksRun: 185, recordsScanned: totalRecordsScanned
     },
     scores, issues
   };
