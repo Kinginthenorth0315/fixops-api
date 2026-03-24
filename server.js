@@ -1627,9 +1627,66 @@ const buildAuthUrl = (req, res, params) => {
     const state = crypto.randomBytes(16).toString('hex');
     pendingAudits.set(state, { email, company, plan, paid: !!paid, codeVerifier, createdAt: Date.now() });
     // Standard Public App OAuth — counts as marketplace install
+    // Scopes must match exactly what's configured in app-hsmeta.json
+    const REQUIRED_SCOPES = [
+      'oauth',
+      'crm.objects.contacts.read',
+      'crm.objects.companies.read',
+      'crm.objects.deals.read',
+      'crm.objects.owners.read',
+      'crm.objects.users.read',
+      'crm.objects.quotes.read',
+      'crm.objects.line_items.read',
+      'crm.objects.products.read',
+      'crm.objects.invoices.read',
+      'crm.objects.orders.read',
+      'crm.objects.subscriptions.read',
+      'crm.objects.carts.read',
+      'crm.objects.goals.read',
+      'crm.objects.marketing_events.read',
+      'crm.schemas.contacts.read',
+      'crm.schemas.deals.read',
+      'crm.schemas.companies.read',
+      'crm.schemas.line_items.read',
+      'crm.schemas.quotes.read',
+      'crm.lists.read',
+      'crm.pipelines.orders.read',
+      'tickets',
+      'sales-email-read',
+      'e-commerce',
+      'account-info.security.read',
+      'settings.users.read',
+      'settings.currencies.read',
+      'communication_preferences.read',
+      'conversations.read',
+      'business-intelligence',
+    ].join(' ');
+
+    const OPTIONAL_SCOPES = [
+      'automation',
+      'automation.sequences.read',
+      'forms',
+      'content',
+      'social',
+      'marketing.campaigns.read',
+      'marketing.campaigns.revenue.read',
+      'marketing-email',
+      'cms.knowledge_base.articles.read',
+      'cms.knowledge_base.settings.read',
+      'crm.objects.feedback_submissions.read',
+      'crm.objects.leads.read',
+      'crm.objects.custom.read',
+      'crm.schemas.custom.read',
+      'crm.dealsplits.read_write',
+      'crm.objects.projects.read',
+      'settings.users.teams.read',
+    ].join(' ');
+
     const url = new URL('https://app.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
     url.searchParams.set('redirect_uri', HUBSPOT_REDIRECT_URI);
+    url.searchParams.set('scope', REQUIRED_SCOPES);
+    url.searchParams.set('optional_scope', OPTIONAL_SCOPES);
     url.searchParams.set('state', state);
     console.log(`Auth URL: ${email} | plan: ${plan} | paid: ${paid}`);
     res.json({ url: url.toString(), state });
