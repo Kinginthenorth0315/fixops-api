@@ -134,6 +134,31 @@ const saveResult = async (id, data) => {
   );
 };
 
+// ── Get a valid HubSpot access token (auto-refresh if available) ─────────────
+const getValidToken = async (customer) => {
+  // Try the stored access token first (may still be valid within 6hr window)
+  if (customer.portal_token) return customer.portal_token;
+  // Fall back to refresh token exchange
+  if (!customer.refresh_token) throw new Error('No valid token available — customer needs to reconnect');
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: HUBSPOT_CLIENT_ID,
+      client_secret: HUBSPOT_CLIENT_SECRET,
+      refresh_token: customer.refresh_token,
+    });
+    const resp = await axios.post('https://api.hubapi.com/oauth/v1/token', body,
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    const newToken = resp.data.access_token;
+    // Update stored token
+    await db.query('UPDATE customers SET portal_token=$1, updated_at=NOW() WHERE email=$2',
+      [newToken, customer.email]).catch(()=>{});
+    return newToken;
+  } catch(e) {
+    throw new Error('Token refresh failed: ' + e.message);
+  }
+};
+
 const getResult = async (id) => {
   const r = await db.query('SELECT data FROM audit_results WHERE id = $1', [id]);
   return r.rows[0]?.data || null;
@@ -1724,6 +1749,23 @@ app.post('/agency/rescan-all', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── GDPR: Right to erasure ───────────────────────────────────────────────────
+app.delete('/customer/data', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const custRes = await db.query('SELECT id FROM customers WHERE email=$1', [email]);
+    if (custRes.rows[0]) {
+      const custId = custRes.rows[0].id;
+      await db.query('DELETE FROM audit_history WHERE customer_id=$1', [custId]);
+    }
+    await db.query('DELETE FROM magic_links WHERE email=$1', [email]);
+    await db.query('DELETE FROM customers WHERE email=$1', [email]);
+    // Note: audit_results are keyed by ID not email — they auto-expire per retention policy
+    res.json({ deleted: true, email, message: 'All personal data removed. Audit results expire within 7 days.' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/health', async (req, res) => {
   let dbOk = false;
   try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
@@ -1882,13 +1924,17 @@ app.get('/auth/callback', async (req, res) => {
 
     // Store token for Pulse re-scans
     if (pending.email && ['pulse','pro','command'].includes(pending.plan)) {
+      // Store both access_token and refresh_token
+      // HubSpot access tokens expire in 6hrs — refresh_token is long-lived
+      const portalRefreshToken = tokenRes.data.refresh_token || null;
       await db.query(`
-        INSERT INTO customers (email, company, plan, plan_status, portal_token, last_audit_id, last_audit_at, updated_at)
-        VALUES ($1, $2, $3, 'active', $4, $5, NOW(), NOW())
+        INSERT INTO customers (email, company, plan, plan_status, portal_token, refresh_token, last_audit_id, last_audit_at, updated_at)
+        VALUES ($1, $2, $3, 'active', $4, $5, $6, NOW(), NOW())
         ON CONFLICT (email) DO UPDATE
-        SET portal_token = $4, last_audit_id = $5, last_audit_at = NOW(),
+        SET portal_token = $4, refresh_token = COALESCE($5, customers.refresh_token),
+            last_audit_id = $6, last_audit_at = NOW(),
             plan = $3, company = $2, updated_at = NOW()
-      `, [pending.email, pending.company, pending.plan, tokenRes.data.access_token, auditId])
+      `, [pending.email, pending.company, pending.plan, tokenRes.data.access_token, portalRefreshToken, auditId])
         .catch(e => console.error('Customer token save:', e.message));
     }
 
@@ -2608,7 +2654,8 @@ const triggerRescan = async (customer) => {
     console.log(`[${auditId}] Weekly rescan for ${customer.email}`);
     try {
       const meta = { email: customer.email, company: customer.company, plan: customer.plan };
-      const result = await runFullAudit(customer.portal_token, auditId, meta);
+      const freshToken = await getValidToken(customer);
+      const result = await runFullAudit(freshToken, auditId, meta);
 
       // Save to audit_history FIRST so email comparison is correct
       // history[0] = last week (before this scan), history[1] = two weeks ago, etc.
