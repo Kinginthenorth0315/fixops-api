@@ -2942,13 +2942,13 @@ async function runFullAudit(token, auditId, meta) {
   });
   const dupes = Object.values(nameMap).filter(v=>v>1).reduce((a,b)=>a+b,0);
   if(dupes>0){
-    dataScore-=Math.min(22,dupes/4);
+    dataScore-=Math.min(25,dupes/3);
     issues.push({severity:dupes>15?'critical':'warning',title:`${dupes} potential duplicate contacts — missed by HubSpot native dedup`,description:`HubSpot only deduplicates on exact email matches. These ${dupes} contacts share the same name but different email formats or sources. They\'re receiving duplicate sequences, corrupting attribution, and inflating your billing tier.`,detail:`HubSpot\'s native "Manage Duplicates" tool would miss all of these. They only match on exact email. FixOps matches on name + phone + company — the way humans spot duplicates.`,impact:`~$${Math.round(dupes*0.38)}/mo excess billing · duplicated outreach to real people · corrupted attribution data`,dimension:'Data Integrity',guide:['Go to Contacts → Actions → Manage Duplicates to clear HubSpot\'s exact-match suggestions first','For fuzzy duplicates: export contacts, sort by Last Name, identify and merge name-matched groups','FixOps Data CleanUp runs full fuzzy-match dedup with a merge preview — you approve before anything changes','Every merge preserves full activity history — no data is ever lost']});
   }
 
   const noEmail = contacts.filter(c=>!c.properties?.email);
   if(noEmail.length>0){
-    dataScore-=Math.min(18,(noEmail.length/Math.max(contacts.length,1))*60);
+    dataScore-=Math.min(22,(noEmail.length/Math.max(contacts.length,1))*70);
     issues.push({severity:noEmail.length>contacts.length*0.1?'critical':'warning',title:`${noEmail.length} contacts (${Math.round(noEmail.length/Math.max(contacts.length,1)*100)}%) missing email — unreachable by any automation`,description:`No email = no workflows, no sequences, no marketing. These contacts entered your portal from calls, imports, or integrations without email capture. You\'re paying for them in your contact tier while getting zero value.`,detail:`Email is the foundation of everything HubSpot does. Without it a contact can receive no automated communication, never trigger a workflow, and can\'t be targeted by any campaign.`,impact:`${noEmail.length} contacts permanently excluded from all email automation`,dimension:'Data Integrity',guide:['Export contacts filtered by "Email is unknown" and identify the source (import, integration, manual entry)','Enrich missing emails using Apollo.io free tier, Clearbit, or LinkedIn Sales Navigator','Add email as required on all future forms and integration field mappings','Create a workflow: Contact created AND email unknown → task for rep to get email within 7 days']});
   }
 
@@ -2980,7 +2980,7 @@ async function runFullAudit(token, auditId, meta) {
   const activeWf = workflows.filter(w=>w.enabled||w.isEnabled);
   const deadWf   = workflows.filter(w=>(w.enabled||w.isEnabled)&&(w.enrolledObjectsCount||w.contactsEnrolled||0)===0);
   if(deadWf.length>0){
-    autoScore-=Math.min(18,deadWf.length*2);
+    autoScore-=Math.min(25,deadWf.length*3);
     issues.push({severity:deadWf.length>5?'warning':'info',title:`${deadWf.length} active workflows with zero enrollments — consuming quota for nothing`,description:`These workflows are switched on but have never enrolled anyone. They were likely built for campaigns that ended or criteria no contacts will ever meet. They clutter your automation dashboard and create false confidence that your portal is actively running automations.`,detail:`Dead workflows consume your plan\'s workflow quota, inflate the number of "active" automations in reports, and make it nearly impossible to identify what\'s actually running vs what\'s abandoned.`,impact:`${deadWf.length} dead automations of ${workflows.length} total (${Math.round(deadWf.length/Math.max(workflows.length,1)*100)}% waste rate)`,dimension:'Automation',guide:['Workflows → sort by "Enrolled" ascending — zero-enrollment workflows rise to the top','Review each: is the trigger criteria achievable? If not, archive it with a backup','Create a "Review" folder and move dead candidates there for 30 days before archiving','FixOps auto-archives dead workflows with complete JSON backup — restore any within 30 days']});
   }
 
@@ -3002,13 +3002,13 @@ async function runFullAudit(token, auditId, meta) {
   const stalled   = openDeals.filter(d=>(now-new Date(d.properties?.hs_lastmodifieddate||0).getTime())/DAY>21);
   const stalledVal= stalled.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0);
   if(stalled.length>0){
-    pipelineScore-=Math.min(24,stalled.length*3);
+    pipelineScore-=Math.min(30,stalled.length*4);
     issues.push({severity:stalled.length>4?'critical':'warning',title:`${stalled.length} deals stalled 21+ days — $${stalledVal.toLocaleString()} quietly dying`,description:`HubSpot\'s own data shows deals inactive for 21 days close at 11% vs 67% for deals touched weekly. Your team doesn\'t know these deals are stalling, there\'s no automated alert, and no manager is being notified.`,detail:`The #1 reason deals are lost isn\'t "no" — it\'s silence. Automated inactivity alerts are the single highest-ROI workflow any sales team can add to HubSpot.`,impact:`$${stalledVal.toLocaleString()} in pipeline at risk · close rate dropping from 67% to 11% on each deal`,dimension:'Pipeline',guide:['Workflow: Deal active AND days since last engagement > 14 → urgent task for owner AND manager notification','Add a "Next Step + Date" required property before deals advance to Proposal Sent stage','Enable the visual "deal inactive" indicator in Pipeline Settings','FixOps builds this inactivity alert system and creates tasks on all currently stalled deals in one session']});
   }
 
   const noClose = openDeals.filter(d=>!d.properties?.closedate);
   if(noClose.length>0){
-    pipelineScore-=Math.min(16,noClose.length*2.5);
+    pipelineScore-=Math.min(20,noClose.length*3);
     issues.push({severity:noClose.length>5?'warning':'info',title:`${noClose.length} open deals have no close date — your revenue forecast is fiction`,description:`HubSpot\'s pipeline-weighted forecast calculates expected revenue using close dates and probabilities. Every deal without a close date shows as $0 in forecast reports. ${noClose.length} deals means your revenue projection could be understated by six figures.`,detail:`Without close dates you can\'t run a pipeline-weighted forecast, calculate average sales cycle, trigger close-date-based workflows, or give leadership accurate revenue projections. This is a fundamental forecast failure.`,impact:`Forecast accuracy completely broken for ${noClose.length} deals`,dimension:'Pipeline',guide:['Make Close Date required in Settings → Properties → Close Date → Required on deal creation','Export all no-close-date deals → reps estimate dates → reimport to restore forecast accuracy','Workflow: Deal created AND close date unknown → task for rep to set it within 48 hours']});
   }
 
@@ -3094,12 +3094,12 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── REPORTING QUALITY ───────────────────────────────────────
   if(zeroDeal.length>openDeals.length*0.3&&openDeals.length>3){
-    reportingScore-=16;
+    reportingScore-=22;
     issues.push({severity:'critical',title:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of pipeline has no value — revenue reports are fundamentally wrong`,description:`When nearly a third of your pipeline shows as $0, every revenue metric breaks: total pipeline value, average deal size, win rate by value, forecast accuracy, and board projections. Leadership is making strategic decisions based on data that doesn\'t reflect reality.`,detail:`This is the single most common HubSpot reporting failure. The fix takes one afternoon. The cost of not fixing it is measured in wrong business decisions made every week.`,impact:`Revenue reporting fundamentally broken · every board projection understated`,dimension:'Reporting',guide:['Make Amount required on deal creation: Settings → Properties → Amount → Required','Pull all $0 deals → each rep estimates value → reimport same day to restore forecast integrity','FixOps Reporting Rebuild creates the revenue dashboards your leadership needs with accurate underlying data']});
   }
 
   if(tickets.length===0&&users.length>2){
-    reportingScore-=6;
+    reportingScore-=12;
     issues.push({severity:'info',title:`No support tickets in HubSpot — customer health is a blind spot`,description:`If your team handles support but tickets aren\'t in HubSpot, you can\'t see which customers have open issues, there\'s no link between support history and deal records, and churn prediction is impossible because you have no signal.`,impact:`Customer health invisible · churn signals absent · no support-to-revenue correlation`,dimension:'Reporting',guide:['HubSpot has native integrations for Zendesk, Intercom, and Freshdesk to sync ticket data','Even a basic ticket pipeline (New → In Progress → Resolved) dramatically improves customer health visibility','Connect tickets to company records for full account health view — critical for renewal conversations']});
   }
 
@@ -4120,15 +4120,49 @@ async function runFullAudit(token, auditId, meta) {
   // Only include dimensions in the score if we have actual data to audit
   // If no data available (missing optional scope), score that dimension as null
   // and exclude from the overall average — avoids false 100s
+  // ── SCORE ASSEMBLY ─────────────────────────────────────────────────────────
+  // null = no data for this dimension → excluded from overall average
+  // Conditions: must have meaningful data to score that dimension
+  // No Math.max(20) floor — let bad scores reflect reality
+  const hasActivityData = calls.length > 0 || meetings.length > 0 || tasks.length > 0;
+  const hasMarketingData = forms.length > 0 || lists.length > 0 || marketingEmails.length > 0 || sequences.length > 0;
+  const hasServiceData = tickets.length > 0 || feedback.length > 0;
+
   const scoreMap = {
-    dataIntegrity:    contacts.length > 0 ? Math.max(20,Math.min(100,Math.round(dataScore))) : null,
-    automationHealth: workflows.length > 0 || sequences.length > 0 ? Math.max(20,Math.min(100,Math.round(autoScore))) : null,
-    pipelineIntegrity:deals.length > 0 ? Math.max(20,Math.min(100,Math.round(pipelineScore))) : null,
-    marketingHealth:  (forms.length > 0 || lists.length > 0 || marketingEmails.length > 0) ? Math.max(20,Math.min(100,Math.round(marketingScore))) : null,
-    configSecurity:   Math.max(20,Math.min(100,Math.round(configScore))),
-    reportingQuality: deals.length > 0 ? Math.max(20,Math.min(100,Math.round(reportingScore))) : null,
-    teamAdoption:     users.length > 0 ? Math.max(20,Math.min(100,Math.round(teamScore))) : null,
-    serviceHealth:    tickets.length > 0 ? Math.max(20,Math.min(100,Math.round(serviceScore))) : null,
+    dataIntegrity:    contacts.length > 50 
+      ? Math.max(0, Math.min(100, Math.round(dataScore))) 
+      : contacts.length > 0 
+        ? Math.max(0, Math.min(100, Math.round(dataScore + 10))) // small portals get slight benefit of doubt
+        : null,
+
+    automationHealth: (workflows.length > 0 || sequences.length > 0) 
+      ? Math.max(0, Math.min(100, Math.round(autoScore))) 
+      : null,  // No workflows/sequences → no automation score
+
+    pipelineIntegrity: deals.length > 0 
+      ? Math.max(0, Math.min(100, Math.round(pipelineScore))) 
+      : null,  // No deals → no pipeline score
+
+    marketingHealth:  hasMarketingData 
+      ? Math.max(0, Math.min(100, Math.round(marketingScore))) 
+      : null,  // No marketing activity → no score
+
+    configSecurity:   Math.max(0, Math.min(100, Math.round(configScore))),
+    // Config always scored — every portal has users + settings
+
+    reportingQuality: deals.length > 10 
+      ? Math.max(0, Math.min(100, Math.round(reportingScore))) 
+      : null,  // Need meaningful deal volume for reporting to matter
+
+    teamAdoption:     (users.length > 1 && hasActivityData)
+      ? Math.max(0, Math.min(100, Math.round(teamScore)))
+      : users.length > 1
+        ? 50  // Has users but zero activity → neutral 50 (neither good nor bad — data gap)
+        : null,
+
+    serviceHealth:    hasServiceData 
+      ? Math.max(0, Math.min(100, Math.round(serviceScore))) 
+      : null,  // No tickets or NPS → no service score
   };
   // Filter to only scored dimensions, build scores object
   const scores = Object.fromEntries(
@@ -4331,6 +4365,13 @@ async function runFullAudit(token, auditId, meta) {
 
         // ── Settings users ────────────────────────────────────────────────
         superAdmins: settingsUsers.filter(u => u.superAdmin === true || u.roleIds?.includes('superAdmin')).length,
+
+        // ── Rep scorecard (last 7 days) ─────────────────────────────────────
+        repScorecard: Object.values(repScorecard).sort((a,b)=>(b.calls+b.meetings)-(a.calls+a.meetings)),
+        ghostSeats: inactiveUsers.length,
+        ghostSeatWaste: inactiveUsers.length * 90,
+        inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
+        darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
       },
       isLimited: !isPaid,
       limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
