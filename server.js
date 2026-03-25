@@ -1725,6 +1725,43 @@ app.post('/fix-request', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Lead Capture — paid plan interest before Calendly ─────────────────────────
+app.post('/lead/capture', async (req, res) => {
+  try {
+    const { email, company, plan, source } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    // Upsert into customers so we have their email even before they pay
+    await db.query(`
+      INSERT INTO customers (email, company, plan, plan_status, updated_at)
+      VALUES ($1, $2, 'lead', 'pending', NOW())
+      ON CONFLICT (email) DO UPDATE
+      SET company = COALESCE(NULLIF($2,''), customers.company), updated_at = NOW()
+    `, [email.toLowerCase().trim(), company || '']).catch(()=>{});
+
+    // Notify Matthew
+    await resend.emails.send({
+      from: 'FixOps Leads <reports@fixops.io>',
+      to: FIXOPS_NOTIFY_EMAIL,
+      subject: `🗓 Calendly Lead — ${company || email} — ${plan || 'unknown plan'}`,
+      html: `
+        <h2 style="margin-bottom:4px;">New Paid Plan Lead</h2>
+        <p style="color:#888;font-size:13px;margin-bottom:20px;">They entered their details and clicked "Book Your Setup Call"</p>
+        <table style="border-collapse:collapse;width:100%;max-width:480px;">
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;width:120px;">Email</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;"><a href="mailto:${email}">${email}</a></td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Company</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${company || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Plan interest</td><td style="padding:8px 12px;">${plan || '—'}</td></tr>
+        </table>
+        <p style="margin-top:16px;font-size:13px;color:#666;">Check Calendly for their booking. If they haven't booked yet, follow up within the hour.</p>`
+    }).catch(e => console.warn('Lead capture email:', e.message));
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Lead capture error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Agency Inquiry ────────────────────────────────────────────────────────────
 app.post('/agency-inquiry', async (req, res) => {
   try {
