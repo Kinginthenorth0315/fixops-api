@@ -91,6 +91,8 @@ async function initDb() {
   for (const col of newCols) {
     await db.query(`ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS ${col}`).catch(()=>{});
   }
+  await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS slack_webhook TEXT`).catch(()=>{});
+  await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS refresh_token TEXT`).catch(()=>{});
   // Agency multi-portal support
   await db.query(`
     CREATE TABLE IF NOT EXISTS portals (
@@ -454,6 +456,58 @@ const sendClientEmail = async (email, result, auditId) => {
   });
 };
 
+
+// ── Slack alert helper ────────────────────────────────────────────────────────
+const sendSlackAlert = async (webhookUrl, payload) => {
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch(e) {
+    console.warn('Slack alert failed:', e.message);
+  }
+};
+
+const buildSlackPulsePayload = (result, auditId, company, deltaScore) => {
+  const s = result.summary || {};
+  const score = s.overallScore || 0;
+  const criticals = s.criticalCount || 0;
+  const waste = Number(s.monthlyWaste || 0);
+  const grade = score >= 85 ? 'Excellent ✅' : score >= 72 ? 'Good 🟡' : score >= 55 ? 'Needs Attention 🟠' : 'Critical 🔴';
+  const delta = deltaScore != null ? (deltaScore >= 0 ? `+${deltaScore}` : `${deltaScore}`) : null;
+  return {
+    text: `*FixOps Weekly Scan — ${company}*`,
+    blocks: [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: `🛡 FixOps Weekly — ${company}` }
+      },
+      {
+        type: 'section',
+        fields: [
+          { type: 'mrkdwn', text: `*Score*\n${score}/100${delta ? ` (${delta} vs last week)` : ''} — ${grade}` },
+          { type: 'mrkdwn', text: `*Critical Issues*\n${criticals} found` },
+          { type: 'mrkdwn', text: `*Est. Monthly Waste*\n$${waste.toLocaleString()}/mo` },
+          { type: 'mrkdwn', text: `*Records Scanned*\n${Number(s.recordsScanned||0).toLocaleString()}` }
+        ]
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'View Full Results →' },
+            url: `${FRONTEND_URL}/results.html?id=${auditId}`,
+            style: 'primary'
+          }
+        ]
+      }
+    ]
+  };
+};
 
 const notifyMatthew = async (result, auditId, plan) => {
   const s = result.summary || {};
@@ -1051,6 +1105,14 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
     subject,
     html
   });
+
+  // Slack alert — fire if customer has webhook URL saved
+  if (customer && customer.slack_webhook) {
+    const prev2 = history && history.length > 1 ? history[1] : null;
+    const deltaScore = prev2 ? (s.overallScore - prev2.score) : null;
+    const slackPayload = buildSlackPulsePayload(result, auditId, pi.company || customer.company || 'Your Portal', deltaScore);
+    await sendSlackAlert(customer.slack_webhook, slackPayload);
+  }
 };
 
 // ── Pulse Report Page — token-gated, no password needed ──────────────────────
@@ -1635,6 +1697,534 @@ app.post('/agency-inquiry', async (req, res) => {
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────
+
+// ── Slack webhook settings ────────────────────────────────────────────────────
+app.post('/settings/slack', async (req, res) => {
+  try {
+    const { email, webhookUrl } = req.body;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    const cust = custRes.rows[0];
+    if (!cust) return res.status(404).json({ error: 'customer not found' });
+    if (!['pulse','pro','command'].includes(cust.plan)) return res.status(403).json({ error: 'Slack alerts require Pulse plan or higher' });
+
+    // Validate webhook URL format
+    if (webhookUrl && !webhookUrl.startsWith('https://hooks.slack.com/')) {
+      return res.status(400).json({ error: 'Invalid Slack webhook URL. Must start with https://hooks.slack.com/' });
+    }
+
+    await db.query('UPDATE customers SET slack_webhook = $1, updated_at = NOW() WHERE id = $2', [webhookUrl || null, cust.id]);
+
+    // Send a test message if URL provided
+    if (webhookUrl) {
+      await sendSlackAlert(webhookUrl, {
+        text: '✅ FixOps Slack alerts connected! You\'ll receive your weekly scan summary and critical issue alerts here.',
+        blocks: [{
+          type: 'section',
+          text: { type: 'mrkdwn', text: '✅ *FixOps alerts connected*\nYou\'ll receive weekly scan summaries and critical workflow alerts in this channel. Next alert: Monday morning.' }
+        }]
+      });
+    }
+
+    res.json({ success: true, message: webhookUrl ? 'Slack webhook saved and test message sent' : 'Slack webhook removed' });
+  } catch(e) {
+    console.error('Slack settings error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/settings/slack', async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'email required' });
+    const custRes = await db.query('SELECT slack_webhook FROM customers WHERE email = $1', [email]);
+    const cust = custRes.rows[0];
+    if (!cust) return res.status(404).json({ error: 'customer not found' });
+    // Return masked URL for display
+    const wh = cust.slack_webhook;
+    res.json({ hasWebhook: !!wh, maskedUrl: wh ? wh.substring(0,40) + '...' : null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Deal Risk Scoring ─────────────────────────────────────────────────────────
+// Returns per-deal risk scores based on inactivity, missing fields, stage age
+app.get('/audit/deal-risk', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'audit id required' });
+    const result = await loadResult(id);
+    if (!result || result.status !== 'complete') return res.status(404).json({ error: 'audit not found' });
+
+    const plan = result.plan || 'free';
+    if (!['pulse','pro','command','deep','deep-audit','pro-audit'].includes(plan)) {
+      return res.status(403).json({ error: 'Deal risk scoring requires Pulse plan or higher' });
+    }
+
+    const deals = result.portalInfo?.portalStats?.dealList || [];
+    const now = Date.now();
+    const DAY = 86400000;
+
+    const scored = deals.map(deal => {
+      let risk = 0;
+      const flags = [];
+
+      const lastActivity = deal.properties?.notes_last_updated || deal.properties?.hs_lastmodifieddate;
+      const daysSinceActivity = lastActivity ? Math.floor((now - new Date(lastActivity).getTime()) / DAY) : 999;
+
+      const closeDate = deal.properties?.closedate;
+      const daysToClose = closeDate ? Math.floor((new Date(closeDate).getTime() - now) / DAY) : null;
+      const amount = parseFloat(deal.properties?.amount || 0);
+      const stage = deal.properties?.dealstage || '';
+      const owner = deal.properties?.hubspot_owner_id;
+      const probability = parseFloat(deal.properties?.hs_deal_stage_probability || 0);
+
+      // Inactivity scoring
+      if (daysSinceActivity > 30) { risk += 35; flags.push(`No activity in ${daysSinceActivity} days`); }
+      else if (daysSinceActivity > 14) { risk += 20; flags.push(`${daysSinceActivity} days since last activity`); }
+      else if (daysSinceActivity > 7) { risk += 10; flags.push(`${daysSinceActivity} days since last activity`); }
+
+      // Overdue close date
+      if (daysToClose !== null && daysToClose < 0) { risk += 25; flags.push(`Close date ${Math.abs(daysToClose)} days overdue`); }
+      else if (daysToClose !== null && daysToClose < 7) { risk += 15; flags.push(`Close date in ${daysToClose} days`); }
+
+      // Missing critical fields
+      if (!owner) { risk += 15; flags.push('No owner assigned'); }
+      if (!closeDate) { risk += 10; flags.push('No close date set'); }
+      if (!amount || amount === 0) { risk += 10; flags.push('No deal value set'); }
+
+      // Zero probability open deal (phantom pipeline)
+      if (probability === 0 && amount > 0) { risk += 20; flags.push('0% probability — phantom pipeline'); }
+
+      // High-value deal gets elevated risk weight
+      const valueMultiplier = amount > 50000 ? 1.3 : amount > 10000 ? 1.1 : 1.0;
+      risk = Math.min(100, Math.round(risk * valueMultiplier));
+
+      return {
+        id: deal.id,
+        name: deal.properties?.dealname || 'Unnamed Deal',
+        amount,
+        stage,
+        owner,
+        daysSinceActivity,
+        daysToClose,
+        probability,
+        riskScore: risk,
+        riskLevel: risk >= 70 ? 'critical' : risk >= 40 ? 'warning' : 'healthy',
+        flags
+      };
+    });
+
+    const sorted = scored.sort((a,b) => b.riskScore - a.riskScore);
+    const critical = sorted.filter(d => d.riskLevel === 'critical');
+    const atRisk = sorted.filter(d => d.riskLevel === 'warning');
+    const totalAtRiskValue = [...critical,...atRisk].reduce((s,d) => s + d.amount, 0);
+
+    res.json({
+      deals: sorted,
+      summary: {
+        total: sorted.length,
+        critical: critical.length,
+        atRisk: atRisk.length,
+        healthy: sorted.filter(d => d.riskLevel === 'healthy').length,
+        totalAtRiskValue
+      }
+    });
+  } catch(e) {
+    console.error('Deal risk error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Workflow Conflict Detector ────────────────────────────────────────────────
+// Finds workflows enrolling same contacts — duplicate triggers, overlapping sequences
+app.get('/audit/workflow-conflicts', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'audit id required' });
+    const result = await loadResult(id);
+    if (!result || result.status !== 'complete') return res.status(404).json({ error: 'audit not found' });
+
+    const plan = result.plan || 'free';
+    if (!['pro','command','pro-audit'].includes(plan)) {
+      return res.status(403).json({ error: 'Workflow conflict detection requires Pro plan or higher' });
+    }
+
+    const workflows = result.portalInfo?.portalStats?.workflowList || [];
+    const activeWfs = workflows.filter(w => w.enabled || w.isEnabled);
+
+    const conflicts = [];
+
+    // Group by trigger type + trigger value
+    const triggerMap = {};
+    for (const wf of activeWfs) {
+      const triggers = [];
+      // Form submission triggers
+      const formTriggers = (wf.triggers||[]).filter(t => t.type === 'FORM_SUBMISSION' || t.filterGroups?.some(fg => fg.filters?.some(f => f.property === 'hs_form_submissions')));
+      for (const t of formTriggers) {
+        const key = `form:${t.formId || t.value || 'any'}`;
+        if (!triggerMap[key]) triggerMap[key] = [];
+        triggerMap[key].push({ id: wf.id, name: wf.name, enrollmentCount: wf.enrollmentCount || 0 });
+      }
+      // Lifecycle stage triggers
+      const lcTriggers = (wf.triggers||[]).filter(t => t.property === 'lifecyclestage' || t.type === 'CONTACT_PROPERTY' && t.property === 'lifecyclestage');
+      for (const t of lcTriggers) {
+        const key = `lifecycle:${t.value || 'any'}`;
+        if (!triggerMap[key]) triggerMap[key] = [];
+        triggerMap[key].push({ id: wf.id, name: wf.name, enrollmentCount: wf.enrollmentCount || 0 });
+      }
+    }
+
+    // Flag any trigger key shared by 2+ workflows
+    for (const [key, wfList] of Object.entries(triggerMap)) {
+      if (wfList.length >= 2) {
+        const [triggerType, triggerValue] = key.split(':');
+        conflicts.push({
+          type: triggerType === 'form' ? 'Duplicate Form Trigger' : 'Duplicate Lifecycle Trigger',
+          description: triggerType === 'form'
+            ? `${wfList.length} workflows enroll contacts from the same form — contacts may receive duplicate emails or conflicting sequences`
+            : `${wfList.length} workflows trigger on the same lifecycle stage change`,
+          severity: wfList.length >= 3 ? 'critical' : 'warning',
+          triggerValue,
+          workflows: wfList,
+          impact: `Up to ${wfList.reduce((s,w) => s + w.enrollmentCount, 0).toLocaleString()} contacts potentially double-enrolled`
+        });
+      }
+    }
+
+    // Dead + active name overlap (renamed workflows creating confusion)
+    const nameMap = {};
+    for (const wf of workflows) {
+      const baseName = (wf.name||'').toLowerCase().replace(/\s*(v\d+|copy|old|legacy|new|2|ii)\s*$/i,'').trim();
+      if (!nameMap[baseName]) nameMap[baseName] = [];
+      nameMap[baseName].push({ id: wf.id, name: wf.name, active: !!(wf.enabled||wf.isEnabled) });
+    }
+    for (const [base, wfList] of Object.entries(nameMap)) {
+      const activeVersions = wfList.filter(w => w.active);
+      if (activeVersions.length >= 2) {
+        conflicts.push({
+          type: 'Parallel Active Versions',
+          description: `"${wfList[0].name}" has ${activeVersions.length} active versions running simultaneously — contacts may be enrolled in both`,
+          severity: 'warning',
+          workflows: wfList,
+          impact: 'Duplicate nurture emails, conflicting delays, or redundant tasks'
+        });
+      }
+    }
+
+    res.json({
+      conflicts,
+      summary: {
+        total: conflicts.length,
+        critical: conflicts.filter(c => c.severity === 'critical').length,
+        warning: conflicts.filter(c => c.severity === 'warning').length,
+        workflowsAnalyzed: activeWfs.length
+      }
+    });
+  } catch(e) {
+    console.error('Workflow conflicts error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Contact Enrichment Gap Report ─────────────────────────────────────────────
+// Shows exactly which fields are missing, impact on sequences/segments, and enrichment priority
+app.get('/audit/enrichment-gaps', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'audit id required' });
+    const result = await loadResult(id);
+    if (!result || result.status !== 'complete') return res.status(404).json({ error: 'audit not found' });
+
+    const ps = result.portalInfo?.portalStats || {};
+    const total = ps.contacts || 0;
+    if (total === 0) return res.json({ gaps: [], total: 0 });
+
+    const fields = [
+      { key: 'email',         label: 'Email Address',    impact: 'Cannot be enrolled in any sequence, workflow, or marketing email', priority: 1 },
+      { key: 'phone',         label: 'Phone Number',     impact: 'Cannot be called or texted — blocks call-based sequences', priority: 2 },
+      { key: 'company',       label: 'Company Name',     impact: 'Cannot be segmented by company, matched to deals, or scored by firmographic', priority: 3 },
+      { key: 'lifecyclestage',label: 'Lifecycle Stage',  impact: 'Cannot be targeted by lifecycle-based workflows or scored correctly', priority: 2 },
+      { key: 'hubspot_owner_id', label: 'Contact Owner', impact: 'No rep assigned — falls through every round-robin and rotation workflow', priority: 2 },
+      { key: 'jobtitle',      label: 'Job Title',        impact: 'Cannot segment by persona, seniority, or role-based campaigns', priority: 4 },
+      { key: 'city',          label: 'City / Location',  impact: 'Cannot run geo-targeted campaigns or route to territory reps', priority: 5 },
+      { key: 'industry',      label: 'Industry',         impact: 'Cannot segment by vertical or run industry-specific nurture', priority: 4 },
+    ];
+
+    const contactCompleteness = ps.contactCompleteness || {};
+    const gaps = fields.map(f => {
+      const filled = contactCompleteness[f.key] || 0;
+      const missing = total - filled;
+      const pct = total > 0 ? Math.round((missing / total) * 100) : 0;
+      return {
+        ...f,
+        filled,
+        missing,
+        pct,
+        severity: pct > 50 ? 'critical' : pct > 25 ? 'warning' : pct > 10 ? 'info' : 'healthy',
+        estimatedFixCost: Math.round(missing * 0.08), // $0.08/contact enrichment estimate (Apollo/Clearbit)
+      };
+    }).filter(f => f.pct > 5).sort((a,b) => a.priority - b.priority || b.pct - a.pct);
+
+    const totalMissing = gaps.reduce((s,g) => s + g.missing, 0);
+    const enrichmentCost = gaps.slice(0,3).reduce((s,g) => s + g.estimatedFixCost, 0);
+
+    res.json({
+      gaps,
+      total,
+      summary: {
+        fieldsWithGaps: gaps.length,
+        worstField: gaps[0] || null,
+        estimatedEnrichmentCost: enrichmentCost,
+        totalMissingFieldInstances: totalMissing
+      }
+    });
+  } catch(e) {
+    console.error('Enrichment gaps error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Billing Tier Warning ──────────────────────────────────────────────────────
+// Proactive alert before contacts hit next HubSpot billing tier
+app.get('/audit/billing-risk', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: 'audit id required' });
+    const result = await loadResult(id);
+    if (!result || result.status !== 'complete') return res.status(404).json({ error: 'audit not found' });
+
+    const ps = result.portalInfo?.portalStats || {};
+    const contacts = ps.contacts || 0;
+
+    // HubSpot Marketing Hub contact tiers (approximate)
+    const tiers = [
+      { limit: 1000,   label: 'Starter 1K',   monthlyDelta: 0 },
+      { limit: 2000,   label: 'Starter 2K',   monthlyDelta: 50 },
+      { limit: 5000,   label: 'Starter 5K',   monthlyDelta: 100 },
+      { limit: 10000,  label: 'Pro 10K',       monthlyDelta: 400 },
+      { limit: 25000,  label: 'Pro 25K',       monthlyDelta: 300 },
+      { limit: 50000,  label: 'Pro 50K',       monthlyDelta: 300 },
+      { limit: 100000, label: 'Pro 100K',      monthlyDelta: 600 },
+      { limit: 200000, label: 'Enterprise 200K', monthlyDelta: 1200 },
+    ];
+
+    const currentTier = tiers.find(t => contacts <= t.limit) || tiers[tiers.length - 1];
+    const nextTier = tiers[tiers.indexOf(currentTier) + 1];
+    const pctOfTier = currentTier ? Math.round((contacts / currentTier.limit) * 100) : 100;
+    const contactsUntilNext = nextTier ? nextTier.limit - contacts : null;
+
+    // Estimate monthly contact growth from audit history (if available)
+    const avgMonthlyGrowth = ps.recentContactGrowth || Math.round(contacts * 0.03); // assume 3%/mo if no data
+    const daysToNextTier = contactsUntilNext && avgMonthlyGrowth > 0
+      ? Math.round((contactsUntilNext / (avgMonthlyGrowth / 30)))
+      : null;
+
+    // Cleanable contacts (duplicates + no email + uncontacted 1yr+)
+    const cleanable = (ps.duplicateContactCount || 0) + (ps.noEmailContactCount || 0);
+    const cleanableSavings = nextTier && cleanable >= contactsUntilNext ? nextTier.monthlyDelta : 0;
+
+    res.json({
+      contacts,
+      currentTier,
+      nextTier,
+      pctOfTier,
+      contactsUntilNext,
+      daysToNextTier,
+      avgMonthlyGrowth,
+      cleanable,
+      cleanableSavings,
+      atRisk: pctOfTier >= 85,
+      severity: pctOfTier >= 95 ? 'critical' : pctOfTier >= 85 ? 'warning' : 'healthy'
+    });
+  } catch(e) {
+    console.error('Billing risk error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── White-label share URL (Agency) ────────────────────────────────────────────
+// Generates a client-safe shareable results URL — no FixOps branding in header
+app.get('/share/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(token, 'base64url').toString());
+    } catch(e) {
+      return res.status(400).send('Invalid share link');
+    }
+    const { auditId, agencyName, agencyLogo, primaryColor } = payload;
+    if (!auditId) return res.status(400).send('Invalid share link');
+
+    const result = await loadResult(auditId);
+    if (!result || result.status !== 'complete') return res.status(404).send('Results not found or expired');
+
+    // Redirect to results page with white-label params
+    const params = new URLSearchParams({ id: auditId });
+    if (agencyName) params.set('brand', agencyName);
+    if (agencyLogo) params.set('logo', agencyLogo);
+    if (primaryColor) params.set('color', primaryColor);
+    res.redirect(`${FRONTEND_URL}/results.html?${params.toString()}`);
+  } catch(e) {
+    console.error('Share URL error:', e.message);
+    res.status(500).send('Error loading shared results');
+  }
+});
+
+app.post('/share/generate', async (req, res) => {
+  try {
+    const { email, auditId, agencyName, agencyLogo, primaryColor } = req.body;
+    if (!email || !auditId) return res.status(400).json({ error: 'email and auditId required' });
+    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    const cust = custRes.rows[0];
+    if (!cust) return res.status(404).json({ error: 'customer not found' });
+    if (!['pro','command'].includes(cust.plan)) return res.status(403).json({ error: 'White-label sharing requires Pro or Agency plan' });
+
+    const payload = Buffer.from(JSON.stringify({ auditId, agencyName, agencyLogo, primaryColor, ts: Date.now() })).toString('base64url');
+    const shareUrl = `${process.env.API_URL || 'https://fixops-api-production.up.railway.app'}/share/${payload}`;
+    res.json({ success: true, shareUrl });
+  } catch(e) {
+    console.error('Share generate error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Daily Sentinel Scan ───────────────────────────────────────────────────────
+// Lightweight daily check — workflow errors, ghost seats, billing tier risk
+// Not a full 210-point audit — just the 5 critical health signals that change daily
+const runSentinelCheck = async (customer) => {
+  try {
+    const freshToken = await getValidToken(customer);
+    const hs = require('axios').create({
+      baseURL: 'https://api.hubapi.com',
+      headers: { Authorization: `Bearer ${freshToken}` },
+      timeout: 15000
+    });
+    const safe = async (fn, fb) => { try { return await fn(); } catch(e) { return fb; } };
+
+    const [wfRes, usersRes, contactsRes] = await Promise.all([
+      safe(() => hs.get('/automation/v3/workflows?limit=100'), { data: { workflows: [] } }),
+      safe(() => hs.get('/settings/v3/users/?limit=100'), { data: { results: [] } }),
+      safe(() => hs.get('/crm/v3/objects/contacts?limit=1&properties=email'), { data: { total: 0 } }),
+    ]);
+
+    const workflows = wfRes.data?.workflows || [];
+    const users = usersRes.data?.results || [];
+    const contactCount = contactsRes.data?.total || 0;
+
+    // Check 1: Workflow errors
+    const erroredWfs = workflows.filter(w => (w.enabled || w.isEnabled) && (w.status === 'ERROR' || w.errorCount > 0));
+
+    // Check 2: New ghost seats since last check (users inactive 90+ days)
+    const ninetyDaysAgo = Date.now() - (90 * 86400000);
+    const ghostSeats = users.filter(u => {
+      const last = u.lastLoginDate || u.properties?.last_login;
+      return last && new Date(last).getTime() < ninetyDaysAgo;
+    });
+
+    // Check 3: Billing tier proximity
+    const tiers = [1000,2000,5000,10000,25000,50000,100000,200000];
+    const nextTier = tiers.find(t => contactCount <= t);
+    const pctOfTier = nextTier ? Math.round((contactCount / nextTier) * 100) : 100;
+
+    const alerts = [];
+    if (erroredWfs.length > 0) {
+      alerts.push({
+        type: 'workflow_error',
+        severity: 'critical',
+        message: `${erroredWfs.length} workflow${erroredWfs.length!==1?'s':''} in error state`,
+        detail: erroredWfs.slice(0,5).map(w => w.name).join(', '),
+        action: 'Fix immediately — enrolled contacts are dropping'
+      });
+    }
+    if (pctOfTier >= 90) {
+      alerts.push({
+        type: 'billing_tier',
+        severity: pctOfTier >= 97 ? 'critical' : 'warning',
+        message: `Portal at ${pctOfTier}% of HubSpot contact tier`,
+        detail: `${(nextTier - contactCount).toLocaleString()} contacts until next billing tier`,
+        action: 'Clean duplicates and uncontacted contacts before overage charge'
+      });
+    }
+
+    if (alerts.length === 0) return; // nothing to alert on
+
+    // Send Slack alert if configured
+    if (customer.slack_webhook) {
+      const slackBlocks = [{
+        type: 'header',
+        text: { type: 'plain_text', text: `🛡 FixOps Sentinel — ${customer.company || 'Your Portal'}` }
+      }, {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*${alerts.length} issue${alerts.length!==1?'s':''} detected in daily check*` }
+      },
+      ...alerts.map(a => ({
+        type: 'section',
+        text: { type: 'mrkdwn', text: `${a.severity === 'critical' ? '🔴' : '🟡'} *${a.message}*\n${a.detail}\n_${a.action}_` }
+      })), {
+        type: 'actions',
+        elements: [{ type: 'button', text: { type: 'plain_text', text: 'View Dashboard →' }, url: `${FRONTEND_URL}/results.html?id=${customer.last_audit_id}`, style: 'primary' }]
+      }];
+      await sendSlackAlert(customer.slack_webhook, { text: `FixOps Sentinel: ${alerts.length} issue(s) in ${customer.company}`, blocks: slackBlocks });
+    }
+
+    // Email alert for critical-only (don't spam daily)
+    const criticalAlerts = alerts.filter(a => a.severity === 'critical');
+    if (criticalAlerts.length > 0 && customer.last_audit_id) {
+      const alertRows = criticalAlerts.map(a =>
+        `<tr><td style="padding:10px 12px;border-bottom:1px solid #fee2e2;"><strong style="color:#dc2626;">${a.message}</strong><br><span style="font-size:12px;color:#666;">${a.detail}</span><br><span style="font-size:11px;color:#888;font-style:italic;">${a.action}</span></td></tr>`
+      ).join('');
+      await resend.emails.send({
+        from: 'FixOps Sentinel <reports@fixops.io>',
+        to: customer.email,
+        subject: `🛡 FixOps Sentinel: ${criticalAlerts.length} critical issue${criticalAlerts.length!==1?'s':''} — ${customer.company || 'your portal'}`,
+        html: `<!DOCTYPE html><html><body style="margin:0;padding:0;font-family:system-ui,sans-serif;background:#f9fafb;">
+          <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
+            <div style="background:#08061a;border-radius:14px 14px 0 0;padding:20px 28px;text-align:center;">
+              <div style="font-size:20px;font-weight:800;color:#fff;">🛡 FixOps <span style="color:#a78bfa;">Sentinel</span></div>
+              <div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;font-family:monospace;letter-spacing:2px;">DAILY HEALTH CHECK</div>
+            </div>
+            <div style="background:#fff;border:1px solid #eee;border-top:none;padding:24px 28px;">
+              <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:16px;">${criticalAlerts.length} critical issue${criticalAlerts.length!==1?'s':''} found in <strong>${customer.company || 'your portal'}</strong></div>
+              <table style="width:100%;border-collapse:collapse;background:#fff5f5;border:1px solid #fee2e2;border-radius:8px;overflow:hidden;margin-bottom:20px;">
+                ${alertRows}
+              </table>
+              <div style="text-align:center;">
+                <a href="${FRONTEND_URL}/results.html?id=${customer.last_audit_id}" style="display:inline-block;padding:12px 26px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">View Dashboard →</a>
+              </div>
+            </div>
+            <div style="text-align:center;font-size:11px;color:#999;padding:14px;">FixOps Sentinel · Daily monitoring · fixops.io</div>
+          </div>
+        </body></html>`
+      }).catch(e => console.warn('Sentinel email err:', e.message));
+    }
+
+    console.log(`[Sentinel] ${customer.email} — ${alerts.length} alerts fired`);
+  } catch(e) {
+    console.error(`[Sentinel] Error for ${customer.email}:`, e.message);
+  }
+};
+
+// Daily Sentinel cron — runs every day at 10am ET (non-Monday, since Monday = full scan)
+cron.schedule('0 15 * * 2-7', async () => {
+  console.log('🛡 Daily Sentinel scan starting...');
+  try {
+    const custRes = await db.query(`
+      SELECT * FROM customers
+      WHERE plan IN ('pulse','pro','command')
+        AND plan_status = 'active'
+        AND portal_token IS NOT NULL
+    `);
+    console.log(`[Sentinel] Checking ${custRes.rows.length} portals`);
+    for (const customer of custRes.rows) {
+      await runSentinelCheck(customer);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    console.log('✅ Daily Sentinel complete');
+  } catch(e) {
+    console.error('[Sentinel] Cron error:', e.message);
+  }
+}, { timezone: 'America/New_York' });
 
 // ── Agency Multi-Portal Management ───────────────────────────────────────────
 
