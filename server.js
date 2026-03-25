@@ -2579,6 +2579,157 @@ ${critSection}${warnSection}${infoSection}
 });
 
 
+// ── Audit Certificate — shareable score card ──────────────────────────────
+app.get('/audit/certificate', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).send('<p>Missing audit ID</p>');
+    const data = await getResult(id);
+    if (!data) return res.status(404).send('<p>Audit not found</p>');
+
+    const company  = data.portalInfo?.company || 'Your Portal';
+    const ovr      = data.summary?.overallScore || 0;
+    const grade    = ovr>=85?'Excellent':ovr>=72?'Good':ovr>=55?'Needs Attention':'Critical';
+    const date     = new Date(data.portalInfo?.auditDate || Date.now())
+                       .toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+    const criticals = data.summary?.criticalCount || 0;
+    const warnings  = data.summary?.warningCount  || 0;
+    const waste     = data.summary?.monthlyWaste  || 0;
+    const checks    = data.summary?.checksRun     || 210;
+
+    const gradeColor = ovr>=80 ? '#059669' : ovr>=60 ? '#d97706' : '#dc2626';
+    const gradeBg    = ovr>=80 ? '#f0fdf4' : ovr>=60 ? '#fffbeb' : '#fef2f2';
+    const gradeBorder= ovr>=80 ? '#6ee7b7' : ovr>=60 ? '#fcd34d' : '#fca5a5';
+
+    // Score arc SVG — circular progress
+    const radius = 54, circumference = 2 * Math.PI * radius;
+    const progress = circumference - (ovr / 100) * circumference;
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta property="og:title" content="${company} — HubSpot Health Score: ${ovr}/100">
+<meta property="og:description" content="${grade} · ${criticals} critical issues · ${checks}-point audit by FixOps.io">
+<meta property="og:image" content="https://fixops.io/og-cert.png">
+<title>${company} — FixOps Health Certificate</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+  body{font-family:'DM Sans',sans-serif;background:#f8f9fc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px;}
+  .cert{background:#fff;border-radius:24px;box-shadow:0 4px 40px rgba(0,0,0,.08),0 1px 8px rgba(0,0,0,.04);max-width:540px;width:100%;overflow:hidden;}
+  .cert-header{background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);padding:32px;text-align:center;position:relative;overflow:hidden;}
+  .cert-header::before{content:'';position:absolute;top:-60px;right:-60px;width:250px;height:250px;background:radial-gradient(circle,rgba(124,58,237,.3),transparent 70%);}
+  .logo{font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#fff;margin-bottom:6px;opacity:.85;}
+  .logo span{color:#a78bfa;}
+  .cert-subtitle{font-size:10px;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.4);margin-bottom:24px;font-family:monospace;}
+  .company-name{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px;line-height:1.2;}
+  .cert-date{font-size:11px;color:rgba(255,255,255,.45);margin-top:6px;}
+
+  .cert-score{padding:32px 32px 24px;text-align:center;border-bottom:1px solid #f0f0f5;}
+  .score-ring-wrap{position:relative;display:inline-block;margin-bottom:16px;}
+  .score-text{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;}
+  .score-num{font-family:'Syne',sans-serif;font-size:36px;font-weight:800;line-height:1;color:${gradeColor};}
+  .score-denom{font-size:11px;color:#9ca3af;margin-top:2px;}
+  .grade-badge{display:inline-block;padding:5px 16px;border-radius:20px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;letter-spacing:.5px;background:${gradeBg};color:${gradeColor};border:1px solid ${gradeBorder};margin-bottom:8px;}
+  .cert-checks{font-size:11px;color:#9ca3af;font-family:monospace;letter-spacing:.5px;}
+
+  .cert-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-bottom:1px solid #f0f0f5;}
+  .stat-box{padding:16px 12px;text-align:center;border-right:1px solid #f0f0f5;}
+  .stat-box:last-child{border-right:none;}
+  .stat-val{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;margin-bottom:3px;}
+  .stat-lbl{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#9ca3af;}
+
+  .cert-footer{padding:20px 32px;display:flex;align-items:center;justify-content:space-between;gap:16px;}
+  .cert-seal{font-size:10px;color:#9ca3af;line-height:1.5;}
+  .cert-seal strong{color:#6d28d9;display:block;margin-bottom:2px;}
+  .cert-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+  .btn{padding:8px 16px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;text-decoration:none;font-family:'DM Sans',sans-serif;border:none;transition:all .15s;}
+  .btn-share{background:#7c3aed;color:#fff;}
+  .btn-share:hover{background:#6d28d9;}
+  .btn-view{background:#f3f4f6;color:#374151;}
+  .btn-view:hover{background:#e5e7eb;}
+  @media print{.cert-actions{display:none;}}
+  @media(max-width:480px){.cert-stats{grid-template-columns:1fr 1fr;}.stat-box:nth-child(2){border-right:none;}}
+</style>
+</head>
+<body>
+<div class="cert">
+  <div class="cert-header">
+    <div class="logo">⚡ Fix<span>Ops</span>.io</div>
+    <div class="cert-subtitle">HubSpot Health Certificate</div>
+    <div class="company-name">${company}</div>
+    <div class="cert-date">Audited ${date}</div>
+  </div>
+
+  <div class="cert-score">
+    <div class="score-ring-wrap">
+      <svg width="130" height="130" viewBox="0 0 130 130">
+        <circle cx="65" cy="65" r="${radius}" fill="none" stroke="#f3f4f6" stroke-width="8"/>
+        <circle cx="65" cy="65" r="${radius}" fill="none" stroke="${gradeColor}" stroke-width="8"
+          stroke-dasharray="${circumference.toFixed(1)}" stroke-dashoffset="${progress.toFixed(1)}"
+          stroke-linecap="round" transform="rotate(-90 65 65)"
+          style="transition:stroke-dashoffset 1.2s ease"/>
+      </svg>
+      <div class="score-text">
+        <div class="score-num">${ovr}</div>
+        <div class="score-denom">/100</div>
+      </div>
+    </div>
+    <div><span class="grade-badge">${grade}</span></div>
+    <div class="cert-checks">${checks}-Point Audit · FixOps.io</div>
+  </div>
+
+  <div class="cert-stats">
+    <div class="stat-box">
+      <div class="stat-val" style="color:#dc2626">${criticals}</div>
+      <div class="stat-lbl">Critical</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" style="color:#d97706">${warnings}</div>
+      <div class="stat-lbl">Warnings</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" style="color:#7c3aed">$${Math.round(waste).toLocaleString()}</div>
+      <div class="stat-lbl">Est. Monthly Waste</div>
+    </div>
+  </div>
+
+  <div class="cert-footer">
+    <div class="cert-seal">
+      <strong>Verified by FixOps.io</strong>
+      Automated 210-point portal health audit.<br>
+      Results reflect data at time of audit.
+    </div>
+    <div class="cert-actions">
+      <button class="btn btn-share" onclick="shareLinkedIn()">Share on LinkedIn</button>
+      <a class="btn btn-view" href="/results.html?id=${id}">View Full Report</a>
+    </div>
+  </div>
+</div>
+
+<script>
+function shareLinkedIn() {
+  var text = '${company} just scored ${ovr}/100 on a ${checks}-point HubSpot health audit by FixOps.io. Grade: ${grade}. ' +
+    '${criticals} critical issues found and a clear fix plan to resolve them. ' +
+    'Get your free HubSpot audit at fixops.io';
+  var url = 'https://www.linkedin.com/shareArticle?mini=true&url=' +
+    encodeURIComponent('https://fixops.io') + '&summary=' + encodeURIComponent(text);
+  window.open(url, '_blank', 'width=600,height=500');
+}
+</script>
+</body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(html);
+  } catch(e) {
+    res.status(500).send('<p>Error: ' + e.message + '</p>');
+  }
+});
+
 // ── Snapshot endpoint — returns audit + history for reporting.html ─────────────
 // Used by reporting.html when a token is present (Pulse/Pro subscribers)
 app.get('/snapshot/:id', async (req, res) => {
@@ -3060,6 +3211,28 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/settings/v3/currencies'),
     {data:{currencies:[]}}
   );
+
+  // ── Knowledge Base articles (cms.knowledge_base.articles.read) ───────────
+  const kbArticlesR = await safe(
+    () => hs.get('/cms/v3/site-search/index-data?limit=200&type=KNOWLEDGE_BASE_ARTICLE'),
+    {data:{objects:[]}}
+  );
+  const kbArticlesAlt = await safe(
+    () => hs.get('/knowledge-base/v1/articles?limit=200&status=ALL'),
+    {data:{articles:[]}}
+  );
+
+  // ── Meeting booking links (scheduler.meetings.meeting-link.read) ─────────
+  const meetingLinksR = await safe(
+    () => hs.get('/scheduler/v3/meetings/meeting-links?limit=100'),
+    {data:{results:[]}}
+  );
+
+  // ── Teams structure (settings.users.teams.read) ───────────────────────────
+  const teamsR = await safe(
+    () => hs.get('/settings/v3/users/teams?limit=100'),
+    {data:{results:[]}}
+  );
   const settingsUsersR = await safe(
     () => hs.get('/settings/v3/users?limit=100'),
     {data:{results:[]}}
@@ -3116,6 +3289,9 @@ async function runFullAudit(token, auditId, meta) {
   const goals         = goalsR.data?.results||[];
   const feedback      = feedbackR.data?.results||[];
   const conversations = conversationsR.data?.results||[];
+  const kbArticles    = (kbArticlesR.data?.objects||kbArticlesAlt.data?.articles||[]);
+  const meetingLinks  = meetingLinksR.data?.results||[];
+  const teams         = teamsR.data?.results||[];
   const currencies      = currencyR.data?.currencies||[];
   const settingsUsers   = settingsUsersR.data?.results||[];
   const dealPipelines   = dealPipelinesR.data?.results||[];
@@ -3193,6 +3369,71 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:'info',title:`${neverContacted.length} contacts have never been contacted by anyone`,description:`These contacts entered your portal and have never received an email, call, or any engagement. They\'re aging in your database with zero pipeline value, and you\'re paying for them in your contact tier every month.`,detail:`Uncontacted contacts degrade your overall email deliverability by reducing your engagement rate. HubSpot\'s send reputation is calculated across your entire database — dead weight hurts active campaigns.`,impact:`${neverContacted.length} contacts generating billing cost with zero pipeline contribution`,dimension:'Data Integrity',guide:['Review the source of these contacts — old list imports, trade shows, or discontinued campaigns?','Run a one-time re-engagement campaign before writing them off completely','Contacts with no engagement after 6 months should be evaluated for archival to protect deliverability','Set a quarterly data hygiene calendar reminder to review cold contacts before they become a billing problem']});
   }
 
+  // ── CONTACT PROPERTY COMPLETENESS ──────────────────────────
+  if (contacts.length > 50) {
+    // Score each contact on 5 key fields: email, phone, company, lifecyclestage, owner
+    const KEY_PROPS = ['email','phone','company','lifecyclestage','hubspot_owner_id'];
+    let totalScore = 0;
+    const missingByField = { email:0, phone:0, company:0, lifecyclestage:0, hubspot_owner_id:0 };
+
+    contacts.forEach(c => {
+      let score = 0;
+      KEY_PROPS.forEach(prop => {
+        if (c.properties?.[prop]) score++;
+        else missingByField[prop]++;
+      });
+      totalScore += score;
+    });
+
+    const maxScore = contacts.length * KEY_PROPS.length;
+    const completenessScore = Math.round(totalScore / maxScore * 100);
+    const incompletePct = 100 - completenessScore;
+
+    // Find the biggest gap
+    const worstField = Object.entries(missingByField).sort((a,b)=>b[1]-a[1])[0];
+    const worstFieldName = {
+      email:'email address', phone:'phone number', company:'company name',
+      lifecyclestage:'lifecycle stage', hubspot_owner_id:'assigned owner'
+    }[worstField[0]] || worstField[0];
+    const worstFieldPct = Math.round(worstField[1] / contacts.length * 100);
+
+    if (completenessScore < 60) {
+      dataScore -= Math.min(18, Math.round((60 - completenessScore) / 3));
+      issues.push({
+        severity: completenessScore < 40 ? 'critical' : 'warning',
+        title: `Contact database is ${incompletePct}% incomplete — ${completenessScore}/100 property completeness score`,
+        description: `Across your ${contacts.length.toLocaleString()} contacts, only ${completenessScore}% have all 5 key fields filled in (email, phone, company, lifecycle stage, owner). The biggest gap: ${worstField[1].toLocaleString()} contacts (${worstFieldPct}%) are missing ${worstFieldName}. Incomplete contacts can't be segmented, scored, or targeted effectively.`,
+        impact: `${incompletePct}% property gap · segmentation accuracy reduced · ${worstField[1].toLocaleString()} contacts missing ${worstFieldName}`,
+        guide: [
+          `Start with the biggest gap: import ${worstField[1].toLocaleString()} missing ${worstFieldName} values via CSV update`,
+          `Build a "Property Completion" workflow: trigger on any contact missing lifecycle stage → enroll in lead scoring`,
+          `Add required fields to your HubSpot forms — capture phone and company at the source`,
+          `Use HubSpot's Data Quality tool (Operations Hub) to bulk-fill lifecycle stages by contact source`,
+          `FixOps can build a full contact enrichment workflow using your existing data patterns`,
+        ],
+        dimension: 'Data Integrity',
+      });
+    } else if (completenessScore < 75) {
+      dataScore -= Math.min(8, Math.round((75 - completenessScore) / 4));
+      issues.push({
+        severity: 'info',
+        title: `Contact database ${completenessScore}% complete — ${worstField[1].toLocaleString()} contacts missing ${worstFieldName}`,
+        description: `Your contact records are mostly complete but ${worstField[1].toLocaleString()} contacts (${worstFieldPct}%) are missing ${worstFieldName}. Filling this gap would improve segmentation, reporting, and personalization significantly.`,
+        impact: `${worstFieldPct}% missing ${worstFieldName} · affects segmentation and routing`,
+        guide: [
+          `Export contacts missing ${worstFieldName} → enrich via LinkedIn, ZoomInfo, or Apollo`,
+          `Add ${worstFieldName} as a required field on all forms going forward`,
+          `Create a list: "Contacts missing ${worstFieldName}" and assign to SDR for manual research`,
+        ],
+        dimension: 'Data Integrity',
+      });
+    }
+
+    // Store completeness data for dashboard display
+    if (!global._auditExtra) global._auditExtra = {};
+    global._auditExtra.contactCompleteness = { score: completenessScore, missingByField, total: contacts.length };
+  }
+
   await up(45, `Checking ${workflows.length} workflows…`);
 
   // ── AUTOMATION HEALTH ───────────────────────────────────────
@@ -3244,6 +3485,83 @@ async function runFullAudit(token, auditId, meta) {
   if(overdueTasks.length>5){
     pipelineScore-=Math.min(10,overdueTasks.length);
     issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact:`${overdueTasks.length} missed rep commitments · pipeline going cold without manager visibility`,dimension:'Pipeline',guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
+  }
+
+  // ── DEAL STAGE FUNNEL ANALYSIS ─────────────────────────────
+  if (deals.length > 0 && dealPipelines.length > 0) {
+    const stageMap = {};
+    dealPipelines.forEach(pipeline => {
+      (pipeline.stages || []).forEach((stage, idx) => {
+        stageMap[stage.id] = {
+          label: stage.label || stage.id,
+          probability: Number(stage.metadata?.probability || stage.probability || 0),
+          order: stage.displayOrder != null ? stage.displayOrder : idx,
+        };
+      });
+    });
+
+    const stageCounts = {}, stageDaysList = {};
+    deals.forEach(d => {
+      const sid = d.properties?.dealstage;
+      if (!sid) return;
+      if (!stageCounts[sid]) { stageCounts[sid] = 0; stageDaysList[sid] = []; }
+      stageCounts[sid]++;
+      const mod = new Date(d.properties?.hs_lastmodifieddate || d.properties?.createdate || 0).getTime();
+      stageDaysList[sid].push(Math.floor((now - mod) / DAY));
+    });
+
+    // Find bottleneck: stage with >40% deals stuck 15+ days
+    const bottlenecks = [];
+    Object.entries(stageCounts).forEach(([sid, count]) => {
+      const stage = stageMap[sid]; if (!stage) return;
+      const days = stageDaysList[sid] || [];
+      const avgDays = days.length ? Math.round(days.reduce((a,b)=>a+b,0)/days.length) : 0;
+      const stuckPct = Math.round(days.filter(d=>d>14).length / days.length * 100);
+      if (stuckPct > 40 && count >= 3 && stage.probability > 0 && stage.probability < 1) {
+        bottlenecks.push({ stage: stage.label, count, avgDays, stuckPct });
+      }
+    });
+
+    if (bottlenecks.length > 0) {
+      const worst = bottlenecks.sort((a,b)=>b.stuckPct-a.stuckPct)[0];
+      pipelineScore -= Math.min(20, bottlenecks.length * 7);
+      issues.push({
+        severity: bottlenecks.length >= 2 ? 'critical' : 'warning',
+        title: `Pipeline bottleneck: ${worst.stuckPct}% of "${worst.stage}" deals stuck 14+ days`,
+        description: `${worst.count} deals averaging ${worst.avgDays} days in "${worst.stage}" — well above healthy velocity benchmarks. ${bottlenecks.length > 1 ? `${bottlenecks.length} stages show similar stagnation.` : ''} Deals stalled in mid-stages have a 3× higher loss rate than deals with weekly activity.`,
+        impact: `${worst.stuckPct}% stage stagnation · avg ${worst.avgDays} days stuck · forecast accuracy degraded`,
+        guide: [
+          `Filter Deals by stage "${worst.stage}" → sort by Last Activity Date (oldest first) — these are your at-risk deals`,
+          `For every deal over 14 days: log a call, send an email, or create a follow-up task immediately`,
+          `Build a HubSpot workflow: "If deal in this stage > 10 days → notify owner + create priority task"`,
+          `Audit the stage exit criteria — if they're unclear, deals pool here by default`,
+          `FixOps can build an automated stage SLA system with escalation alerts and manager visibility`,
+        ],
+        dimension: 'Pipeline',
+      });
+    }
+
+    // Phantom pipeline: deals in 0% stages still marked open
+    const phantomDeals = deals.filter(d => {
+      const st = stageMap[d.properties?.dealstage];
+      return st && st.probability === 0 && !d.properties?.hs_is_closed;
+    });
+    if (phantomDeals.length > 3) {
+      pipelineScore -= Math.min(10, phantomDeals.length);
+      issues.push({
+        severity: 'warning',
+        title: `${phantomDeals.length} open deals in 0% probability stages — phantom pipeline`,
+        description: `These deals sit in stages flagged as 0% close probability but remain "open." They inflate your reported pipeline value by $${Math.round(phantomDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)).toLocaleString()} while contributing nothing to forecast accuracy. Every sales leader who sees your pipeline is being misled.`,
+        impact: `$${Math.round(phantomDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)).toLocaleString()} phantom pipeline · forecast accuracy unreliable`,
+        guide: [
+          'Go to Deals → Group by Stage → find your 0% probability stages',
+          'Review each deal: close as Lost (with a reason code) or move to an active stage',
+          'Add a workflow: "If deal in 0% stage for 30 days → auto-set to Closed Lost"',
+          'This single cleanup often improves forecast accuracy by 20-40%',
+        ],
+        dimension: 'Pipeline',
+      });
+    }
   }
 
   await up(73, 'Reviewing forms and marketing…');
@@ -3329,10 +3647,21 @@ async function runFullAudit(token, auditId, meta) {
   const repScorecard = {};
   const WEEK = 7 * DAY;
 
-  // Map owner IDs to names
+  // Map owner IDs to names + team
   const ownerMap = {};
+  const ownerTeamMap = {};
+
+  // Build team membership map
+  teams.forEach(team => {
+    const teamName = team.name || ('Team ' + team.id);
+    (team.userIds || []).forEach(uid => { ownerTeamMap[uid] = teamName; });
+    (team.memberUserIds || []).forEach(uid => { ownerTeamMap[uid] = teamName; });
+  });
+
   owners.forEach(o => {
-    ownerMap[o.id || o.ownerId] = [o.firstName||o.properties?.firstname||'', o.lastName||o.properties?.lastname||''].filter(Boolean).join(' ') || o.email || ('Owner ' + o.id);
+    const id = o.id || o.ownerId;
+    const name = [o.firstName||o.properties?.firstname||'', o.lastName||o.properties?.lastname||''].filter(Boolean).join(' ') || o.email || ('Owner ' + id);
+    ownerMap[id] = name;
   });
 
   // Count calls per rep (last 7 days)
@@ -3340,7 +3669,7 @@ async function runFullAudit(token, auditId, meta) {
     const ownerId = c.properties?.hubspot_owner_id;
     const created = new Date(c.properties?.hs_createdate||0).getTime();
     if(!ownerId) return;
-    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), team: ownerTeamMap[ownerId]||'', calls:0, meetings:0, tasks:0, staleDealCount:0 };
     if((now - created) / DAY < 7) repScorecard[ownerId].calls++;
   });
 
@@ -3349,7 +3678,7 @@ async function runFullAudit(token, auditId, meta) {
     const ownerId = m.properties?.hubspot_owner_id;
     const ts = new Date(m.properties?.hs_timestamp||0).getTime();
     if(!ownerId) return;
-    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), team: ownerTeamMap[ownerId]||'', calls:0, meetings:0, tasks:0, staleDealCount:0 };
     if((now - ts) / DAY < 7) repScorecard[ownerId].meetings++;
   });
 
@@ -3358,7 +3687,7 @@ async function runFullAudit(token, auditId, meta) {
     const ownerId = d.properties?.hubspot_owner_id;
     const lastMod = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
     if(!ownerId) return;
-    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), calls:0, meetings:0, tasks:0, staleDealCount:0 };
+    if(!repScorecard[ownerId]) repScorecard[ownerId] = { name: ownerMap[ownerId]||('Rep '+ownerId), team: ownerTeamMap[ownerId]||'', calls:0, meetings:0, tasks:0, staleDealCount:0 };
     if((now - lastMod) / DAY > 14) repScorecard[ownerId].staleDealCount++;
   });
 
@@ -4335,6 +4664,234 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+// ── KNOWLEDGE BASE AUDIT ────────────────────────────────────
+  if (kbArticles.length > 0) {
+    const unpublishedKB = kbArticles.filter(a =>
+      a.currentState === 'DRAFT' || a.state === 'DRAFT' ||
+      a.published === false || a.status === 'DRAFT'
+    );
+    const zeroViewKB = kbArticles.filter(a => {
+      const views = a.views || a.viewCount || a.pageViews || 0;
+      return views === 0;
+    });
+    const totalKB = kbArticles.length;
+
+    if (unpublishedKB.length > 5) {
+      serviceScore -= Math.min(12, unpublishedKB.length);
+      issues.push({
+        severity: unpublishedKB.length > 15 ? 'critical' : 'warning',
+        title: `${unpublishedKB.length} knowledge base articles unpublished — support deflection blocked`,
+        description: `You have ${totalKB} KB articles total but ${unpublishedKB.length} remain in draft. Each unpublished article is a customer question that cannot be self-served — forcing a support ticket instead. HubSpot data shows portals with complete KBs deflect 30-40% of tier-1 tickets.`,
+        impact: `${unpublishedKB.length} unpublished articles · ${Math.round(unpublishedKB.length * 3)} estimated unnecessary tickets/mo`,
+        guide: [
+          'Go to Content → Knowledge Base → filter by Status: Draft',
+          'Prioritize articles matching your most common support ticket categories',
+          'Set a weekly publishing goal: aim to publish 5 articles per week until caught up',
+          'Create a workflow: new ticket created → check if matching KB article exists → send to customer',
+          'FixOps can audit your ticket subjects against KB coverage to find the highest-impact articles to publish first',
+        ],
+        dimension: 'Service',
+      });
+    }
+
+    if (zeroViewKB.length > 3 && totalKB > 10) {
+      const zeroViewPct = Math.round(zeroViewKB.length / totalKB * 100);
+      issues.push({
+        severity: 'info',
+        title: `${zeroViewKB.length} knowledge base articles have zero views — content effort wasted`,
+        description: `${zeroViewPct}% of your KB articles have never been viewed. These articles represent content creation time with zero support deflection value. Either they're not discoverable, cover topics customers do not search for, or are not linked from support workflows.`,
+        impact: `${zeroViewKB.length} zero-view articles · content ROI at risk`,
+        guide: [
+          'Add KB article links to your automated ticket acknowledgment emails',
+          'Review zero-view article titles — are they written in the language customers actually use?',
+          'Set up HubSpot Knowledge Base search analytics to see what customers search for but cannot find',
+          'Archive articles with zero views after 90 days — reduce noise, improve search relevance',
+        ],
+        dimension: 'Service',
+      });
+    }
+  }
+
+  // ── MEETING BOOKING HEALTH ───────────────────────────────────
+  if (meetingLinks.length > 0 || users.length > 0) {
+    const ownerIds = owners.map(o => o.id || o.ownerId).filter(Boolean);
+    const ownersWithBookingLinks = new Set(meetingLinks.map(m => m.ownerId || m.userId).filter(Boolean));
+    const ownersWithoutLinks = ownerIds.filter(id => !ownersWithBookingLinks.has(id));
+    const noLinkPct = ownerIds.length > 0 ? Math.round(ownersWithoutLinks.length / ownerIds.length * 100) : 0;
+
+    if (ownersWithoutLinks.length > 2 && noLinkPct > 30) {
+      teamScore -= Math.min(15, ownersWithoutLinks.length * 2);
+      const noLinkNames = ownersWithoutLinks.slice(0,5).map(id => ownerMap[id] || ('Rep ' + id)).filter(n => !n.startsWith('Rep '));
+      issues.push({
+        severity: noLinkPct > 60 ? 'critical' : 'warning',
+        title: `${ownersWithoutLinks.length} of ${ownerIds.length} reps have no meeting booking link — forcing manual scheduling`,
+        description: `${noLinkPct}% of your sales team has no HubSpot meeting booking link. Every meeting they book requires back-and-forth emails instead of a single click. Studies show booking links reduce time-to-meeting by 60% and increase meeting volume by 25%.${noLinkNames.length > 0 ? ` Missing: ${noLinkNames.join(', ')}.` : ''}`,
+        impact: `${ownersWithoutLinks.length} reps manually scheduling · estimated 2-3hrs/rep/week wasted`,
+        guide: [
+          'Go to Sales → Meetings → Create meeting link for each rep without one',
+          'Embed the booking link in email signatures, outreach sequences, and LinkedIn profiles',
+          'Create a team-level round-robin link for inbound leads',
+          'Add a workflow: "If contact requests a meeting → send rep booking link automatically"',
+          'FixOps can set up automated meeting link insertion in all your outreach sequences',
+        ],
+        dimension: 'Sales',
+      });
+    }
+  }
+
+  // ── TEAM PERFORMANCE BENCHMARKS ──────────────────────────────
+  if (teams.length > 1 && Object.keys(repScorecard).length > 0) {
+    // Group reps by team and compare
+    const teamStats = {};
+    Object.values(repScorecard).forEach(rep => {
+      const teamName = rep.team || 'Unassigned';
+      if (!teamStats[teamName]) teamStats[teamName] = { calls:0, meetings:0, reps:0 };
+      teamStats[teamName].calls += rep.calls || 0;
+      teamStats[teamName].meetings += rep.meetings || 0;
+      teamStats[teamName].reps++;
+    });
+
+    // Find underperforming teams
+    const teamAverages = Object.entries(teamStats).map(([name, stat]) => ({
+      name,
+      avgCalls: stat.reps > 0 ? Math.round(stat.calls / stat.reps * 10) / 10 : 0,
+      avgMeetings: stat.reps > 0 ? Math.round(stat.meetings / stat.reps * 10) / 10 : 0,
+      reps: stat.reps,
+    }));
+
+    const overallAvgCalls = teamAverages.reduce((s,t) => s + t.avgCalls, 0) / teamAverages.length;
+    const underperformingTeams = teamAverages.filter(t => t.avgCalls < overallAvgCalls * 0.5 && t.reps >= 2);
+
+    if (underperformingTeams.length > 0) {
+      const worst = underperformingTeams[0];
+      issues.push({
+        severity: 'warning',
+        title: `Team "${worst.name}" averaging ${worst.avgCalls} calls/rep vs company average of ${Math.round(overallAvgCalls * 10)/10}`,
+        description: `Your ${worst.reps} reps in "${worst.name}" are logging significantly fewer activities than the rest of the team. This gap is 50%+ below company average — indicating either a coaching need, a different territory type, or a CRM logging problem.`,
+        impact: `${worst.name} at ${Math.round((1 - worst.avgCalls/overallAvgCalls)*100)}% below avg · revenue risk from undercoached team`,
+        guide: [
+          `Schedule a coaching session specifically for "${worst.name}" focused on call logging hygiene`,
+          'Check if they use a different phone system that does not auto-log to HubSpot',
+          'Compare their deal close rates vs high-activity teams — is low activity correlated with lower revenue?',
+          'Set up a team activity leaderboard visible to all reps — visibility drives behavior',
+        ],
+        dimension: 'Sales',
+      });
+    }
+  }
+
+// ── PROPERTY HYGIENE DEEP SCAN ─────────────────────────────
+  if (contactProps.length > 10) {
+    // Properties with low fill rates (cluttering views/reports)
+    const customProps = contactProps.filter(p => p.createdUserId);  // human or integration created
+    const integrationProps = customProps.filter(p =>
+      p.createdUserId && (p.hubspotDefined === false) &&
+      (p.name?.toLowerCase().includes('_id') || p.name?.toLowerCase().includes('sync') ||
+       p.name?.toLowerCase().includes('integration') || (p.description || '').toLowerCase().includes('integration'))
+    );
+
+    // Low-fill props: check against our contacts sample
+    const propFillRates = {};
+    customProps.forEach(prop => {
+      let filled = 0;
+      contacts.forEach(c => { if (c.properties?.[prop.name]) filled++; });
+      const fillRate = contacts.length > 0 ? Math.round(filled / contacts.length * 100) : 100;
+      propFillRates[prop.name] = fillRate;
+    });
+
+    const lowFillProps = customProps.filter(p => (propFillRates[p.name] || 0) < 5 && (propFillRates[p.name] !== undefined));
+    const undocumentedCount = customProps.filter(p => !p.description || p.description.trim().length < 5).length;
+
+    if (lowFillProps.length > 10) {
+      dataScore -= Math.min(10, Math.round(lowFillProps.length / 5));
+      issues.push({
+        severity: lowFillProps.length > 25 ? 'warning' : 'info',
+        title: `${lowFillProps.length} custom contact properties have <5% fill rate — CRM bloat`,
+        description: `These ${lowFillProps.length} properties exist in your contact schema but are virtually empty across your ${contacts.length.toLocaleString()} contacts. They clutter your views, slow your forms, confuse your team, and make HubSpot reporting harder. Properties like these accumulate from integrations, old campaigns, and ad-hoc field creation.`,
+        impact: `${lowFillProps.length} bloat properties · views cluttered · reporting accuracy reduced`,
+        guide: [
+          'Go to Settings → Properties → Contacts → sort by "# of contacts with data" ascending',
+          'Archive any property with <5% fill that has no active workflow, form, or report dependency',
+          'Before archiving: export the data, then delete the property — HubSpot archives it safely',
+          'Set a rule: no new property created without a description and an owner who maintains it',
+          'FixOps can generate a full property audit report showing fill rates, dependencies, and archive recommendations',
+        ],
+        dimension: 'Data Integrity',
+      });
+    }
+
+    if (undocumentedCount > 15) {
+      issues.push({
+        severity: 'info',
+        title: `${undocumentedCount} custom properties have no description — onboarding and documentation gap`,
+        description: `${undocumentedCount} of your custom contact properties have no description. When a new team member sees "hs_custom_field_47" in a view, they have no idea what it means or when to use it. This is a hidden knowledge management problem that compounds over time.`,
+        impact: `${undocumentedCount} undocumented properties · onboarding friction · data entry errors`,
+        guide: [
+          'Settings → Properties → filter Custom Properties → sort by "Description" blank',
+          'Add a one-line description to each: what it means, who fills it in, when it gets populated',
+          'Consider a naming convention: [source]_[description] e.g., salesforce_account_tier',
+        ],
+        dimension: 'Data Integrity',
+      });
+    }
+  }
+
+  // ── CAMPAIGN ATTRIBUTION AUDIT ──────────────────────────────
+  if (campaigns.length > 5) {
+    const campaignsWithNoRevenue = campaigns.filter(c => {
+      const influenced = c.counters?.influenced || c.influenced || 0;
+      const rev = c.counters?.revenue || c.revenue || 0;
+      return influenced === 0 && rev === 0;
+    });
+    const zeroDealCampaigns = Math.round(campaignsWithNoRevenue.length);
+    const pctNoAttribution = Math.round(zeroDealCampaigns / campaigns.length * 100);
+
+    if (pctNoAttribution > 60 && zeroDealCampaigns > 5) {
+      issues.push({
+        severity: 'warning',
+        title: `${zeroDealCampaigns} of ${campaigns.length} campaigns have zero deal attribution — marketing ROI invisible`,
+        description: `${pctNoAttribution}% of your campaigns show no influenced contacts or revenue. This means either your UTM tracking is broken, your campaign-to-contact associations aren't being set, or most campaigns genuinely aren't driving pipeline. Without attribution, your marketing team cannot defend their budget or optimize spend.`,
+        impact: `${pctNoAttribution}% campaigns unattributed · marketing ROI unmeasurable`,
+        guide: [
+          'Audit your UTM parameter setup — every campaign link should have utm_campaign set',
+          'In HubSpot: Marketing → Campaigns → check "Original Source" field mapping',
+          'Set up campaign association in workflows: "If contact fills form from Campaign X → associate with campaign"',
+          'Use HubSpot Revenue Attribution reports to see first/last touch across campaigns',
+        ],
+        dimension: 'Marketing',
+      });
+    }
+  }
+
+  // ── CONVERSATION RESPONSE TIME AUDIT ─────────────────────────
+  if (conversations.length > 0) {
+    const openConvs = conversations.filter(c => String(c.status||'').toUpperCase() === 'OPEN');
+    const unrespondedConvs = openConvs.filter(c => {
+      const created = new Date(c.createdAt || c.hs_createdate || 0).getTime();
+      const lastMsg = new Date(c.latestMessageTimestamp || c.updatedAt || created).getTime();
+      const ageHrs = (now - created) / 3600000;
+      const responseGap = (now - lastMsg) / 3600000;
+      return ageHrs > 24 && responseGap > 24; // Open > 24hrs with no response in 24hrs
+    });
+
+    if (unrespondedConvs.length > 3) {
+      serviceScore -= Math.min(12, unrespondedConvs.length * 2);
+      issues.push({
+        severity: unrespondedConvs.length > 10 ? 'critical' : 'warning',
+        title: `${unrespondedConvs.length} conversations open 24+ hours with no response`,
+        description: `${unrespondedConvs.length} customer conversations in your HubSpot inbox have been waiting more than 24 hours without a reply. Industry benchmark: 73% of customers expect a response within 24 hours. Each unresponded conversation is a customer whose trust is actively eroding.`,
+        impact: `${unrespondedConvs.length} customers waiting · churn risk elevated · trust damaged`,
+        guide: [
+          'Go to Conversations → Inbox → filter by "Open" → sort by "Oldest" first',
+          'Assign a daily inbox review rotation — no conversation should go 24hrs without acknowledgment',
+          'Set up a SLA workflow: "If conversation open > 8hrs → notify manager"',
+          'Create a "24hr response" automation that sends an acknowledgment to any new conversation instantly',
+        ],
+        dimension: 'Service',
+      });
+    }
+  }
+
 // ── SCORES ──────────────────────────────────────────────────
   // Only include dimensions in the score if we have actual data to audit
   // If no data available (missing optional scope), score that dimension as null
@@ -4661,6 +5218,17 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         customContactProps: contactProps.filter(p => p.createdUserId).length,
         // Audit shortcut counts — used by Revenue Leak Calculator
         deadWorkflowCount: deadWf ? deadWf.length : 0,
+
+        // New feature data
+        kbArticleCount: kbArticles.length,
+        kbUnpublishedCount: kbArticles.filter(a => a.currentState==='DRAFT'||a.state==='DRAFT'||a.published===false).length,
+        meetingLinkCount: meetingLinks.length,
+        teamCount: teams.length,
+        teamNames: teams.map(t => t.name).filter(Boolean).slice(0,5),
+        repsWithoutMeetingLinks: (() => {
+          const ownersWithLinks = new Set(meetingLinks.map(m => m.ownerId||m.userId).filter(Boolean));
+          return owners.filter(o => !ownersWithLinks.has(o.id||o.ownerId)).length;
+        })(),
         duplicateContactCount: dupes || 0,
         noEmailContactCount: noEmail ? noEmail.length : 0,
 
@@ -4696,7 +5264,7 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       grade: overallScore>=85?'Excellent':overallScore>=72?'Good':overallScore>=55?'Needs Attention':'Critical',
       criticalCount, warningCount, infoCount, monthlyWaste,
       totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
-      checksRun: 185, recordsScanned: totalRecordsScanned
+      checksRun: 210, recordsScanned: totalRecordsScanned
     },
     scores, issues
   };
