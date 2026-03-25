@@ -93,6 +93,19 @@ async function initDb() {
   }
   await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS slack_webhook TEXT`).catch(()=>{});
   await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS refresh_token TEXT`).catch(()=>{});
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS audit_tokens (
+      id          SERIAL PRIMARY KEY,
+      token       VARCHAR(64) UNIQUE NOT NULL,
+      email       VARCHAR(255) NOT NULL,
+      plan        VARCHAR(50) NOT NULL,
+      company     VARCHAR(255),
+      used        BOOLEAN DEFAULT false,
+      expires_at  TIMESTAMP NOT NULL,
+      created_at  TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
+  await db.query(`DELETE FROM audit_tokens WHERE expires_at < NOW()`).catch(()=>{});
   // Agency multi-portal support
   await db.query(`
     CREATE TABLE IF NOT EXISTS portals (
@@ -2441,6 +2454,7 @@ app.post('/webhook', async (req, res) => {
     const session = event.data.object;
     const email = session.customer_details?.email || session.metadata?.email;
     const planKey = STRIPE_PRICE_MAP[session.metadata?.price_id] || 'paid';
+    const company = session.metadata?.company || '';
 
     console.log(`Payment complete: ${email} — ${planKey}`);
 
@@ -2452,6 +2466,38 @@ app.post('/webhook', async (req, res) => {
         ON CONFLICT (email) DO UPDATE
         SET plan = $2, plan_status = 'active', stripe_customer = $3, updated_at = NOW()
       `, [email, planKey, session.customer]).catch(e => console.error('Customer upsert:', e.message));
+
+      // For one-time audits: generate a signed audit token so plan can't be URL-spoofed
+      if (['deep','deep-audit','pro-audit'].includes(planKey)) {
+        const auditToken = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+        await db.query(
+          `INSERT INTO audit_tokens (token, email, plan, company, expires_at) VALUES ($1,$2,$3,$4,$5)`,
+          [auditToken, email, planKey, company, expiresAt]
+        ).catch(e => console.error('Audit token insert:', e.message));
+
+        // Email the audit link to the customer
+        const auditStartUrl = `${FRONTEND_URL}/confirm.html?auditToken=${auditToken}`;
+        await resend.emails.send({
+          from: 'FixOps <reports@fixops.io>',
+          to: email,
+          subject: `✅ Payment confirmed — start your ${planKey === 'pro-audit' ? 'Pro' : 'Deep'} Audit`,
+          html: `<h2>Your audit is ready</h2>
+            <p>Thanks for your purchase! Click the button below to connect your HubSpot portal and start your ${planKey === 'pro-audit' ? 'Pro Audit ($699)' : 'Deep Audit ($399)'}.</p>
+            <p style="text-align:center;margin:24px 0;">
+              <a href="${auditStartUrl}" style="display:inline-block;padding:14px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">Start Your Audit →</a>
+            </p>
+            <p style="font-size:12px;color:#666;">This link expires in 7 days. If you need help, reply to this email.</p>`
+        }).catch(e => console.error('Audit start email:', e.message));
+
+        // Notify Matthew
+        await resend.emails.send({
+          from: 'FixOps Billing <reports@fixops.io>',
+          to: FIXOPS_NOTIFY_EMAIL,
+          subject: `💳 Paid audit purchased — ${email} — ${planKey}`,
+          html: `<p><strong>${email}</strong> purchased <strong>${planKey}</strong>.<br>Audit start email sent. Token expires in 7 days.</p>`
+        }).catch(() => {});
+      }
     }
   }
 
@@ -2485,14 +2531,42 @@ app.post('/webhook', async (req, res) => {
   res.json({ received: true });
 });
 
+// ── Redeem audit token (paid one-time audits) ─────────────────────────────────
+// Called from confirm.html when ?auditToken= is in URL
+app.get('/audit/redeem-token', async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'token required' });
+    const result = await db.query(
+      `SELECT * FROM audit_tokens WHERE token = $1 AND used = false AND expires_at > NOW()`,
+      [token]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Token invalid, already used, or expired. Contact support@fixops.io' });
+    const row = result.rows[0];
+    res.json({ valid: true, email: row.email, plan: row.plan, company: row.company });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Auth URL — GET (free) and POST (paid) ─────────────────────────────────────
 const buildAuthUrl = (req, res, params) => {
   try {
-    const { email = '', company = '', plan = 'free', paid = false } = params;
+    const { email = '', company = '', plan = 'free', paid = false, auditToken = '' } = params;
+
+    // ── Security: paid plans must have a valid DB token ───────────────────────
+    // Prevents URL manipulation: e.g. ?plan=deep without payment
+    const PAID_PLANS = ['deep','deep-audit','pro-audit'];
+    if (PAID_PLANS.includes(plan) && !auditToken) {
+      console.warn(`[Security] Blocked unauthenticated paid plan request: plan=${plan} email=${email}`);
+      return res.status(403).json({ error: 'A valid payment token is required to start a paid audit. Please use the link from your confirmation email.' });
+    }
+
+    // Monthly plans (pulse/pro/command) are validated via Stripe subscription in DB —
+    // checked at OAuth callback time, not here. Free always allowed.
+
     const codeVerifier  = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
-    pendingAudits.set(state, { email, company, plan, paid: !!paid, codeVerifier, createdAt: Date.now() });
+    pendingAudits.set(state, { email, company, plan, paid: !!paid, auditToken, codeVerifier, createdAt: Date.now() });
     // Standard Public App OAuth — counts as marketplace install
     // Scopes must match exactly what's configured in app-hsmeta.json
     const REQUIRED_SCOPES = [
@@ -2555,6 +2629,24 @@ app.get('/auth/callback', async (req, res) => {
   const pending = pendingAudits.get(state);
   if (!pending) return res.redirect(`${FRONTEND_URL}/?error=session_expired`);
   pendingAudits.delete(state);
+
+  // Validate + consume audit token for paid one-time plans
+  if (['deep','deep-audit','pro-audit'].includes(pending.plan)) {
+    if (!pending.auditToken) {
+      console.warn(`[Security] OAuth callback for paid plan with no token: ${pending.email}`);
+      return res.redirect(`${FRONTEND_URL}/?error=payment_required`);
+    }
+    const tokenCheck = await db.query(
+      `SELECT id FROM audit_tokens WHERE token=$1 AND email=$2 AND used=false AND expires_at > NOW()`,
+      [pending.auditToken, pending.email]
+    ).catch(() => ({ rows: [] }));
+    if (!tokenCheck.rows[0]) {
+      console.warn(`[Security] Invalid/used audit token for ${pending.email}`);
+      return res.redirect(`${FRONTEND_URL}/?error=token_invalid`);
+    }
+    // Mark used — one-time redemption
+    await db.query(`UPDATE audit_tokens SET used=true WHERE token=$1`, [pending.auditToken]).catch(()=>{});
+  }
 
   const auditId = crypto.randomBytes(12).toString('hex');
 
