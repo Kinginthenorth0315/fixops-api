@@ -1699,19 +1699,27 @@ Return ONLY valid JSON, no markdown:
 // ── Fix request email ─────────────────────────────────────────────────────────
 app.post('/fix-request', async (req, res) => {
   try {
-    const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, auditId } = req.body;
+    const { issueTitle, issueImpact, issueDimension, portalCompany, portalEmail, email, auditId, severity, source } = req.body;
+    const contactEmail = portalEmail || email || 'unknown';
+    const sourceLabel = source === 'calendar' ? '📅 Booked a Call' : '📋 Form Submit';
     await resend.emails.send({
       from: 'FixOps Fix Request <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
-      subject: `🛠 Fix Request — ${issueTitle?.substring(0,60)} — ${portalCompany}`,
-      html: `<h2>Fix It For Me — Scope &amp; Quote Needed</h2>
-        <p><strong>Issue:</strong> ${issueTitle}</p>
-        <p><strong>Impact:</strong> ${issueImpact}</p>
-        <p><strong>Dimension:</strong> ${issueDimension}</p>
-        <p><strong>Company:</strong> ${portalCompany}</p>
-        <p><strong>Email:</strong> ${portalEmail}</p>
-        <p><strong>Audit ID:</strong> ${auditId}</p>
-        <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View full audit</a></p>`
+      subject: `🛠 Fix Request — ${issueTitle?.substring(0,55)} — ${portalCompany} [${sourceLabel}]`,
+      html: `
+        <h2 style="margin-bottom:4px;">Fix It For Me Request</h2>
+        <p style="color:#888;font-size:13px;margin-bottom:20px;">Source: <strong style="color:${source==='calendar'?'#10b981':'#7c3aed'}">${sourceLabel}</strong>${source==='calendar' ? ' — they may already have booked on Calendly' : ' — reach out within 1 business day'}</p>
+        <table style="border-collapse:collapse;width:100%;max-width:560px;">
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;width:160px;">Company</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${portalCompany || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Email</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;"><a href="mailto:${contactEmail}">${contactEmail}</a></td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Severity</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:${severity==='critical'?'#dc2626':'#d97706'};font-weight:700;">${severity?.toUpperCase() || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Issue</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;">${issueTitle || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Impact</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-family:monospace;font-size:12px;">${issueImpact || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Dimension</td><td style="padding:8px 12px;">${issueDimension || '—'}</td></tr>
+        </table>
+        <p style="margin-top:16px;">
+          <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="display:inline-block;padding:10px 20px;background:#7c3aed;color:#fff;border-radius:8px;font-weight:700;font-size:13px;text-decoration:none;">View Full Audit →</a>
+        </p>`
     });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
