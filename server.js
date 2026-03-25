@@ -113,6 +113,21 @@ async function initDb() {
   `).catch(() => {});
   await db.query(`ALTER TABLE portals ADD COLUMN IF NOT EXISTS nickname VARCHAR(100)`).catch(()=>{});
   await db.query(`ALTER TABLE portals ADD COLUMN IF NOT EXISTS portal_id VARCHAR(100)`).catch(()=>{});
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS agency_leads (
+      id            SERIAL PRIMARY KEY,
+      name          VARCHAR(255) NOT NULL,
+      company       VARCHAR(255) NOT NULL,
+      email         VARCHAR(255) NOT NULL,
+      phone         VARCHAR(100),
+      portal_count  VARCHAR(50),
+      audits_per_month VARCHAR(50),
+      priorities    TEXT[],
+      notes         TEXT,
+      status        VARCHAR(50) DEFAULT 'new',
+      created_at    TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
 
   // Cleanup: free results after 7 days, paid after 365
   await db.query(`
@@ -1571,6 +1586,52 @@ app.post('/fix-request', async (req, res) => {
     });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Agency Inquiry ────────────────────────────────────────────────────────────
+app.post('/agency-inquiry', async (req, res) => {
+  try {
+    const { name, company, email, phone, portalCount, auditsPerMonth, priorities, notes } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+    if (!name)  return res.status(400).json({ error: 'Name required' });
+
+    // Save to DB
+    await db.query(`
+      INSERT INTO agency_leads (name, company, email, phone, portal_count, audits_per_month, priorities, notes)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `, [name, company || '', email, phone || '', portalCount || '', auditsPerMonth || '',
+        Array.isArray(priorities) ? priorities : [], notes || '']);
+
+    // Notify Matthew
+    const priorityList = Array.isArray(priorities) && priorities.length
+      ? priorities.map(p => `<li>${p}</li>`).join('')
+      : '<li>Not specified</li>';
+
+    await resend.emails.send({
+      from: 'FixOps Agency <reports@fixops.io>',
+      to: FIXOPS_NOTIFY_EMAIL,
+      subject: `🏢 New Agency Inquiry — ${company || 'Unknown'} — ${name}`,
+      html: `
+        <h2 style="color:#7c3aed;">New Agency Plan Inquiry</h2>
+        <table style="border-collapse:collapse;width:100%;max-width:560px;">
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;width:180px;">Name</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${name}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Company</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${company || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Email</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;"><a href="mailto:${email}">${email}</a></td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Phone</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${phone || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Portals managed</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${portalCount || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Audits/month</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${auditsPerMonth || '—'}</td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;vertical-align:top;">Looking for</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;"><ul style="margin:0;padding-left:18px;">${priorityList}</ul></td></tr>
+          <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;vertical-align:top;">Notes</td><td style="padding:8px 12px;">${notes || '—'}</td></tr>
+        </table>
+        <p style="margin-top:20px;font-size:13px;color:#6b7280;">Reply directly to <a href="mailto:${email}">${email}</a> to schedule their onboarding call.</p>
+      `
+    });
+
+    res.json({ success: true });
+  } catch(e) {
+    console.error('Agency inquiry error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Health check ──────────────────────────────────────────────────────────────
@@ -3245,6 +3306,24 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/crm/v3/schemas?limit=100'),
     {data:{results:[]}}
   );
+
+  // Fetch record counts for each custom object (up to 5)
+  const customObjectData = [];
+  const customSchemasList = customSchemasR.data?.results || [];
+  const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email']);
+  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name)).slice(0, 5);
+  for (const schema of userCustomSchemas) {
+    const countR = await safe(
+      () => hs.get(`/crm/v3/objects/${schema.name}?limit=1&properties=hs_createdate`),
+      {data:{total:0}}
+    );
+    customObjectData.push({
+      name: schema.name,
+      label: schema.labels?.singular || schema.name,
+      labelPlural: schema.labels?.plural || schema.name,
+      total: countR.data?.total || 0,
+    });
+  }
   const contactPropsR = await safe(
     () => hs.get('/crm/v3/properties/contacts?limit=500'),
     {data:{results:[]}}
@@ -5233,11 +5312,9 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         noEmailContactCount: noEmail ? noEmail.length : 0,
 
         // Custom objects (Enterprise)
-        customObjectCount: customSchemas.filter(s => !['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail'].includes(s.name)).length,
-        customObjectNames: customSchemas
-          .filter(s => !['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail'].includes(s.name))
-          .map(s => s.labels?.singular || s.name)
-          .slice(0, 5),
+        customObjectCount: customObjectData.length,
+        customObjectNames: customObjectData.map(o => o.labelPlural || o.label),
+        customObjectData: customObjectData,  // full array with counts
         undocumentedProps: contactProps.filter(p => p.createdUserId && !p.description).length,
 
         // ── Engagement completeness ───────────────────────────────────────
