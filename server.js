@@ -4105,6 +4105,33 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
 
+  // ── Setup Health Data ─────────────────────────────────────────────────────
+  // Domain/email authentication (SPF, DKIM, DMARC)
+  const domainsR = await safe(
+    () => hs.get('/cms/v3/domains?limit=100'),
+    {data:{results:[]}}
+  );
+  // Email sending domains (for DKIM/SPF check)
+  const emailDomainsR = await safe(
+    () => hs.get('/marketing/v3/email/sending-domains'),
+    {data:{results:[]}}
+  );
+  // Import history (for import errors)
+  const importsR = await safe(
+    () => hs.get('/crm/v3/imports?limit=50'),
+    {data:{results:[]}}
+  );
+  // Account info for portal details
+  const accountInfoR = await safe(
+    () => hs.get('/account-info/v3/details'),
+    {data:{}}
+  );
+  // Notification preferences
+  const notificationsR = await safe(
+    () => hs.get('/notification-preferences/v3/daily-digest'),
+    {data:{}}
+  );
+
   // Fetch record counts for each custom object (up to 10)
   const customObjectData = [];
   const customSchemasList = customSchemasR.data?.results || [];
@@ -4179,6 +4206,11 @@ async function runFullAudit(token, auditId, meta) {
   const dealPipelines   = dealPipelinesR.data?.results||[];
   const customSchemas   = customSchemasR.data?.results||[];
   const contactProps    = contactPropsR.data?.results||[];
+  // Setup health data
+  const domains         = domainsR.data?.results||[];
+  const emailDomains    = emailDomainsR.data?.results||[];
+  const importHistory   = importsR.data?.results||[];
+  const accountInfo     = accountInfoR.data||{};
   const emailEngs       = emailEngR.data?.results||[];
   const notes           = notesR.data?.results||[];
   const carts           = cartsR.data?.results||[];
@@ -6883,6 +6915,155 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   })();
 
   // ══════════════════════════════════════════════════════════════════════════
+  // ✦ SETUP HEALTH ENGINE — What Portal IQ charges $2,000 to check manually
+  // Checks: domain auth, tracking code, teams, user roles, import errors,
+  // notification setup, AI settings, connected integrations
+  // ══════════════════════════════════════════════════════════════════════════
+  const setupHealthEngine = (() => {
+    const checks = [];
+    let score = 100;
+
+    // 1. Email authentication — SPF/DKIM configured on sending domains
+    const verifiedDomains = emailDomains.filter(d => d.validationDetails?.isVerified || d.status === 'VERIFIED' || d.dkim?.isVerified || d.spf?.isVerified);
+    const hasEmailDomain  = emailDomains.length > 0;
+    const hasDKIM = emailDomains.some(d => d.dkim?.isVerified || d.dkimStatus === 'VERIFIED' || String(d.dkim||'').includes('valid'));
+    const hasSPF  = emailDomains.some(d => d.spf?.isVerified  || d.spfStatus  === 'VERIFIED' || String(d.spf||'').includes('valid'));
+    if (hasEmailDomain) {
+      checks.push({ name: 'Email Sending Domain', pass: verifiedDomains.length > 0 || hasDKIM, detail: verifiedDomains.length > 0 ? `${verifiedDomains.length} domain(s) verified` : 'Domain authentication not confirmed', impact: 'Email deliverability and sender trust', fix: 'Settings → Domains & URLs → Connect an email sending domain and verify DKIM/SPF records' });
+      if (!hasDKIM) score -= 12;
+    } else {
+      checks.push({ name: 'Email Sending Domain', pass: false, detail: 'No custom sending domain configured — emails send as "via HubSpot"', impact: 'Deliverability reduced, no brand domain on emails', fix: 'Settings → Domains & URLs → Connect your email domain to remove the "via HubSpot" label and improve deliverability' });
+      score -= 12;
+    }
+
+    // 2. Teams configured
+    const hasTeams = teams.length > 0;
+    checks.push({ name: 'Teams Configured', pass: hasTeams, detail: hasTeams ? `${teams.length} team(s) set up` : 'No teams configured — assignment and routing uses individual users only', impact: 'No round-robin routing, no team-level reporting, no bulk assignment', fix: 'Settings → Users & Teams → Teams — create teams for each department/function' });
+    if (!hasTeams) score -= 8;
+
+    // 3. Multiple pipelines (deal pipeline customization)
+    const hasCustomPipelines = dealPipelines.length > 1;
+    const defaultOnly = dealPipelines.length === 1 && (dealPipelines[0]?.label?.toLowerCase().includes('default') || dealPipelines[0]?.label?.toLowerCase().includes('sales'));
+    checks.push({ name: 'Deal Pipeline Customization', pass: hasCustomPipelines || (dealPipelines.length === 1 && !defaultOnly), detail: hasCustomPipelines ? `${dealPipelines.length} pipelines configured` : 'Only default pipeline in use', impact: 'One pipeline cannot represent different buyer journeys or product lines', fix: 'CRM → Deals → Manage Pipelines — create separate pipelines for different sales motions' });
+    if (!hasCustomPipelines && defaultOnly) score -= 5;
+
+    // 4. Super Admin count (security)
+    const superAdmins = settingsUsers.filter(u => u.superAdmin === true || u.roleIds?.includes('superAdmin'));
+    const tooManySuper = superAdmins.length > 3;
+    checks.push({ name: 'Super Admin Governance', pass: !tooManySuper, detail: tooManySuper ? `${superAdmins.length} super admins — exceeds recommended maximum of 3` : `${superAdmins.length} super admin(s) — within best practice`, impact: 'Excess super admins can delete records, export all data, change billing — major security risk', fix: 'Settings → Users & Teams → filter by Super Admin → downgrade to minimum required role' });
+    if (tooManySuper) score -= 10;
+
+    // 5. Import errors in recent history
+    const recentImports = importHistory.filter(i => {
+      const created = new Date(i.createdAt || 0).getTime();
+      return (now - created) / DAY < 90;
+    });
+    const importsWithErrors = recentImports.filter(i => (i.numErrored || i.metadata?.errorCount || 0) > 0);
+    checks.push({ name: 'Import Error History', pass: importsWithErrors.length === 0, detail: importsWithErrors.length > 0 ? `${importsWithErrors.length} recent import(s) with errors in last 90 days` : 'No recent import errors detected', impact: 'Import errors mean data did not enter HubSpot correctly — leads and records may be missing', fix: 'HubSpot → Import → check error files for each failed import and resolve field mapping issues' });
+    if (importsWithErrors.length > 0) score -= 8;
+
+    // 6. Meeting links configured (reps set up booking pages)
+    const repsWithLinks = meetingLinks.length;
+    const usersNeedingLinks = settingsUsers.filter(u => !u.superAdmin && !u.inactive).length;
+    const meetingLinkCoverage = usersNeedingLinks > 0 ? Math.round(repsWithLinks / usersNeedingLinks * 100) : 100;
+    checks.push({ name: 'Meeting Links Coverage', pass: meetingLinkCoverage >= 50, detail: `${repsWithLinks} meeting link(s) configured across ${usersNeedingLinks} active users (${meetingLinkCoverage}%)`, impact: 'Reps without meeting links create friction — prospects cannot self-schedule, manual back-and-forth slows pipeline', fix: 'Each rep: Settings → General → Calendar → Create a meeting scheduling page and share the link' });
+    if (meetingLinkCoverage < 50) score -= 7;
+
+    // 7. Knowledge Base configured (Service Hub)
+    const kbPublished = kbArticles.filter(a => a.currentState === 'PUBLISHED' || a.status === 'PUBLISHED').length;
+    const hasKBSetup = kbArticles.length > 0;
+    if (tickets.length > 10) {
+      checks.push({ name: 'Knowledge Base Setup', pass: hasKBSetup && kbPublished > 0, detail: hasKBSetup ? `${kbPublished} published KB article(s) of ${kbArticles.length} total` : 'No knowledge base articles created', impact: 'Without KB articles, every question becomes a support ticket — tickets volume inflated unnecessarily', fix: 'Service → Knowledge Base — create articles for your top 10 most common support questions' });
+      if (!hasKBSetup) score -= 6;
+    }
+
+    // 8. Feedback surveys configured (NPS/CSAT)
+    const hasFeedback = feedback.length > 0;
+    checks.push({ name: 'Feedback Surveys Active', pass: hasFeedback, detail: hasFeedback ? `${feedback.length} feedback response(s) collected` : 'No NPS or CSAT responses collected', impact: 'No feedback = no early warning on churn risk or customer satisfaction trends', fix: 'Service → Customer Feedback — create an NPS survey and enroll existing customers' });
+    if (!hasFeedback) score -= 7;
+
+    // 9. Contact/deal properties documented
+    const customContactPropsTotal = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false).length;
+    const undocumentedProps = contactProps.filter(p => (p.createdUserId || p.hubspotOwned === false) && (!p.description || p.description.trim().length < 3)).length;
+    const docRate = customContactPropsTotal > 0 ? Math.round((1 - undocumentedProps/customContactPropsTotal)*100) : 100;
+    checks.push({ name: 'Property Documentation', pass: docRate >= 70, detail: `${customContactPropsTotal} custom properties · ${docRate}% have descriptions`, impact: 'Undocumented properties cause duplicate creation, rep confusion, and onboarding friction', fix: 'Settings → Properties → filter by "Created by user" → add descriptions to each custom property' });
+    if (docRate < 70) score -= 6;
+
+    // 10. Goals configured
+    const hasGoals = goals.length > 0;
+    const activeGoals = goals.filter(g => { const end=g.properties?.hs_end_datetime; return !end||new Date(end).getTime()>now; }).length;
+    checks.push({ name: 'Sales Goals Configured', pass: hasGoals && activeGoals > 0, detail: hasGoals ? `${activeGoals} active goal(s) of ${goals.length} total` : 'No sales goals set in HubSpot', impact: 'Without goals, quota attainment cannot be tracked and reps have no visible targets', fix: 'Reports → Goals → Create goals for each rep with monthly/quarterly targets' });
+    if (!hasGoals) score -= 6;
+
+    const totalScore = Math.max(0, Math.min(100, score));
+    const passing = checks.filter(c => c.pass).length;
+    const failing = checks.filter(c => !c.pass).length;
+    const grade = totalScore >= 85 ? 'Excellent' : totalScore >= 70 ? 'Good' : totalScore >= 55 ? 'Needs Attention' : 'Critical';
+
+    return { score: totalScore, grade, passing, failing, total: checks.length, checks };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ HUBSPOT UTILIZATION ENGINE
+  // "You're paying for X but using Y% of it" — the feature no tool provides
+  // Calculates what % of HubSpot features being paid for are actually in use
+  // ══════════════════════════════════════════════════════════════════════════
+  const hubUtilizationEngine = (() => {
+    const features = [];
+
+    // CRM Core (always available)
+    features.push({ hub: 'CRM', name: 'Contacts', using: contacts.length > 0, value: contacts.length > 0 ? fmt(contacts.length) + ' contacts' : 'Empty', tip: contacts.length === 0 ? 'Import your contacts to activate the CRM' : null });
+    features.push({ hub: 'CRM', name: 'Companies', using: companies.length > 0, value: companies.length > 0 ? fmt(companies.length) + ' companies' : 'Not used', tip: companies.length === 0 ? 'Associate contacts with companies for B2B reporting' : null });
+    features.push({ hub: 'CRM', name: 'Deals', using: deals.length > 0, value: deals.length > 0 ? fmt(deals.length) + ' deals' : 'Not used', tip: deals.length === 0 ? 'Create deals to track revenue pipeline' : null });
+    features.push({ hub: 'CRM', name: 'Tasks & Activities', using: tasks.length > 10, value: tasks.length > 0 ? fmt(tasks.length) + ' tasks logged' : 'Not used', tip: tasks.length === 0 ? 'Reps should log tasks in HubSpot to track follow-ups' : null });
+
+    // Sales Hub
+    const activeSeqs = sequences.filter(s => String(s.status||'').toUpperCase()==='ACTIVE');
+    const seqsWithEnrollments = sequences.filter(s => parseInt(s.enrollmentCount||s.hs_num_enrolled||0) > 0);
+    features.push({ hub: 'Sales', name: 'Sequences', using: seqsWithEnrollments.length > 0, value: seqsWithEnrollments.length > 0 ? seqsWithEnrollments.length + ' sequences with enrollments' : sequences.length > 0 ? sequences.length + ' sequences, 0 enrollments' : 'Not configured', tip: sequences.length > 0 && seqsWithEnrollments.length === 0 ? 'Sequences exist but nobody enrolled — reps are not using them for outreach' : sequences.length === 0 ? 'Create sequences for repeatable sales outreach' : null });
+    features.push({ hub: 'Sales', name: 'Meeting Links', using: meetingLinks.length > 0, value: meetingLinks.length > 0 ? meetingLinks.length + ' meeting links' : 'None configured', tip: meetingLinks.length === 0 ? 'Create meeting scheduling pages so prospects can self-book' : null });
+    features.push({ hub: 'Sales', name: 'Products Library', using: products.length > 0, value: products.length > 0 ? products.length + ' products' : 'Empty', tip: products.length === 0 ? 'Add products to speed up quote creation and standardize pricing' : null });
+    features.push({ hub: 'Sales', name: 'Quotes', using: quotes.length > 0, value: quotes.length > 0 ? fmt(quotes.length) + ' quotes created' : 'Not used', tip: quotes.length === 0 ? 'Use HubSpot Quotes to generate proposals directly from deals' : null });
+    features.push({ hub: 'Sales', name: 'Goals / Quota Tracking', using: goals.length > 0, value: goals.length > 0 ? goals.length + ' goals set' : 'Not configured', tip: goals.length === 0 ? 'Set sales goals to track quota attainment per rep' : null });
+
+    // Marketing Hub
+    const sentEmails = marketingEmails.filter(e => ['PUBLISHED','SENT'].includes(String(e.state||e.currentState||'').toUpperCase()));
+    features.push({ hub: 'Marketing', name: 'Marketing Emails', using: sentEmails.length > 0, value: sentEmails.length > 0 ? sentEmails.length + ' emails sent' : marketingEmails.length > 0 ? marketingEmails.length + ' emails, none sent' : 'Not used', tip: marketingEmails.length > 0 && sentEmails.length === 0 ? 'Marketing emails drafted but never sent — activate campaigns' : marketingEmails.length === 0 ? 'Create email campaigns to nurture leads' : null });
+    features.push({ hub: 'Marketing', name: 'Forms', using: forms.length > 0, value: forms.length > 0 ? forms.length + ' forms active' : 'No forms', tip: forms.length === 0 ? 'Create forms to capture leads from your website' : null });
+    features.push({ hub: 'Marketing', name: 'Lists & Segmentation', using: lists.length > 5, value: lists.length > 0 ? lists.length + ' lists' : 'Not used', tip: lists.length < 3 ? 'Create active lists to segment contacts for targeted campaigns' : null });
+    features.push({ hub: 'Marketing', name: 'Campaigns', using: campaigns.length > 0, value: campaigns.length > 0 ? campaigns.length + ' campaigns' : 'Not used', tip: campaigns.length === 0 ? 'Use campaigns to attribute revenue to marketing efforts' : null });
+
+    // Service Hub
+    features.push({ hub: 'Service', name: 'Tickets / Help Desk', using: tickets.length > 0, value: tickets.length > 0 ? fmt(tickets.length) + ' tickets' : 'Not used', tip: tickets.length === 0 ? 'Create tickets to track customer support requests' : null });
+    features.push({ hub: 'Service', name: 'Knowledge Base', using: kbArticles.length > 0, value: kbArticles.length > 0 ? kbArticles.length + ' KB articles' : 'Not set up', tip: kbArticles.length === 0 ? 'Create KB articles to reduce repetitive support tickets' : null });
+    features.push({ hub: 'Service', name: 'Feedback Surveys (NPS/CSAT)', using: feedback.length > 0, value: feedback.length > 0 ? feedback.length + ' responses collected' : 'Not active', tip: feedback.length === 0 ? 'Launch an NPS survey to measure customer satisfaction' : null });
+
+    // Automation
+    const activeWorkflows = workflows.filter(w => w.enabled || w.isEnabled);
+    const workingWf = activeWorkflows.filter(w => parseInt(w.enrolledObjectsCount||w.contactsEnrolled||0) > 0);
+    features.push({ hub: 'Automation', name: 'Workflows', using: workingWf.length > 0, value: workingWf.length > 0 ? workingWf.length + ' actively enrolling' : activeWorkflows.length > 0 ? activeWorkflows.length + ' active, 0 enrolling' : 'Not used', tip: activeWorkflows.length > 0 && workingWf.length === 0 ? 'All workflows are active but enrolling nobody — triggers may be broken' : activeWorkflows.length === 0 ? 'Build automation workflows to save team time' : null });
+
+    const using = features.filter(f => f.using).length;
+    const notUsing = features.filter(f => !f.using).length;
+    const utilizationPct = Math.round(using / features.length * 100);
+    const grade = utilizationPct >= 80 ? 'Excellent' : utilizationPct >= 60 ? 'Good' : utilizationPct >= 40 ? 'Partial' : 'Low';
+
+    // Group by hub
+    const byHub = {};
+    features.forEach(f => {
+      if (!byHub[f.hub]) byHub[f.hub] = { using: 0, total: 0, features: [] };
+      byHub[f.hub].total++;
+      if (f.using) byHub[f.hub].using++;
+      byHub[f.hub].features.push(f);
+    });
+
+    // Opportunities = not-using features with tips
+    const opportunities = features.filter(f => !f.using && f.tip).slice(0, 8);
+
+    return { utilizationPct, grade, using, notUsing, total: features.length, byHub, opportunities, features };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
   // ✦ DEAL SOURCE ATTRIBUTION ENGINE
   // Which contact sources generate the best deals? Cross-ref analytics_source with won deals
   // ══════════════════════════════════════════════════════════════════════════
@@ -7120,12 +7301,25 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
           ? Math.round(openDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0) / openDeals.length)
           : 0,
         zeroDollarDeals: openDeals.filter(d=>!parseFloat(d.properties?.amount||0)).length,
+        zeroDollarPct: openDeals.length > 0
+          ? Math.round(openDeals.filter(d=>!parseFloat(d.properties?.amount||0)).length / openDeals.length * 100)
+          : 0,
         stalledDeals: openDeals.filter(d=>(now-new Date(d.properties?.hs_lastmodifieddate||0).getTime())/DAY>21).length,
+        // Stalled pipeline value = actual $ of stalled deals only
+        stalledPipelineValue: Math.round(openDeals.filter(d=>{
+          const days = (now-new Date(d.properties?.hs_lastmodifieddate||0).getTime())/DAY;
+          return days > 21 && parseFloat(d.properties?.amount||0) > 0;
+        }).reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)),
         dealsNoCloseDate: openDeals.filter(d=>!d.properties?.closedate).length,
         pastDueDeals: openDeals.filter(d=>{
           const cd = d.properties?.closedate;
           return cd && new Date(cd).getTime() < now;
         }).length,
+        // Past-due pipeline value = actual $ of overdue deals only
+        pastDuePipelineValue: Math.round(openDeals.filter(d=>{
+          const cd = d.properties?.closedate;
+          return cd && new Date(cd).getTime() < now && parseFloat(d.properties?.amount||0) > 0;
+        }).reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)),
 
         // ── Subscription / MRR intelligence ──────────────────────
         activeSubscriptions: subscriptions.filter(sub=>
@@ -7766,6 +7960,8 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       dealSourceAttribution,
       lifecycleVelocityEngine,
       billingTierEngine,
+      setupHealthEngine,
+      hubUtilizationEngine,
     },
     summary:{
       overallScore,
@@ -7790,6 +7986,12 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       billingTierJumpCost: billingTierEngine?.tierJumpCost || 0,
       topRevenueSource: dealSourceAttribution?.bestSource?.source || null,
       avgLeadToCustomerDays: lifecycleVelocityEngine?.avgLeadToCustomerDays || null,
+      setupScore: setupHealthEngine?.score || null,
+      setupGrade: setupHealthEngine?.grade || null,
+      setupFailingChecks: setupHealthEngine?.failing || 0,
+      hubUtilizationPct: hubUtilizationEngine?.utilizationPct || null,
+      hubUtilizationGrade: hubUtilizationEngine?.grade || null,
+      hubOpportunityCount: hubUtilizationEngine?.opportunities?.length || 0,
     },
     scores, issues
   };
