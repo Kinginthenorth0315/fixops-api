@@ -3958,25 +3958,25 @@ async function runFullAudit(token, auditId, meta) {
   // These are the highest-value objects. Sequential to avoid 429s on large portals.
   await up(12, 'Reading contacts…');
   const contactsR = await paginate(
-    '/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason,hs_email_optout,hs_calculated_merged_vids',
+    '/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason,hs_email_optout,hs_calculated_merged_vids,hs_persona,num_associated_companies,hs_analytics_source,hs_analytics_source_data_1,associatedcompanyid',
     contactLimit
   );
 
   await up(20, 'Reading companies…');
   const companiesR = await paginate(
-    '/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate,hs_lastmodifieddate,city,country',
+    '/crm/v3/objects/companies?properties=name,domain,industry,numberofemployees,annualrevenue,hubspot_owner_id,createdate,hs_lastmodifieddate,city,country,num_associated_contacts',
     companyLimit
   );
 
   await up(28, 'Reading deals…');
   const dealsR = await paginate(
-    '/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability,hs_is_closed,hs_is_closed_won',
+    '/crm/v3/objects/deals?properties=dealname,amount,dealstage,closedate,hubspot_owner_id,hs_lastmodifieddate,pipeline,createdate,hs_deal_stage_probability,hs_is_closed,hs_is_closed_won,closed_lost_reason,hs_closed_lost_reason,closed_won_reason,num_associated_contacts,hs_num_contacts_with_buying_roles',
     dealLimit
   );
 
   await up(34, 'Reading tickets…');
   const ticketsR = await paginate(
-    '/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority,hs_pipeline,time_to_close',
+    '/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority,hs_pipeline,time_to_close,hs_ticket_category,hs_time_in_stage_1,hs_time_in_stage_2,hs_time_in_stage_3,hs_time_in_stage_4',
     ticketLimit
   );
 
@@ -4036,9 +4036,14 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
   // Marketing emails — requires content scope (Marketing Hub Pro+)
-  // Reads email list, performance stats, open/click/bounce rates
+  // Fetch email list first, then get aggregate stats
   const marketingEmailsR = await safe(
-    () => hs.get('/marketing/v3/emails?limit=50&orderBy=-updatedAt'),
+    () => hs.get('/marketing/v3/emails?limit=100&orderBy=-updatedAt'),
+    {data:{results:[]}}
+  );
+  // Fetch email aggregate stats (separate endpoint from list)
+  const emailStatsR = await safe(
+    () => hs.get('/marketing/v3/emails/statistics/list?limit=100'),
     {data:{results:[]}}
   );
   const optOutsR = await safe(
@@ -4100,21 +4105,26 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
 
-  // Fetch record counts for each custom object (up to 5)
+  // Fetch record counts for each custom object (up to 10)
   const customObjectData = [];
   const customSchemasList = customSchemasR.data?.results || [];
-  const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email']);
-  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name)).slice(0, 5);
+  const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email','p_contact_event','p_deal_split']);
+  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name) && sc.objectTypeId).slice(0, 10);
   for (const schema of userCustomSchemas) {
+    // Use objectTypeId (e.g. "2-12345") which is the correct API identifier for custom objects
+    const objectId = schema.objectTypeId || schema.name;
     const countR = await safe(
-      () => hs.get(`/crm/v3/objects/${schema.name}?limit=1&properties=hs_createdate`),
+      () => hs.get(`/crm/v3/objects/${encodeURIComponent(objectId)}?limit=1`),
       {data:{total:0}}
     );
+    // HubSpot returns total in the paging object for CRM v3
+    const total = countR.data?.total ?? countR.data?.paging?.next?.after ?? 0;
     customObjectData.push({
       name: schema.name,
+      objectTypeId: objectId,
       label: schema.labels?.singular || schema.name,
       labelPlural: schema.labels?.plural || schema.name,
-      total: countR.data?.total || 0,
+      total: typeof total === 'number' ? total : 0,
     });
   }
   const contactPropsR = await safe(
@@ -4175,6 +4185,16 @@ async function runFullAudit(token, auditId, meta) {
   const communications  = communicationsR.data?.results||[];
   const marketingEvents  = marketingEventsR.data?.results||[];
   const marketingEmails  = marketingEmailsR.data?.results||[];
+  // Merge stats into emails by ID for open/click/bounce rate analysis
+  const emailStatsMap = {};
+  (emailStatsR.data?.results||[]).forEach(s => {
+    if (s.id) emailStatsMap[s.id] = s.counters || s.stats || {};
+  });
+  marketingEmails.forEach(e => {
+    if (!e.stats && !e.counters) {
+      e.stats = emailStatsMap[e.id] || {};
+    }
+  });
   const tasks         = tasksR.data?.results||[];
   const meetings      = meetingsR.data?.results||[];
   const calls         = callsR.data?.results||[];
@@ -4306,6 +4326,64 @@ async function runFullAudit(token, auditId, meta) {
     global._auditExtra.contactCompleteness = { score: completenessScore, missingByField, total: contacts.length };
   }
 
+  // ── CONTACT FIRST NAME CHECK (Portal IQ benchmark) ────────────
+  const noFirstName = contacts.filter(c => !c.properties?.firstname || c.properties.firstname.trim() === '');
+  if (noFirstName.length > contacts.length * 0.15) {
+    dataScore -= Math.min(10, Math.round(noFirstName.length / contacts.length * 20));
+    issues.push({
+      severity: 'warning',
+      title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — email personalization broken`,
+      description: `Contacts without a first name can't be addressed personally in emails. Research by Outreach shows personalizing subject lines with a contact's name leads to a 22% increase in open rate. Without first name, every email starts with "Hi ," or a generic fallback — immediately signaling mass automation.`,
+      impact: `${noFirstName.length} contacts receiving impersonal emails · 22% lower open rate potential`,
+      dimension: 'Data Integrity',
+      guide: [
+        'Make first name required on all HubSpot forms — this is the single most impactful form change you can make',
+        'Export contacts missing first name → enrich via LinkedIn Sales Navigator, Apollo, or ZoomInfo',
+        'Add a fallback token in email templates: {{ contact.firstname | default: "there" }}',
+        'Workflow: Contact created AND firstname unknown → task to rep to research within 7 days',
+      ]
+    });
+  }
+
+  // ── CONTACT COMPANY ASSOCIATION (Portal IQ benchmark for B2B) ──
+  const noCompanyAssoc = contacts.filter(c => !c.properties?.associatedcompanyid && !c.properties?.num_associated_companies);
+  const noCompanyPct = Math.round(noCompanyAssoc.length / Math.max(contacts.length,1) * 100);
+  if (companies.length > 5 && noCompanyPct > 40) {
+    dataScore -= Math.min(8, Math.round(noCompanyPct / 10));
+    issues.push({
+      severity: 'info',
+      title: `${noCompanyPct}% of contacts not associated with a company — B2B attribution broken`,
+      description: `${noCompanyAssoc.length.toLocaleString()} contacts have no company association. For B2B portals, this breaks account-based reporting, company-level activity timelines, and deal attribution. When contacts aren't linked to companies, your team can't see who else at that account you're already talking to.`,
+      impact: `Account-based reporting inaccurate · deal attribution missing · duplicate outreach to same company`,
+      dimension: 'Data Integrity',
+      guide: [
+        'Enable auto-association in HubSpot: Settings → Companies → Automatically create and associate companies',
+        'This matches contacts to companies by email domain (e.g. john@acme.com → Acme Corp)',
+        'Run a one-time enrichment: export contacts with company email domains, match to existing companies',
+        'Only skip auto-association if you have complex multi-company relationships',
+      ]
+    });
+  }
+
+  // ── COMPANY DOMAIN CHECK (Portal IQ benchmark) ─────────────────
+  const companiesNoDomain = companies.filter(c => !c.properties?.domain || c.properties.domain.trim() === '');
+  if (companiesNoDomain.length > companies.length * 0.2 && companies.length > 5) {
+    dataScore -= Math.min(8, Math.round(companiesNoDomain.length / companies.length * 15));
+    issues.push({
+      severity: 'info',
+      title: `${companiesNoDomain.length} companies missing domain name — HubSpot auto-enrichment disabled`,
+      description: `Companies without a domain name can't be enriched by HubSpot Insights (free company data including industry, size, and revenue). The domain is also how HubSpot auto-deduplicates companies and auto-associates contacts — without it, you get duplicate companies and broken contact associations.`,
+      impact: `${companiesNoDomain.length} companies missing auto-enrichment · deduplication bypassed · contact association broken`,
+      dimension: 'Data Integrity',
+      guide: [
+        'Companies → filter by "Company domain name is unknown" → research and add domains',
+        'For bulk enrichment: export companies, add domains in a spreadsheet, re-import',
+        'Once domains are added, HubSpot Insights will auto-fill industry, size, and revenue',
+        'Enable auto-association so future contacts with matching email domains link automatically',
+      ]
+    });
+  }
+
   await up(45, `Checking ${workflows.length} workflows…`);
 
   // ── AUTOMATION HEALTH ───────────────────────────────────────
@@ -4434,6 +4512,68 @@ async function runFullAudit(token, auditId, meta) {
         dimension: 'Pipeline',
       });
     }
+  }
+
+  // ── DEALS WITHOUT ASSOCIATED CONTACTS (Portal IQ benchmark) ───
+  const dealsNoContact = openDeals.filter(d => {
+    const n = parseInt(d.properties?.num_associated_contacts || d.properties?.hs_num_contacts_with_buying_roles || 0);
+    return n === 0;
+  });
+  if (dealsNoContact.length > openDeals.length * 0.2 && openDeals.length > 5) {
+    pipelineScore -= Math.min(15, Math.round(dealsNoContact.length / openDeals.length * 25));
+    issues.push({
+      severity: 'warning',
+      title: `${dealsNoContact.length} open deals have no associated contacts — these deals can't close`,
+      description: `Deals without contacts have no human on the other side. They can't receive a proposal, can't be called, and won't appear in any rep's contact list. Research shows deals associated with 3+ contacts have 2× the close rate of single-contact deals. Zero-contact deals essentially don't exist.`,
+      impact: `${dealsNoContact.length} deals with no stakeholder mapped · pipeline accuracy undermined`,
+      dimension: 'Pipeline',
+      guide: [
+        'Deals → filter "Associated contacts = 0" → assign each to the right contact',
+        'Make contact association required before a deal advances past "Prospect" stage',
+        'For enterprise deals: use HubSpot\'s Buying Roles feature to map all decision-makers',
+        'Build a workflow: Deal created AND no associated contact after 24 hours → alert to deal owner',
+      ]
+    });
+  }
+
+  // ── CLOSED WON/LOST REASON (Portal IQ benchmark) ───────────────
+  const closedWonDeals = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+  const closedLostDeals = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true');
+  const wonNoReason = closedWonDeals.filter(d => !d.properties?.closed_won_reason && !d.properties?.hs_closed_won_reason);
+  const lostNoReason2 = closedLostDeals.filter(d => !d.properties?.closed_lost_reason && !d.properties?.hs_closed_lost_reason);
+
+  if (closedWonDeals.length > 5 && wonNoReason.length > closedWonDeals.length * 0.7) {
+    pipelineScore -= 8;
+    issues.push({
+      severity: 'info',
+      title: `${wonNoReason.length} closed won deals missing win reason — can't replicate what's working`,
+      description: `Your team is closing deals but nobody is capturing why. Without win reason data you can't identify which messaging works, which personas convert best, or which reps have repeatable success patterns. This is institutional knowledge walking out the door after every deal.`,
+      impact: `Win patterns untracked · coaching blind spot · best practices not scalable`,
+      dimension: 'Pipeline',
+      guide: [
+        'Make "Closed Won Reason" a required field when moving a deal to Closed Won stage',
+        'Settings → Pipelines → Closed Won stage → add required properties → Closed Won Reason',
+        'Start with 5-6 options: Price, Features, Relationship, Speed, Competitor lost, Inbound',
+        'Monthly: review closed won reasons by rep — this becomes your most valuable sales coaching data',
+      ]
+    });
+  }
+
+  if (closedLostDeals.length > 5 && lostNoReason2.length > closedLostDeals.length * 0.5) {
+    pipelineScore -= 10;
+    issues.push({
+      severity: 'warning',
+      title: `${lostNoReason2.length} closed lost deals with no loss reason — burning pipeline without learning`,
+      description: `${Math.round(lostNoReason2.length/Math.max(closedLostDeals.length,1)*100)}% of your lost deals have no recorded reason. Every loss without a reason code is a missed opportunity to improve your pitch, pricing, or process. Businesses that track loss reasons improve their win rate by an average of 15% within 2 quarters.`,
+      impact: `Loss patterns invisible · pipeline objections never addressed · same mistakes recurring`,
+      dimension: 'Pipeline',
+      guide: [
+        'Make "Closed Lost Reason" required when moving a deal to Closed Lost stage',
+        'Standard options: Price too high, Went with competitor, No budget, No decision, Timing, Poor fit',
+        'Add a "Lost deal notes" text field for context beyond the dropdown',
+        'Monthly loss review: which reason appears most? That\'s your #1 process fix.',
+      ]
+    });
   }
 
   await up(73, 'Reviewing forms and marketing…');
@@ -5018,6 +5158,138 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+  // ── DEALS WITHOUT ASSOCIATED CONTACTS ─────────────────────────────────────
+  if (deals.length > 10) {
+    const dealsNoContact = deals.filter(d => {
+      const n = parseInt(d.properties?.num_associated_contacts || d.properties?.hs_num_contacts_with_buying_roles || 0);
+      return n === 0;
+    });
+    if (dealsNoContact.length > deals.length * 0.20) {
+      pipelineScore -= Math.min(15, Math.round(dealsNoContact.length / deals.length * 25));
+      issues.push({
+        severity: dealsNoContact.length > deals.length * 0.40 ? 'critical' : 'warning',
+        title: `${dealsNoContact.length} deals have no associated contact — these deals cannot close`,
+        description: `${Math.round(dealsNoContact.length/deals.length*100)}% of your deals have zero contacts linked. Every deal needs at least one associated contact — without one there's no buyer, no relationship, and no way to track communication history. Pipeline accuracy and forecast reliability both suffer.`,
+        impact: `${dealsNoContact.length} contactless deals · forecast skewed · close rate reporting inaccurate`,
+        dimension: 'Pipeline',
+        guide: [
+          'Deals → filter "Number of associated contacts = 0" → bulk review and associate contacts',
+          'Make contact association required when creating a deal in Settings → Properties → Required Fields',
+          'Workflow: Deal created AND associated contacts = 0 → notify owner to add contact within 24 hours',
+          'Set HubSpot to auto-associate contacts from the same company to their deals'
+        ]
+      });
+    }
+  }
+
+  // ── CLOSED WON REASON TRACKING ────────────────────────────────────────────
+  if (deals.length > 20) {
+    const closedWon = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    if (closedWon.length > 5) {
+      const wonNoReason = closedWon.filter(d =>
+        !d.properties?.closed_won_reason && !d.properties?.hs_closed_won_reason
+      );
+      if (wonNoReason.length > closedWon.length * 0.5) {
+        reportingScore -= 8;
+        issues.push({
+          severity: 'info',
+          title: `${wonNoReason.length} closed-won deals have no win reason — you cannot replicate success`,
+          description: `${wonNoReason.length} of your ${closedWon.length} won deals have no win reason recorded. Understanding why you win is just as important as understanding why you lose. Win reasons reveal your strongest value props, best-fit customers, and which reps close what type of deal.`,
+          impact: `Win pattern analysis impossible · rep coaching incomplete · product feedback loop broken`,
+          dimension: 'Reporting',
+          guide: [
+            'Add a required "Closed Won Reason" dropdown to your final won stage: Champion, Price Win, Feature Fit, Speed, Referral, Other',
+            'Workflow: Deal moved to Closed Won → task to rep to fill in win reason within 48 hours',
+            'Review win reasons quarterly — patterns reveal which product features and sales motions drive the most revenue'
+          ]
+        });
+      }
+    }
+  }
+
+  // ── COMPANY DATA QUALITY ──────────────────────────────────────────────────
+  if (companies.length > 5) {
+    // Companies with no contacts associated
+    const companiesNoContacts = companies.filter(c =>
+      parseInt(c.properties?.num_associated_contacts || 0) === 0
+    );
+    if (companiesNoContacts.length > companies.length * 0.25) {
+      dataScore -= Math.min(10, Math.round(companiesNoContacts.length / companies.length * 15));
+      issues.push({
+        severity: 'info',
+        title: `${companiesNoContacts.length} companies have no associated contacts — orphaned records`,
+        description: `${Math.round(companiesNoContacts.length/companies.length*100)}% of your company records have no contacts linked. Orphaned companies bloat your database, create confusion during manual data entry, and reduce report accuracy. If no one at the company is in HubSpot, the company record has no business value.`,
+        impact: `${companiesNoContacts.length} orphaned company records · CRM clutter · duplicate risk`,
+        dimension: 'Data Integrity',
+        guide: [
+          'Companies → filter "Number of associated contacts = 0" → review and either add contacts or delete the company',
+          'Enable automatic company-contact association by email domain in Settings → Objects → Companies',
+          'Quarterly hygiene task: clean orphaned company records before they accumulate further'
+        ]
+      });
+    }
+
+    // Companies missing domain (HubSpot cannot auto-dedup without it)
+    const companiesNoDomain = companies.filter(c => !c.properties?.domain || c.properties.domain.trim() === '');
+    if (companiesNoDomain.length > companies.length * 0.20) {
+      dataScore -= Math.min(8, Math.round(companiesNoDomain.length / companies.length * 12));
+      issues.push({
+        severity: 'info',
+        title: `${companiesNoDomain.length} companies have no domain name — HubSpot cannot auto-deduplicate them`,
+        description: `HubSpot uses domain name to automatically deduplicate companies and auto-associate contacts. Without a domain, HubSpot cannot match a contact's email to their company, cannot pull company data from HubSpot Insights, and will create duplicate company records over time.`,
+        impact: `${companiesNoDomain.length} companies unprotected from duplicates · auto-association disabled`,
+        dimension: 'Data Integrity',
+        guide: [
+          'Export companies with no domain → manually research and add domain names',
+          'For B2C or individual contacts, this is expected — focus on companies that should have a domain',
+          'Enable "Automatically create and associate companies with contacts" to prevent future orphaned companies'
+        ]
+      });
+    }
+  }
+
+  // ── CONTACT FIRSTNAME COMPLETENESS ────────────────────────────────────────
+  if (contacts.length > 50) {
+    const noFirstName = contacts.filter(c => !c.properties?.firstname || c.properties.firstname.trim() === '');
+    if (noFirstName.length > contacts.length * 0.15) {
+      dataScore -= Math.min(8, Math.round(noFirstName.length / contacts.length * 15));
+      issues.push({
+        severity: 'info',
+        title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — personalization impossible`,
+        description: `Contacts without a first name cannot receive personalized emails, and email personalization tokens will fail or fall back to generic defaults. Research shows personalized subject lines increase open rates by 22%. Every nameless contact in your database is a missed personalization opportunity.`,
+        impact: `${noFirstName.length} contacts receiving impersonal outreach · email open rates suppressed`,
+        dimension: 'Data Integrity',
+        guide: [
+          'Add first name as required on all forms — this should be the most basic field you collect',
+          'For existing contacts: export, research via LinkedIn or email domain, reimport',
+          'Workflow: Contact created AND first name is unknown → task to owner to research and fill in',
+          'Set a personalization token fallback in all email templates: "Hi {{contact.firstname | default: "there"}},"'
+        ]
+      });
+    }
+  }
+
+  // ── CONTACT PERSONA USAGE ─────────────────────────────────────────────────
+  if (contacts.length > 100) {
+    const withPersona = contacts.filter(c => c.properties?.hs_persona && c.properties.hs_persona !== '');
+    const personaPct = Math.round(withPersona.length / contacts.length * 100);
+    if (personaPct < 5) {
+      issues.push({
+        severity: 'info',
+        title: `Only ${personaPct}% of contacts have a persona set — segmentation and targeting is generic`,
+        description: `HubSpot Personas allow you to group contacts by buyer type and personalize messaging at scale. Only ${withPersona.length} of your ${contacts.length.toLocaleString()} contacts have a persona. Without it, all your contacts receive the same generic messaging regardless of their role, industry, or needs.`,
+        impact: `${contacts.length - withPersona.length} contacts receiving untargeted messaging · campaign ROI reduced`,
+        dimension: 'Marketing',
+        guide: [
+          'Define 2-4 buyer personas based on your best customers — job title, company size, pain points, goals',
+          'Build a workflow: set persona based on form submission answers, job title keywords, or company industry',
+          'Add "Persona" to your lead scoring model — different personas have different conversion rates',
+          'Use persona-segmented lists to send targeted campaigns instead of blasting your entire database'
+        ]
+      });
+    }
+  }
+
   // 4. WORKFLOW ERRORS  -  detect broken workflows when Public App scope available
   if (workflows.length > 0) {
     const erroredWorkflows = workflows.filter(wf => {
@@ -5301,79 +5573,175 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── 10. MARKETING EMAIL HEALTH (content scope) ───────────────────────────
   if (marketingEmails.length > 0) {
+    // Aggregate email stats across all sent emails
     const sentEmails = marketingEmails.filter(e => {
-      const stats = e.stats || e.counters || {};
-      return (stats.sent || stats.delivered || 0) > 0;
+      const s = e.stats || e.counters || {};
+      return (s.sent || s.delivered || 0) > 100;
     });
 
-    // High bounce rate emails
+    if (sentEmails.length > 0) {
+      // Calculate aggregate rates across all sent emails
+      let totalSent=0, totalOpened=0, totalClicked=0, totalBounced=0, totalUnsub=0, totalSpam=0;
+      sentEmails.forEach(e => {
+        const s = e.stats || e.counters || {};
+        const sent = s.sent || s.delivered || 0;
+        totalSent    += sent;
+        totalOpened  += s.open || s.opened || s.opens || 0;
+        totalClicked += s.click || s.clicks || s.uniqueClicks || 0;
+        totalBounced += s.bounce || s.bounced || s.hardBounced || 0;
+        totalUnsub   += s.unsubscribed || s.unsubscribe || s.optOut || 0;
+        totalSpam    += s.spamreport || s.spam || s.spamReport || 0;
+      });
+
+      const overallOpenRate   = totalSent > 0 ? Math.round(totalOpened / totalSent * 1000) / 10 : 0;
+      const overallClickRate  = totalSent > 0 ? Math.round(totalClicked / totalSent * 1000) / 10 : 0;
+      const overallBounceRate = totalSent > 0 ? Math.round(totalBounced / totalSent * 10000) / 100 : 0;
+      const overallUnsubRate  = totalSent > 0 ? Math.round(totalUnsub  / totalSent * 10000) / 100 : 0;
+      const overallSpamRate   = totalSent > 0 ? Math.round(totalSpam   / totalSent * 10000) / 100 : 0;
+
+      // Store for portalStats email health summary
+      if (!global._emailHealthSummary) global._emailHealthSummary = {};
+      global._emailHealthSummary = { totalSent, overallOpenRate, overallClickRate, overallBounceRate, overallUnsubRate, overallSpamRate, sentEmailCount: sentEmails.length };
+
+      // ── Bounce rate check (Portal IQ benchmark: >3.62% = warning, >5% = critical) ──
+      if (overallBounceRate > 5) {
+        marketingScore -= 20;
+        issues.push({
+          severity: 'critical',
+          title: `Email bounce rate ${overallBounceRate}% — HubSpot will suspend your sending account above 5%`,
+          description: `Your overall email bounce rate across ${sentEmails.length} campaigns is ${overallBounceRate}%. HubSpot suspends email sending when bounce rate exceeds 5% — at ${overallBounceRate}% you are at immediate risk. This means marketing emails AND workflow emails stop sending completely until resolved.`,
+          impact: `Account suspension risk · ${totalBounced.toLocaleString()} bounced emails · all email automation could stop`,
+          dimension: 'Marketing',
+          guide: [
+            'Immediate: check app.hubspot.com/email/[portalId]/health for your account status',
+            'Create an active list: "Email hard bounced = true" → do NOT email these contacts',
+            'Audit your contact sources — purchased lists, old imports, and trade show data are the top causes',
+            'Run a list cleanup: suppress contacts with no engagement in 12 months before next send',
+            'Enable double opt-in on all forms to prevent invalid emails entering your database',
+          ]
+        });
+      } else if (overallBounceRate > 3) {
+        marketingScore -= 10;
+        issues.push({
+          severity: 'warning',
+          title: `Email bounce rate ${overallBounceRate}% — approaching HubSpot's 5% suspension threshold`,
+          description: `Your bounce rate of ${overallBounceRate}% is above the healthy benchmark of <2% and approaching the 5% threshold where HubSpot suspends your account. At this trajectory, one large send to a dirty list could trigger an account suspension.`,
+          impact: `Deliverability declining · sender reputation damaged · ${totalBounced.toLocaleString()} total bounces`,
+          dimension: 'Marketing',
+          guide: [
+            'Filter "Email hard bounced = true" → create a suppression list → never email these contacts',
+            'Scrub your list with an email validation tool (NeverBounce, ZeroBounce) before your next large send',
+            'Review your recent import sources — high bounce rates almost always trace back to a bad import',
+          ]
+        });
+      }
+
+      // ── Unsubscribe rate (Portal IQ benchmark: >1% = warning, >3% = critical) ──
+      if (overallUnsubRate > 3) {
+        marketingScore -= 15;
+        issues.push({
+          severity: 'critical',
+          title: `Unsubscribe rate ${overallUnsubRate}% — HubSpot suspends accounts above 3%`,
+          description: `Your unsubscribe rate of ${overallUnsubRate}% exceeds HubSpot's 3% threshold for account suspension. ${totalUnsub.toLocaleString()} contacts have actively opted out. High unsub rates signal wrong audience, wrong content, or wrong frequency — and once suspended, no emails send until HubSpot manually reviews your account.`,
+          impact: `Account suspension risk · ${totalUnsub.toLocaleString()} unsubscribed contacts · campaign disruption`,
+          dimension: 'Marketing',
+          guide: [
+            'Segment your list — only send relevant content to contacts who opted in for that type of email',
+            'Set clear expectations at sign-up: tell contacts what emails they\'ll receive and how often',
+            'Review your last 5 campaigns — which had the highest unsub rate? That content is the problem',
+            'Reduce send frequency and run a re-permission campaign to rebuild a clean, engaged list',
+          ]
+        });
+      } else if (overallUnsubRate > 1) {
+        marketingScore -= 7;
+        issues.push({
+          severity: 'warning',
+          title: `Unsubscribe rate ${overallUnsubRate}% — above the healthy 1% benchmark`,
+          description: `Industry standard is under 1% unsubscribe rate. At ${overallUnsubRate}% your contacts are opting out faster than healthy. This erodes your list quality, damages sender reputation, and signals content or targeting problems.`,
+          impact: `${totalUnsub.toLocaleString()} unsubscribes · list quality declining`,
+          dimension: 'Marketing',
+          guide: [
+            'Use contact segmentation to send more relevant content to smaller, better-targeted lists',
+            'Review email frequency — over-sending is the #1 cause of elevated unsub rates',
+            'Add email preference center so contacts can reduce frequency instead of unsubscribing entirely',
+          ]
+        });
+      }
+
+      // ── Spam report rate (Portal IQ benchmark: >0.1% = warning) ──
+      if (overallSpamRate > 0.1) {
+        marketingScore -= 18;
+        issues.push({
+          severity: 'critical',
+          title: `Spam report rate ${overallSpamRate}% — above 0.1% triggers account suspension`,
+          description: `Your spam complaint rate of ${overallSpamRate}% (${totalSpam} reports from ${totalSent.toLocaleString()} sends) exceeds HubSpot's 0.1% threshold. Contacts marking your email as spam is the most damaging signal to your domain reputation — Gmail and Yahoo now enforce strict spam rate limits for bulk senders.`,
+          impact: `Domain blacklist risk · account suspension · all future emails potentially blocked`,
+          dimension: 'Marketing',
+          guide: [
+            'Audit your contact acquisition sources — spam reports almost always come from purchased or scraped lists',
+            'Add an obvious unsubscribe link at the TOP of your emails — people who can\'t find it report as spam',
+            'Never email contacts who didn\'t explicitly opt in',
+            'Use Google Postmaster Tools to monitor your domain reputation',
+          ]
+        });
+      }
+
+      // ── Open rate check ──
+      if (overallOpenRate < 15 && totalSent > 1000) {
+        marketingScore -= 8;
+        issues.push({
+          severity: 'warning',
+          title: `Overall email open rate ${overallOpenRate}% — below the 20-25% industry benchmark`,
+          description: `Across ${sentEmails.length} email campaigns, your average open rate is ${overallOpenRate}%. The industry benchmark is 20-25%. Low open rates indicate subject line problems, wrong send time, wrong audience, or contacts who have mentally unsubscribed without clicking the button.`,
+          impact: `${overallOpenRate}% open rate · email ROI significantly below potential`,
+          dimension: 'Marketing',
+          guide: [
+            'A/B test your subject lines — even a 5-word change can move open rate by 10%',
+            'Send to engaged contacts first (opened in last 90 days) to train inbox placement',
+            'Remove contacts who haven\'t opened in 12 months — they hurt deliverability for everyone else',
+            'Test different send times: Tuesday-Thursday 10am-2pm consistently outperforms other times',
+          ]
+        });
+      }
+    }
+
+    // ── High bounce individual emails ──
     const highBounce = marketingEmails.filter(e => {
-      const stats = e.stats || e.counters || {};
-      const sent = stats.sent || stats.delivered || 0;
-      const bounced = stats.bounced || stats.hardBounced || 0;
+      const s = e.stats || e.counters || {};
+      const sent = s.sent || s.delivered || 0;
+      const bounced = s.bounce || s.bounced || s.hardBounced || 0;
       return sent > 100 && bounced / sent > 0.05;
     });
-
-    if (highBounce.length > 0) {
+    if (highBounce.length > 0 && !issues.find(i => i.title.includes('bounce rate'))) {
       marketingScore -= Math.min(15, highBounce.length * 5);
       issues.push({
         severity: highBounce.length > 2 ? 'critical' : 'warning',
-        title: highBounce.length + ' marketing email' + (highBounce.length!==1?'s':'') + ' with bounce rate over 5% — deliverability at risk',
-        description: 'Bounce rates above 5% signal list health problems and damage your sending domain reputation. HubSpot automatically suppresses addresses after bounces, but the underlying cause — bad data, purchased lists, or old contacts — needs to be fixed.',
-        impact: 'Sender reputation damage · deliverability dropping · future emails landing in spam',
+        title: `${highBounce.length} individual email${highBounce.length!==1?'s':''} with >5% bounce rate — list health problems`,
+        description: `${highBounce.length} specific campaigns have bounce rates above 5%. This signals those sends went to old, invalid, or purchased contact segments. Each high-bounce send damages your domain reputation even if your overall rate looks acceptable.`,
+        impact: 'Sender reputation damage · deliverability degrading for future sends',
         dimension: 'Marketing',
         guide: [
-          'Marketing Emails — check the Performance tab of each affected email',
-          'Review the bounced contacts list — are these old, imported, or purchased addresses?',
-          'Run a list cleanup: remove contacts with no engagement in 12+ months',
-          'Use double opt-in on all new form submissions going forward'
+          'Marketing Emails → open each high-bounce email → Performance tab → download bounced contacts',
+          'Create a suppression list from all hard-bounced addresses — never email these again',
+          'Trace where these contacts came from — old import, purchased list, or a specific form?',
         ]
       });
     }
 
-    // Low open rate emails
-    const lowOpen = sentEmails.filter(e => {
-      const stats = e.stats || e.counters || {};
-      const sent = stats.sent || stats.delivered || 0;
-      const opens = stats.open || stats.opened || 0;
-      return sent > 500 && opens / sent * 100 < 15;
-    });
-
-    if (lowOpen.length > 3) {
-      issues.push({
-        severity: 'info',
-        title: lowOpen.length + ' marketing emails below 15% open rate — subject lines or list targeting needs work',
-        description: 'Industry benchmark for marketing email open rates is 20-25%. Consistently low open rates indicate subject line problems, wrong audience targeting, or sending frequency issues.',
-        impact: 'Low engagement · wasted sends · risk of contacts unsubscribing',
-        dimension: 'Marketing',
-        guide: [
-          'Test subject lines with A/B testing on your next 3 sends',
-          'Segment your list — send to engaged contacts first to protect sender score',
-          'Check send frequency — are you sending too often?',
-          'Preview text should complement subject, not repeat it'
-        ]
-      });
-    }
-
-    // Stale drafts
+    // ── Stale drafts ──
     const staleDrafts = marketingEmails.filter(e => {
-      const isDraft = e.state === 'DRAFT' || e.currentState === 'DRAFT';
+      const isDraft = ['DRAFT'].includes(String(e.state||e.currentState||'').toUpperCase());
       const updated = e.updatedAt || e.updated;
       return isDraft && updated && (now - new Date(updated).getTime()) / DAY > 90;
     });
-
     if (staleDrafts.length > 5) {
       issues.push({
         severity: 'info',
-        title: staleDrafts.length + ' marketing email drafts untouched for 90+ days',
-        description: 'Stale drafts clutter the email tool and often represent abandoned campaigns. They can confuse team members and inflate your email count metrics.',
-        impact: 'Portal clutter · team confusion · abandoned campaigns never completed',
+        title: `${staleDrafts.length} marketing email drafts untouched for 90+ days — portal clutter`,
+        description: 'Stale drafts represent abandoned campaigns. They clutter the email tool, confuse new team members, and make it harder to find active work.',
+        impact: `${staleDrafts.length} abandoned email drafts · portal complexity inflated`,
         dimension: 'Marketing',
-        guide: [
-          'Marketing Emails — filter by Draft status',
-          'Review each: is it still needed?',
-          'Delete or archive stale drafts to keep the email tool clean'
-        ]
+        guide: ['Marketing Emails → filter by Draft → sort by Last Updated ascending', 'Delete or archive any draft not touched in 90+ days', 'Document active drafts with a naming convention: [Campaign Name] [Date] [Owner]']
       });
     }
   }
@@ -5847,19 +6215,46 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   if (criticalCount >= 3 && overallScore > 71) overallScore = 71;
   if (criticalCount >= 6 && overallScore > 59) overallScore = 59;
 
-        // ── WASTE ESTIMATE ───────────────────────────────────────────────────────────
-  // Conservative benchmarks: HubSpot billing + industry opportunity cost data
-  const wasteDupes         = Math.round(dupes * 0.45);                          // Billing tier inflation
-  const wasteStalledDeals  = Math.round(stalledVal * 0.02);                     // 2% of stalled pipeline/mo
-  const wasteDeadWorkflows = Math.round(deadWf.length * 22);                    // Rep time + missed automation
-  const wasteGhostSeats    = Math.round(inactiveUsers.length * 75);             // ~$75/seat/mo HubSpot avg
-  const wasteNoEmail       = Math.round(noEmail.length * 1.2);                  // Missed marketing value
-  const wasteOverdueInv    = invoices.length > 0 ? Math.round(invoices.filter(i=>String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due').length * 35) : 0;
-  const wasteExpiredQ      = quotes.length > 0   ? Math.round(quotes.filter(q=>String(q.properties?.hs_quote_status||'').toLowerCase()==='expired').length * 28) : 0;
-  const monthlyWaste  = Math.round(
+        // ── WASTE ESTIMATE ─────────────────────────────────────────────────────────
+  // Based on actual HubSpot billing data + industry benchmarks
+  // Free scan is capped at 1,000 contacts — only count waste with hard evidence
+  const isCappedScan = meta.plan === 'free';
+  const isFullScan   = ['deep','pro-audit','pulse','pro','command'].includes(meta.plan);
+
+  // 1. Duplicate contacts → billing tier inflation ($0.45/dupe/mo)
+  const wasteDupes = Math.round(dupes * 0.45);
+
+  // 2. Stalled pipeline → opportunity cost (2%/mo of stalled pipeline VALUE only)
+  //    Only count if deals have actual $ amounts — avoids inflating on $0-amount deals
+  const stalledWithValue = stalled.filter(d => parseFloat(d.properties?.amount||0) > 0);
+  const stalledRealVal   = stalledWithValue.reduce((s,d) => s + parseFloat(d.properties?.amount||0), 0);
+  const wasteStalledDeals = stalledRealVal > 0 ? Math.round(stalledRealVal * 0.02) : 0;
+
+  // 3. Dead workflows → rep time + missed automation ($22/dead wf/mo)
+  const wasteDeadWorkflows = Math.round(deadWf.length * 22);
+
+  // 4. Ghost seats → HubSpot seat cost ($75/inactive seat/mo)
+  const wasteGhostSeats = Math.round(inactiveUsers.length * 75);
+
+  // 5. Contacts with no email → missed marketing nurture value
+  //    Only meaningful on full scans — free scan cap skews this badly
+  const wasteNoEmail = isFullScan ? Math.round(noEmail.length * 1.2) : 0;
+
+  // 6. Overdue invoices → AR collection cost ($35/overdue invoice/mo)
+  const wasteOverdueInv = invoices.length > 0 ? Math.round(overdueInvoices.length * 35) : 0;
+
+  // 7. Expired quotes → recoverable revenue (40% win-back rate × avg deal × 0.40 / 12)
+  const expiredQList = quotes.filter(q => String(q.properties?.hs_quote_status||'').toLowerCase() === 'expired');
+  const wasteExpiredQ = expiredQList.length > 0
+    ? Math.round(expiredQList.length * Math.max(avgDealSize, 500) * 0.40 / 12)
+    : 0;
+
+  const monthlyWaste = Math.round(
     wasteDupes + wasteStalledDeals + wasteDeadWorkflows +
     wasteGhostSeats + wasteNoEmail + wasteOverdueInv + wasteExpiredQ
   );
+  // Store breakdown for revenue leaks page
+  const wasteBreakdown = { wasteDupes, wasteStalledDeals, wasteDeadWorkflows, wasteGhostSeats, wasteNoEmail, wasteOverdueInv, wasteExpiredQ, isCappedScan };
 
   const totalRecordsScanned =
     contacts.length + companies.length + deals.length + tickets.length +
@@ -5968,6 +6363,17 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
           return !last || (now-new Date(last).getTime())/DAY >= 90;
         }).length,
         contactsWithDeals: contacts.filter(c=>c.properties?.num_contacted_notes > 0).length,
+        contactsNoFirstName: contacts.filter(c=>!c.properties?.firstname||c.properties.firstname.trim()==='').length,
+        contactsWithPersona: contacts.filter(c=>c.properties?.hs_persona&&c.properties.hs_persona!=='').length,
+        contactsNoCompanyAssoc: contacts.filter(c=>!c.properties?.associatedcompanyid&&!c.properties?.num_associated_companies).length,
+        contactsBySource: (() => {
+          const src = {};
+          contacts.forEach(c => {
+            const s = c.properties?.hs_analytics_source || 'Unknown';
+            src[s] = (src[s]||0) + 1;
+          });
+          return Object.entries(src).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([s,n])=>({source:s,count:n}));
+        })(),
 
         // ── Invoice intelligence ──────────────────────────────────
         unpaidInvoices: invoices.filter(i=>
@@ -5990,6 +6396,8 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         companiesCount: companies.length,
         companiesWithRevenue: companies.filter(c=>parseFloat(c.properties?.annualrevenue||0)>0).length,
         companiesNoOwner: companies.filter(c=>!c.properties?.hubspot_owner_id).length,
+        companiesNoDomain: companies.filter(c=>!c.properties?.domain||c.properties.domain.trim()==='').length,
+        companiesNoContacts: companies.filter(c=>parseInt(c.properties?.num_associated_contacts||0)===0).length,
 
         // ── Carts & Communications ───────────────────────────────────────
         cartCount: carts.length,
@@ -6003,24 +6411,91 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
 
         // ── Marketing Emails ──────────────────────────────────────────────
         marketingEmailCount: marketingEmails.length,
-        publishedEmails: marketingEmails.filter(e => e.state === 'PUBLISHED' || e.currentState === 'PUBLISHED').length,
-        draftEmails: marketingEmails.filter(e => e.state === 'DRAFT' || e.currentState === 'DRAFT').length,
-        avgOpenRate: marketingEmails.length > 0
-          ? Math.round(marketingEmails.reduce((sum, e) => {
-              const stats = e.stats || e.counters || {};
-              const sent = stats.sent || stats.delivered || 0;
-              const opens = stats.open || stats.opened || 0;
-              return sum + (sent > 0 ? opens / sent * 100 : 0);
-            }, 0) / marketingEmails.filter(e => {
-              const stats = e.stats || e.counters || {};
-              return (stats.sent || stats.delivered || 0) > 0;
-            }).length || 1)
-          : 0,
+        publishedEmails: marketingEmails.filter(e => ['PUBLISHED','SENT'].includes(String(e.state||e.currentState||'').toUpperCase())).length,
+        draftEmails: marketingEmails.filter(e => String(e.state||e.currentState||'').toUpperCase() === 'DRAFT').length,
+        scheduledEmails: marketingEmails.filter(e => String(e.state||e.currentState||'').toUpperCase() === 'SCHEDULED').length,
+
+        // Totals across all sent emails
+        emailTotalSent: (() => {
+          return marketingEmails.reduce((sum, e) => {
+            const s = e.stats || e.counters || {};
+            return sum + (s.sent || s.delivered || 0);
+          }, 0);
+        })(),
+
+        // Avg open rate (only emails with >100 sends)
+        avgOpenRate: (() => {
+          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
+          if (!sent.length) return 0;
+          const total = sent.reduce((sum, e) => {
+            const s = e.stats || e.counters || {};
+            const n = s.sent || s.delivered || 0;
+            const o = s.open || s.opened || s.opens || 0;
+            return sum + (n > 0 ? o / n * 100 : 0);
+          }, 0);
+          return Math.round(total / sent.length * 10) / 10;
+        })(),
+
+        // Avg click rate (CTR)
+        avgClickRate: (() => {
+          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
+          if (!sent.length) return 0;
+          const total = sent.reduce((sum, e) => {
+            const s = e.stats || e.counters || {};
+            const n = s.sent || s.delivered || 0;
+            const c = s.click || s.clicks || s.uniqueClicks || 0;
+            return sum + (n > 0 ? c / n * 100 : 0);
+          }, 0);
+          return Math.round(total / sent.length * 10) / 10;
+        })(),
+
+        // Avg bounce rate
+        avgBounceRate: (() => {
+          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
+          if (!sent.length) return 0;
+          const total = sent.reduce((sum, e) => {
+            const s = e.stats || e.counters || {};
+            const n = s.sent || s.delivered || 0;
+            const b = s.bounce || s.bounced || s.hardBounced || 0;
+            return sum + (n > 0 ? b / n * 100 : 0);
+          }, 0);
+          return Math.round(total / sent.length * 100) / 100;
+        })(),
+
+        // Avg unsubscribe rate
+        avgUnsubRate: (() => {
+          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
+          if (!sent.length) return 0;
+          const total = sent.reduce((sum, e) => {
+            const s = e.stats || e.counters || {};
+            const n = s.sent || s.delivered || 0;
+            const u = s.unsubscribed || s.unsubscribe || s.optOut || 0;
+            return sum + (n > 0 ? u / n * 100 : 0);
+          }, 0);
+          return Math.round(total / sent.length * 100) / 100;
+        })(),
+
+        // High bounce emails (>5% bounce rate with >100 sends)
         highBounceEmails: marketingEmails.filter(e => {
-          const stats = e.stats || e.counters || {};
-          const sent = stats.sent || stats.delivered || 0;
-          const bounced = stats.bounced || stats.hardBounced || 0;
-          return sent > 100 && bounced / sent > 0.05;
+          const s = e.stats || e.counters || {};
+          const n = s.sent || s.delivered || 0;
+          const b = s.bounce || s.bounced || s.hardBounced || 0;
+          return n > 100 && b / n > 0.05;
+        }).length,
+
+        // Low open rate emails (<15% with >500 sends)
+        lowOpenEmails: marketingEmails.filter(e => {
+          const s = e.stats || e.counters || {};
+          const n = s.sent || s.delivered || 0;
+          const o = s.open || s.opened || s.opens || 0;
+          return n > 500 && o / n * 100 < 15;
+        }).length,
+
+        // Stale drafts (untouched 90+ days)
+        staleDraftEmails: marketingEmails.filter(e => {
+          const isDraft = ['DRAFT'].includes(String(e.state||e.currentState||'').toUpperCase());
+          const updated = e.updatedAt || e.updated;
+          return isDraft && updated && (now - new Date(updated).getTime()) / DAY > 90;
         }).length,
 
         // ── Sequences & Campaigns ─────────────────────────────────────────
@@ -6052,6 +6527,52 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         // ── Conversations ─────────────────────────────────────────────────
         openConversations: conversations.filter(c=>String(c.status||'').toUpperCase()==='OPEN').length,
         totalConversations: conversations.length,
+
+        // ── Ticket Health ──────────────────────────────────────────────────
+        ticketsByPriority: (() => {
+          const byPri = { high:0, medium:0, low:0, none:0 };
+          tickets.forEach(t => {
+            const p = String(t.properties?.hs_ticket_priority||'').toLowerCase();
+            if (p === 'high') byPri.high++;
+            else if (p === 'medium') byPri.medium++;
+            else if (p === 'low') byPri.low++;
+            else byPri.none++;
+          });
+          return byPri;
+        })(),
+        openTickets: tickets.filter(t => {
+          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          return !['closed','resolved','4'].includes(s);
+        }).length,
+        ticketsOver3Days: tickets.filter(t => {
+          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const isOpen = !['closed','resolved','4'].includes(s);
+          return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 3;
+        }).length,
+        ticketsOver7Days: tickets.filter(t => {
+          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const isOpen = !['closed','resolved','4'].includes(s);
+          return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 7;
+        }).length,
+        ticketsUnassigned: tickets.filter(t => {
+          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const isOpen = !['closed','resolved','4'].includes(s);
+          return isOpen && !t.properties?.hubspot_owner_id;
+        }).length,
+        avgTicketAgeOpenDays: (() => {
+          const open = tickets.filter(t => {
+            const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+            return !['closed','resolved','4'].includes(s);
+          });
+          if (!open.length) return 0;
+          const total = open.reduce((sum,t) => sum + (now - new Date(t.properties?.createdate||0).getTime()) / DAY, 0);
+          return Math.round(total / open.length);
+        })(),
+        ticketHighPriorityOpen: tickets.filter(t => {
+          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const p = String(t.properties?.hs_ticket_priority||'').toLowerCase();
+          return !['closed','resolved','4'].includes(s) && p === 'high';
+        }).length,
 
         // ── Multi-currency ────────────────────────────────────────────────
         hasMultiCurrency: currencies.length > 1,
@@ -6138,7 +6659,9 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       grade: overallScore>=85?'Excellent':overallScore>=72?'Good':overallScore>=55?'Needs Attention':'Critical',
       criticalCount, warningCount, infoCount, monthlyWaste,
       totalContacts: contacts.length, totalDeals: deals.length, totalWorkflows: workflows.length,
-      checksRun: 210, recordsScanned: totalRecordsScanned
+      checksRun: 210, recordsScanned: totalRecordsScanned,
+      wasteBreakdown,
+      isCappedScan,
     },
     scores, issues
   };
