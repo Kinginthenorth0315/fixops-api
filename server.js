@@ -2804,6 +2804,9 @@ const buildAuthUrl = (req, res, params) => {
       'crm.objects.feedback_submissions.read',
       'crm.objects.leads.read',
       'crm.objects.custom.read',
+      'crm.objects.carts.read',
+      'crm.objects.marketing_events.read',
+      'crm.pipelines.orders.read',
     ].join(' ');
     const url = new URL('https://app.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
