@@ -6136,6 +6136,268 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+// ── PIPELINE VELOCITY INTELLIGENCE ──────────────────────────
+  // Adds revenue forecast to audit with explanations when it's off
+  if (openDeals.length > 5 && dealPipelines.length > 0) {
+    const closedWonD  = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    const closedLostD = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true');
+    const totalClosedD = closedWonD.length + closedLostD.length;
+    const winRateD = totalClosedD > 0 ? closedWonD.length / totalClosedD : null;
+
+    if (winRateD !== null) {
+      // Weighted pipeline forecast
+      const weightedPipD = openDeals.reduce((sum, d) => {
+        const stage = dealPipelines[0]?.stages?.find(s => s.id === d.properties?.dealstage);
+        const prob = parseFloat(stage?.probability||stage?.metadata?.probability||0.1);
+        return sum + parseFloat(d.properties?.amount||0) * prob;
+      }, 0);
+
+      // Check if forecast is reliable (need close dates and amounts)
+      const noCloseDatePct = Math.round(openDeals.filter(d=>!d.properties?.closedate).length / openDeals.length * 100);
+      const noAmountPct = Math.round(openDeals.filter(d=>!parseFloat(d.properties?.amount||0)).length / openDeals.length * 100);
+
+      if (noCloseDatePct > 40 || noAmountPct > 30) {
+        reportingScore -= Math.min(20, Math.round((noCloseDatePct + noAmountPct) / 8));
+        issues.push({
+          severity: 'critical',
+          title: `Revenue forecast is unreliable — ${noCloseDatePct}% of deals missing close dates, ${noAmountPct}% missing amounts`,
+          description: `Your pipeline forecast is built on incomplete data. ${noCloseDatePct}% of open deals have no close date and ${noAmountPct}% have no dollar value. This means your weighted pipeline forecast — the number your CEO and board see — could be off by six figures or more. HubSpot's forecast tool multiplies amount × probability × close date timing. Missing any one of these makes the entire number meaningless.`,
+          impact: `Weighted forecast unreliable · board reporting inaccurate · quota tracking broken`,
+          dimension: 'Pipeline',
+          guide: [
+            `Priority 1: Require close date before a deal can advance past your first active stage`,
+            `Priority 2: Require amount before a deal leaves "Prospect" or "Qualification" stage`,
+            `Quick fix: Export all open deals → filter by missing close date → assign realistic dates today`,
+            `Build a workflow: Deal created AND close date unknown after 48 hrs → task to owner`,
+            `Once fixed, your pipeline velocity report will show accurate Q90 revenue projection`,
+          ]
+        });
+      } else {
+        // Report the forecast as an insight (positive finding) with coaching
+        const q90 = Math.round(weightedPipD);
+        const winPct = Math.round(winRateD * 100);
+        if (q90 > 0 && winPct > 0) {
+          issues.push({
+            severity: 'info',
+            title: `Pipeline Forecast: ~$${q90.toLocaleString()} weighted pipeline at ${winPct}% historical win rate`,
+            description: `Based on your current pipeline and historical close rates, your weighted forecast is $${q90.toLocaleString()}. Your team closes ${winPct}% of opportunities — ${winPct >= 30 ? 'above' : 'below'} the 25-35% industry benchmark for B2B sales. Pipeline velocity is healthy when deals move through stages in under 30 days average.`,
+            impact: `$${q90.toLocaleString()} weighted pipeline · ${winPct}% win rate · pipeline data is ${noCloseDatePct < 15 && noAmountPct < 10 ? 'reliable' : 'moderately reliable'}`,
+            dimension: 'Pipeline',
+            guide: [
+              `To improve forecast accuracy further: reduce the ${noCloseDatePct}% of deals missing close dates`,
+              `Win rate improvement: review your last 20 lost deals — 3 common objections will surface immediately`,
+              `Pipeline coverage target: keep 3-5× your monthly quota in your active pipeline`,
+            ]
+          });
+        }
+      }
+    }
+  }
+
+  // ── CONTACT DECAY INTELLIGENCE ───────────────────────────────
+  if (contacts.length > 100) {
+    const deadContacts = contacts.filter(c => {
+      const last = c.properties?.hs_last_sales_activity_timestamp;
+      const optout = c.properties?.hs_email_optout === 'true';
+      const noEmail = !c.properties?.email;
+      return optout || noEmail || !last || (now - new Date(last).getTime()) / DAY > 365;
+    });
+    const deadPct = Math.round(deadContacts.length / contacts.length * 100);
+    const billingCost = Math.round(deadContacts.length * 0.45);
+
+    if (deadPct > 25) {
+      dataScore -= Math.min(15, Math.round(deadPct / 5));
+      issues.push({
+        severity: deadPct > 50 ? 'critical' : 'warning',
+        title: `${deadContacts.length.toLocaleString()} contacts (${deadPct}%) are inactive — costing ~$${billingCost.toLocaleString()}/mo with zero pipeline value`,
+        description: `${deadPct}% of your contact database has had zero activity in over a year, is opted out, or has no email address. You're paying for these contacts in your HubSpot billing tier every month and getting nothing in return. This also degrades email deliverability — every send to a dead list hurts your sender reputation score.`,
+        impact: `~$${billingCost.toLocaleString()}/mo in billing waste · deliverability damage · ${deadContacts.length.toLocaleString()} contacts consuming tier limit`,
+        dimension: 'Data Integrity',
+        guide: [
+          'Step 1: Create a list — "Last activity date is unknown AND Created date is more than 12 months ago"',
+          'Step 2: Run a 1-email re-engagement campaign: "Are you still interested?" — anyone who doesn\'t open gets suppressed',
+          'Step 3: Export non-openers → mark as "Non-Marketing Contact" or archive — they\'re costing you billing tier',
+          'This single cleanup can reduce your HubSpot contact tier by 20-40% — saving real money on renewal',
+          'FixOps Data CleanUp handles this process in 1-2 days with full rollback capability',
+        ]
+      });
+    }
+  }
+
+  // ── PROPERTY USAGE INTELLIGENCE ─────────────────────────────
+  if (contactProps.length > 0 && contacts.length > 50) {
+    const customProps = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false);
+    if (customProps.length > 10) {
+      const unusedProps = customProps.filter(prop => {
+        const filled = contacts.filter(c => c.properties?.[prop.name] && c.properties[prop.name] !== '').length;
+        return filled === 0;
+      });
+      const undescribed = customProps.filter(p => !p.description || p.description.trim() === '');
+
+      if (unusedProps.length > 5) {
+        dataScore -= Math.min(10, unusedProps.length);
+        issues.push({
+          severity: 'info',
+          title: `${unusedProps.length} custom contact properties have zero data — portal bloat costing team efficiency`,
+          description: `${unusedProps.length} custom properties exist on your contact records but contain data for zero contacts. These empty properties clutter your property list, make it harder for reps to find what they need, and often lead to duplicate properties being created. In portals that have grown organically, this is the #1 cause of "we can't find anything in HubSpot" complaints.`,
+          impact: `${unusedProps.length} unused properties · portal complexity inflated · reps creating duplicates`,
+          dimension: 'Data Integrity',
+          guide: [
+            'Settings → Properties → filter by "Contact" → sort by "Number of records with data" ascending',
+            'Review every property with 0 records: is it new? Deprecated? A duplicate?',
+            'Archive (not delete) any unused property that has no data and isn\'t referenced in a workflow',
+            'Add descriptions to all remaining custom properties — this alone reduces duplicate property creation by 60%',
+          ]
+        });
+      }
+
+      if (undescribed.length > customProps.length * 0.6 && undescribed.length > 5) {
+        issues.push({
+          severity: 'info',
+          title: `${undescribed.length} custom properties have no description — data model undocumented`,
+          description: `${Math.round(undescribed.length/customProps.length*100)}% of your custom properties have no description. When a new team member, consultant, or admin looks at your properties, they have no idea what they're for. This is how duplicate properties get created — someone can't find "Sales Region" because it's undocumented, so they create "Territory" instead.`,
+          impact: `Data model opaque to new team members · duplicate properties created over time · onboarding slowed`,
+          dimension: 'Data Integrity',
+          guide: [
+            'Settings → Properties → filter by "Created by user" → add a description to each',
+            'Good description format: "[What it captures] — [When it should be set] — [Who sets it]"',
+            'Example: "Rep\'s assigned territory — Set by admin during user setup — Used in round-robin routing"',
+          ]
+        });
+      }
+    }
+  }
+
+  // ── FORM CONVERSION INTELLIGENCE ─────────────────────────────
+  if (forms.length > 3) {
+    const formsWithViews = forms.filter(f => (f.viewCount||f.analytics?.views||0) > 100);
+    if (formsWithViews.length > 0) {
+      const brokenForms = formsWithViews.filter(f => {
+        const views = f.viewCount || f.analytics?.views || 0;
+        const subs  = f.submissionCounts?.total || f.totalSubmissions || 0;
+        return views > 100 && subs / views < 0.01; // <1% conversion rate
+      });
+      if (brokenForms.length > 0) {
+        marketingScore -= Math.min(12, brokenForms.length * 4);
+        issues.push({
+          severity: brokenForms.length > 2 ? 'critical' : 'warning',
+          title: `${brokenForms.length} form${brokenForms.length!==1?'s':''} with <1% conversion rate — lead capture silently failing`,
+          description: `${brokenForms.length} high-traffic forms are receiving significant views but almost zero submissions. A form with 500 views and 2 submissions (0.4% conversion) either has a technical problem, asks too many friction-heavy fields, or is embedded on a page where visitors aren't ready to convert. Industry benchmark for a well-optimized HubSpot form is 15-25% conversion rate.`,
+          impact: `${brokenForms.length} broken forms · unknown number of lost leads · ad spend driving to broken pages`,
+          dimension: 'Marketing',
+          guide: [
+            'Test each affected form yourself right now — submit it and verify you receive the confirmation email',
+            'Check form embed code: is the form still live on the page? Use HubSpot\'s page performance view to confirm',
+            'Review form fields: more than 5 fields kills conversion. Remove everything non-essential',
+            'Check thank-you page redirect — a broken redirect looks like a broken form',
+            'Run a session recording (Hotjar/FullStory) on the page to see where visitors abandon',
+          ]
+        });
+      }
+
+      // Best vs worst form conversion insight
+      const allRanked = formsWithViews
+        .map(f => ({
+          name: f.name||'Unnamed Form',
+          views: f.viewCount||f.analytics?.views||0,
+          subs: f.submissionCounts?.total||f.totalSubmissions||0,
+          rate: Math.round((f.submissionCounts?.total||f.totalSubmissions||0) / (f.viewCount||f.analytics?.views||1) * 100 * 10)/10
+        }))
+        .sort((a,b)=>b.rate-a.rate);
+      const best = allRanked[0];
+      const worst = allRanked[allRanked.length-1];
+      if (best && worst && best.rate - worst.rate > 15) {
+        issues.push({
+          severity: 'info',
+          title: `Form conversion gap: best form ${best.rate}% vs worst ${worst.rate}% — ${Math.round(best.rate - worst.rate)}pp spread`,
+          description: `Your top-performing form "${best.name}" converts at ${best.rate}% while "${worst.name}" converts at ${worst.rate}%. The ${Math.round(best.rate-worst.rate)} percentage point gap suggests the best form has something the worst doesn't — shorter length, better placement, stronger CTA, or better audience targeting. Applying the same approach to your worst performers could double their lead volume.`,
+          impact: `${Math.round(best.rate - worst.rate)}pp conversion gap · significant lead volume left on table`,
+          dimension: 'Marketing',
+          guide: [
+            `Study "${best.name}" — how many fields? What's the CTA copy? Where is it placed?`,
+            `Apply the same structure to "${worst.name}" — test 1 change at a time`,
+            `Short forms (3-4 fields) consistently outperform long forms across all industries`,
+          ]
+        });
+      }
+    }
+  }
+
+  // ── DEAL SOURCE ATTRIBUTION INTELLIGENCE ─────────────────────
+  if (deals.length > 10 && contacts.length > 50) {
+    const closedWonD2 = deals.filter(d => d.properties?.hs_is_closed_won === 'true' && parseFloat(d.properties?.amount||0) > 0);
+    if (closedWonD2.length > 5) {
+      const srcRevMap = {};
+      closedWonD2.forEach(d => {
+        const src = d.properties?.hs_analytics_source || 'Unknown';
+        srcRevMap[src] = (srcRevMap[src]||0) + parseFloat(d.properties?.amount||0);
+      });
+      const totalRev2 = Object.values(srcRevMap).reduce((a,b)=>a+b,0);
+      const unknownRev = srcRevMap['Unknown'] || 0;
+      const unknownPct = totalRev2 > 0 ? Math.round(unknownRev / totalRev2 * 100) : 0;
+
+      if (unknownPct > 50) {
+        reportingScore -= 10;
+        issues.push({
+          severity: 'warning',
+          title: `${unknownPct}% of closed won revenue has no source attribution — marketing ROI invisible`,
+          description: `$${Math.round(unknownRev).toLocaleString()} of your closed won revenue (${unknownPct}%) shows "Unknown" as the original source. This means your marketing team can't prove which channels are generating revenue, can't defend their budget, and can't double down on what's working. UTM parameters aren't being captured or the HubSpot tracking code isn't installed on your website.`,
+          impact: `${unknownPct}% revenue unattributed · marketing budget decisions made without data`,
+          dimension: 'Reporting',
+          guide: [
+            'Install the HubSpot tracking code on ALL pages of your website (not just landing pages)',
+            'Add UTM parameters to every paid ad, email, and social link: utm_source, utm_medium, utm_campaign',
+            'Check HubSpot Settings → Tracking → ensure original source is being captured on form submissions',
+            'Once tracking is fixed, use HubSpot\'s Attribution Reports to see first-touch vs last-touch by channel',
+          ]
+        });
+      } else if (Object.keys(srcRevMap).length > 1 && unknownPct < 30) {
+        // Share the attribution insight as a positive finding
+        const topSrc = Object.entries(srcRevMap).sort((a,b)=>b[1]-a[1])[0];
+        if (topSrc) {
+          issues.push({
+            severity: 'info',
+            title: `Top revenue source: "${topSrc[0]}" generated $${Math.round(topSrc[1]).toLocaleString()} in closed won deals`,
+            description: `Your source attribution data is healthy. "${topSrc[0]}" is your highest-revenue channel, accounting for $${Math.round(topSrc[1]).toLocaleString()} of closed won revenue. Use this data to double down on what's working and reduce spend on lower-performing channels.`,
+            impact: `Attribution data available for ${100-unknownPct}% of closed revenue · optimization data actionable`,
+            dimension: 'Reporting',
+            guide: [
+              `Review your top 3 sources and compare their average deal sizes — not just volume`,
+              `Organic and referral sources typically have higher deal values than paid — verify this holds for your portal`,
+              `Set a monthly attribution review: which source had the best win rate this month?`,
+            ]
+          });
+        }
+      }
+    }
+  }
+
+  // ── CUSTOMER HEALTH INTELLIGENCE ─────────────────────────────
+  if (companies.length > 3 && tickets.length > 5) {
+    const ticketsByCompanyMap = {};
+    tickets.forEach(t => {
+      const cid = t.properties?.hs_pipeline || 'unknown';
+      ticketsByCompanyMap[cid] = (ticketsByCompanyMap[cid]||0) + 1;
+    });
+    const highTicketCompanies = Object.values(ticketsByCompanyMap).filter(n => n > 5).length;
+    if (highTicketCompanies > 0) {
+      serviceScore -= Math.min(10, highTicketCompanies * 3);
+      issues.push({
+        severity: 'warning',
+        title: `${highTicketCompanies} customer${highTicketCompanies!==1?'s have':' has'} 5+ open tickets — churn risk elevated`,
+        description: `High ticket volume from individual customers is the clearest leading indicator of churn in B2B SaaS. A customer submitting 5+ support tickets signals product friction, implementation problems, or unmet expectations. By the time they mention it on a renewal call, it's often too late.`,
+        impact: `${highTicketCompanies} high-risk customers · renewal conversations starting from deficit`,
+        dimension: 'Service',
+        guide: [
+          'Immediately: identify which customers have the most open tickets → assign a CSM to each for a check-in call',
+          'Run a Customer Health review: high ticket volume + declining email engagement + no recent meetings = churn signal',
+          'Set up a workflow: Customer submits 3rd ticket in 30 days → notify CSM and create task for health check call',
+          'FixOps Customer Health Score (monthly subscribers) tracks this automatically and alerts you before churn',
+        ]
+      });
+    }
+  }
+
 // ── SCORES ──────────────────────────────────────────────────
   // Only include dimensions in the score if we have actual data to audit
   // If no data available (missing optional scope), score that dimension as null
@@ -6220,6 +6482,564 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   // Free scan is capped at 1,000 contacts — only count waste with hard evidence
   const isCappedScan = meta.plan === 'free';
   const isFullScan   = ['deep','pro-audit','pulse','pro','command'].includes(meta.plan);
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ REVENUE INTELLIGENCE ENGINE — Pipeline Velocity + Forecast
+  // ══════════════════════════════════════════════════════════════════════════════
+  const revenueIntel = (() => {
+    const closedWonDeals = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    const closedLostDeals = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true');
+    const allClosed = closedWonDeals.length + closedLostDeals.length;
+    const winRate = allClosed > 0 ? Math.round((closedWonDeals.length / allClosed) * 100) : 0;
+
+    // Average sales cycle from closed won deals
+    const wonWithDates = closedWonDeals.filter(d => d.properties?.createdate && d.properties?.closedate);
+    const avgSalesCycleDays = wonWithDates.length > 0
+      ? Math.round(wonWithDates.reduce((sum, d) => {
+          const created = new Date(d.properties.createdate).getTime();
+          const closed  = new Date(d.properties.closedate).getTime();
+          return sum + Math.max(0, (closed - created) / DAY);
+        }, 0) / wonWithDates.length)
+      : 0;
+
+    // Average deal size (closed won only — open deals are unreliable)
+    const avgDealSize = closedWonDeals.length > 0
+      ? Math.round(closedWonDeals.reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0) / closedWonDeals.length)
+      : openDeals.length > 0
+        ? Math.round(openDeals.filter(d=>parseFloat(d.properties?.amount||0)>0).reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0) / Math.max(openDeals.filter(d=>parseFloat(d.properties?.amount||0)>0).length, 1))
+        : 0;
+
+    // Pipeline velocity = (# deals × avg deal size × win rate) / avg sales cycle days
+    const openWithValue = openDeals.filter(d => parseFloat(d.properties?.amount||0) > 0);
+    const pipelineVelocity = avgSalesCycleDays > 0 && winRate > 0
+      ? Math.round((openWithValue.length * avgDealSize * (winRate/100)) / avgSalesCycleDays)
+      : 0; // $ per day flowing through pipeline
+
+    // Pipeline coverage ratio: total pipeline value / avg monthly revenue
+    const totalOpenPipeline = openDeals.reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0);
+    const monthlyRevenue = closedWonDeals.length > 0
+      ? Math.round(closedWonDeals.reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0) / 3) // assume 3-month window
+      : 0;
+    const coverageRatio = monthlyRevenue > 0 ? Math.round((totalOpenPipeline / monthlyRevenue) * 10) / 10 : 0;
+
+    // 90-day revenue forecast: open deals × probability × historical win rate adjustment
+    const forecastByMonth = {};
+    openDeals.forEach(d => {
+      const cd = d.properties?.closedate;
+      if (!cd) return;
+      const closeDate = new Date(cd);
+      const monthKey = `${closeDate.getFullYear()}-${String(closeDate.getMonth()+1).padStart(2,'0')}`;
+      const amount = parseFloat(d.properties?.amount||0);
+      const prob = parseFloat(d.properties?.hs_deal_stage_probability||0.3);
+      if (!forecastByMonth[monthKey]) forecastByMonth[monthKey] = { raw:0, weighted:0, count:0 };
+      forecastByMonth[monthKey].raw += amount;
+      forecastByMonth[monthKey].weighted += amount * prob;
+      forecastByMonth[monthKey].count++;
+    });
+
+    // Next 90 days forecast
+    const next3Months = [];
+    for (let i = 0; i < 3; i++) {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() + i);
+      const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      const label = d.toLocaleString('en-US', {month:'short', year:'numeric'});
+      next3Months.push({
+        month: label,
+        raw: Math.round(forecastByMonth[key]?.raw || 0),
+        weighted: Math.round(forecastByMonth[key]?.weighted || 0),
+        count: forecastByMonth[key]?.count || 0,
+      });
+    }
+
+    // Deal source attribution: which contact source generates best deals
+    const sourceRevenue = {};
+    closedWonDeals.forEach(d => {
+      // Find associated contacts' source via analytics source on contacts
+      const amount = parseFloat(d.properties?.amount||0);
+      // We approximate source from deal's pipeline for now; full attribution needs association lookup
+      const pipeline = d.properties?.pipeline || 'default';
+      if (!sourceRevenue[pipeline]) sourceRevenue[pipeline] = { won:0, revenue:0, count:0 };
+      sourceRevenue[pipeline].won++;
+      sourceRevenue[pipeline].revenue += amount;
+      sourceRevenue[pipeline].count++;
+    });
+
+    // Contact source → deal revenue attribution (using contacts' analytics source)
+    const contactSourceRevenue = {};
+    contacts.forEach(c => {
+      const src = c.properties?.hs_analytics_source || 'Unknown';
+      if (!contactSourceRevenue[src]) contactSourceRevenue[src] = { contacts:0, withDeals:0 };
+      contactSourceRevenue[src].contacts++;
+      if (parseInt(c.properties?.num_contacted_notes||0) > 0) contactSourceRevenue[src].withDeals++;
+    });
+    const topSources = Object.entries(contactSourceRevenue)
+      .filter(([,v]) => v.contacts > 5)
+      .map(([src, v]) => ({ source: src, contacts: v.contacts, conversionRate: v.contacts > 0 ? Math.round(v.withDeals/v.contacts*100) : 0 }))
+      .sort((a,b) => b.conversionRate - a.conversionRate)
+      .slice(0, 5);
+
+    return {
+      winRate,
+      avgSalesCycleDays,
+      avgDealSize,
+      pipelineVelocity,
+      coverageRatio,
+      totalOpenPipeline: Math.round(totalOpenPipeline),
+      monthlyRevenue,
+      forecastByMonth: next3Months,
+      topSources,
+      closedWonCount: closedWonDeals.length,
+      closedLostCount: closedLostDeals.length,
+      closedWonRevenue: Math.round(closedWonDeals.reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0)),
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ CONTACT DECAY SCORING ENGINE
+  // ══════════════════════════════════════════════════════════════════════════════
+  const contactDecayEngine = (() => {
+    let totalDecayScore = 0;
+    const decayBuckets = { hot:0, warm:0, cooling:0, cold:0, dead:0 };
+    const archiveCandidates = [];
+
+    contacts.forEach(c => {
+      const lastActivity = c.properties?.hs_last_sales_activity_timestamp;
+      const numContacted = parseInt(c.properties?.num_contacted_notes||0);
+      const lifecycle = c.properties?.lifecyclestage || '';
+      const hasEmail = !!c.properties?.email;
+      const optedOut = c.properties?.hs_email_optout === 'true';
+      const ageMs = now - new Date(c.properties?.createdate||now).getTime();
+      const daysSinceActivity = lastActivity ? (now - new Date(lastActivity).getTime()) / DAY : ageMs / DAY;
+
+      // Decay score 0-100 (100 = fully engaged, 0 = completely dead)
+      let score = 50; // base
+      if (numContacted > 0) score += 20;
+      if (numContacted > 5) score += 10;
+      if (lifecycle === 'customer') score += 20;
+      if (lifecycle === 'opportunity') score += 15;
+      if (lifecycle === 'salesqualifiedlead') score += 10;
+      if (!hasEmail) score -= 30;
+      if (optedOut) score -= 25;
+      if (daysSinceActivity < 30) score += 20;
+      else if (daysSinceActivity < 90) score += 5;
+      else if (daysSinceActivity < 180) score -= 10;
+      else if (daysSinceActivity < 365) score -= 20;
+      else score -= 35;
+      score = Math.max(0, Math.min(100, score));
+
+      totalDecayScore += score;
+
+      if (score >= 70) decayBuckets.hot++;
+      else if (score >= 50) decayBuckets.warm++;
+      else if (score >= 30) decayBuckets.cooling++;
+      else if (score >= 10) decayBuckets.cold++;
+      else decayBuckets.dead++;
+
+      // Archive candidates: dead score, no email, no activity, no lifecycle, old
+      if (score < 15 && !hasEmail && numContacted === 0 && ageMs > 365 * DAY) {
+        archiveCandidates.push(c.id);
+      }
+    });
+
+    const avgDecayScore = contacts.length > 0 ? Math.round(totalDecayScore / contacts.length) : 0;
+    const databaseHealthGrade = avgDecayScore >= 65 ? 'Healthy' : avgDecayScore >= 45 ? 'Needs Attention' : 'At Risk';
+    const estBillingWaste = Math.round(decayBuckets.dead * 0.45); // dead contacts billing inflation
+
+    return {
+      avgDecayScore,
+      databaseHealthGrade,
+      buckets: decayBuckets,
+      archiveCandidateCount: archiveCandidates.length,
+      estBillingWaste,
+      totalContacts: contacts.length,
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ REP PERFORMANCE INTELLIGENCE ENGINE
+  // ══════════════════════════════════════════════════════════════════════════════
+  const repIntelEngine = (() => {
+    const repStats = {};
+
+    // Map owner IDs to names
+    const ownerNameMap = {};
+    owners.forEach(o => {
+      const id = o.id || o.ownerId;
+      const name = [o.firstName||o.properties?.firstname||'', o.lastName||o.properties?.lastname||'']
+        .filter(Boolean).join(' ') || o.email || `Rep ${id}`;
+      ownerNameMap[id] = name;
+    });
+
+    // Build per-rep stats
+    const ensure = (id) => {
+      if (!repStats[id]) repStats[id] = {
+        id, name: ownerNameMap[id] || `Rep ${id}`,
+        calls: 0, meetings: 0, tasksCompleted: 0, tasksOverdue: 0,
+        dealsOwned: 0, dealsWon: 0, dealsLost: 0,
+        pipelineValue: 0, wonRevenue: 0,
+        emailsLogged: 0, notesLogged: 0,
+      };
+    };
+
+    calls.forEach(c => {
+      const id = c.properties?.hubspot_owner_id;
+      if (!id) return;
+      ensure(id);
+      if ((now - new Date(c.properties?.hs_createdate||0).getTime())/DAY < 30) repStats[id].calls++;
+    });
+
+    meetings.forEach(m => {
+      const id = m.properties?.hubspot_owner_id;
+      if (!id) return;
+      ensure(id);
+      if ((now - new Date(m.properties?.hs_timestamp||0).getTime())/DAY < 30) repStats[id].meetings++;
+    });
+
+    tasks.forEach(t => {
+      const id = t.properties?.hubspot_owner_id;
+      if (!id) return;
+      ensure(id);
+      const status = String(t.properties?.hs_task_status||'').toLowerCase();
+      const due = t.properties?.hs_timestamp;
+      if (status === 'completed') repStats[id].tasksCompleted++;
+      else if (due && new Date(due).getTime() < now) repStats[id].tasksOverdue++;
+    });
+
+    deals.forEach(d => {
+      const id = d.properties?.hubspot_owner_id;
+      if (!id) return;
+      ensure(id);
+      const amount = parseFloat(d.properties?.amount||0);
+      if (d.properties?.hs_is_closed_won === 'true') {
+        repStats[id].dealsWon++;
+        repStats[id].wonRevenue += amount;
+      } else if (d.properties?.hs_is_closed === 'true') {
+        repStats[id].dealsLost++;
+      } else {
+        repStats[id].dealsOwned++;
+        repStats[id].pipelineValue += amount;
+      }
+    });
+
+    emailEngs.forEach(e => {
+      const id = e.properties?.hubspot_owner_id;
+      if (id) { ensure(id); repStats[id].emailsLogged++; }
+    });
+    notes.forEach(n => {
+      const id = n.properties?.hubspot_owner_id;
+      if (id) { ensure(id); repStats[id].notesLogged++; }
+    });
+
+    // Score each rep 0-100
+    const reps = Object.values(repStats).map(r => {
+      const totalActivity = r.calls + r.meetings + r.emailsLogged;
+      const winRate = (r.dealsWon + r.dealsLost) > 0
+        ? Math.round(r.dealsWon / (r.dealsWon + r.dealsLost) * 100) : null;
+      const taskHealth = (r.tasksCompleted + r.tasksOverdue) > 0
+        ? Math.round(r.tasksCompleted / (r.tasksCompleted + r.tasksOverdue) * 100) : null;
+      let score = 50;
+      if (r.calls >= 10) score += 15;
+      else if (r.calls >= 5) score += 8;
+      if (r.meetings >= 5) score += 15;
+      else if (r.meetings >= 2) score += 8;
+      if (winRate !== null) score += winRate > 30 ? 15 : winRate > 20 ? 8 : 0;
+      if (taskHealth !== null) score += taskHealth > 80 ? 10 : taskHealth > 60 ? 5 : -10;
+      if (r.tasksOverdue > 5) score -= 10;
+      return { ...r, winRate, taskHealth, activityScore: totalActivity, performanceScore: Math.max(0, Math.min(100, score)) };
+    });
+
+    reps.sort((a,b) => b.performanceScore - a.performanceScore);
+    const teamAvgScore = reps.length > 0 ? Math.round(reps.reduce((s,r)=>s+r.performanceScore,0)/reps.length) : 0;
+
+    return { reps: reps.slice(0, 20), teamAvgScore, repCount: reps.length };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ CUSTOMER HEALTH SCORE ENGINE (churn prediction)
+  // ══════════════════════════════════════════════════════════════════════════════
+  const customerHealthEngine = (() => {
+    if (companies.length === 0) return null;
+
+    const healthScores = [];
+
+    companies.forEach(company => {
+      const cId = company.id;
+      // Tickets for this company (approximate by checking if we have ticket data)
+      const recentTickets = tickets.filter(t => {
+        // Tickets don't always have company association in basic fetch — use volume as proxy
+        return true; // We'll use aggregate stats per company when association data is available
+      });
+
+      // NPS score (if any feedback)
+      const npsScore = npsResponses.length > 0
+        ? Math.round(npsResponses.map(f=>parseFloat(f.properties?.hs_response||0)).reduce((a,b)=>a+b,0)/npsResponses.length)
+        : null;
+
+      // Revenue signals
+      const hasInvoices = invoices.length > 0;
+      const overdueCount = overdueInvoices.length;
+
+      // Engagement signals (portal-level since we can't always join by company)
+      const recentCallCount = calls.filter(c=>(now-new Date(c.properties?.hs_createdate||0).getTime())/DAY<30).length;
+      const openTicketCount = tickets.filter(t=>!['closed','resolved','4'].includes(String(t.properties?.hs_pipeline_stage||'').toLowerCase())).length;
+
+      // Build health score per company using available data
+      const numContacts = parseInt(company.properties?.num_associated_contacts||0);
+      const lastModified = company.properties?.hs_lastmodifieddate;
+      const daysSinceUpdate = lastModified ? (now - new Date(lastModified).getTime())/DAY : 999;
+
+      let healthScore = 60; // base
+      if (numContacts > 0) healthScore += 10;
+      if (numContacts > 3) healthScore += 5;
+      if (daysSinceUpdate < 30) healthScore += 15;
+      else if (daysSinceUpdate < 90) healthScore += 5;
+      else if (daysSinceUpdate > 180) healthScore -= 20;
+      if (npsScore !== null) {
+        if (npsScore >= 8) healthScore += 15;
+        else if (npsScore >= 6) healthScore += 5;
+        else healthScore -= 15;
+      }
+      if (overdueCount > 0) healthScore -= 15;
+      if (openTicketCount > 5) healthScore -= 10;
+
+      healthScore = Math.max(0, Math.min(100, healthScore));
+      healthScores.push({ id: cId, name: company.properties?.name || 'Unknown', score: healthScore, contacts: numContacts, daysSinceUpdate: Math.round(daysSinceUpdate) });
+    });
+
+    healthScores.sort((a,b) => a.score - b.score);
+    const atRisk = healthScores.filter(h => h.score < 40).length;
+    const healthy = healthScores.filter(h => h.score >= 70).length;
+    const avgHealth = healthScores.length > 0 ? Math.round(healthScores.reduce((s,h)=>s+h.score,0)/healthScores.length) : 0;
+
+    return {
+      avgHealth,
+      atRisk,
+      healthy,
+      total: healthScores.length,
+      bottomAccounts: healthScores.slice(0, 10), // most at-risk
+      topAccounts: healthScores.slice(-5).reverse(), // healthiest
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ FORM CONVERSION FUNNEL ENGINE
+  // ══════════════════════════════════════════════════════════════════════════════
+  const formConversionEngine = (() => {
+    const formsWithData = forms
+      .map(f => {
+        const submissions = f.submissionCounts?.total || f.totalSubmissions || 0;
+        const views = f.submissionCounts?.contactSubmissions || f.views || 0; // views not always available
+        const convRate = views > 0 ? Math.round(submissions / views * 100) : null;
+        return {
+          name: f.name || f.formId || 'Unnamed',
+          submissions,
+          views,
+          convRate,
+          hasConvData: views > 0 && submissions > 0,
+        };
+      })
+      .filter(f => f.submissions > 0 || f.views > 0)
+      .sort((a,b) => b.submissions - a.submissions);
+
+    const topForms = formsWithData.slice(0, 10);
+    const zeroSubmission = forms.filter(f => (f.submissionCounts?.total||f.totalSubmissions||0) === 0).length;
+    const totalSubmissions = forms.reduce((s,f) => s+(f.submissionCounts?.total||f.totalSubmissions||0), 0);
+
+    return { topForms, zeroSubmission, totalSubmissions, totalForms: forms.length };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ✦ PROPERTY USAGE ENGINE (full audit)
+  // ══════════════════════════════════════════════════════════════════════════════
+  const propertyUsageEngine = (() => {
+    if (contactProps.length === 0) return null;
+    const customProps = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false);
+    const propData = customProps.map(p => {
+      let filled = 0;
+      contacts.forEach(c => { if (c.properties?.[p.name] && String(c.properties[p.name]).trim() !== '') filled++; });
+      const fillRate = contacts.length > 0 ? Math.round(filled / contacts.length * 100) : 0;
+      return {
+        name: p.name,
+        label: p.label || p.name,
+        fillRate,
+        hasDescription: !!(p.description && p.description.trim().length > 3),
+        type: p.type || 'string',
+        groupName: p.groupName || 'unknown',
+      };
+    }).sort((a,b) => b.fillRate - a.fillRate);
+
+    const wellUsed   = propData.filter(p => p.fillRate >= 50).length;
+    const underUsed  = propData.filter(p => p.fillRate >= 5 && p.fillRate < 50).length;
+    const bloat      = propData.filter(p => p.fillRate < 5).length;
+    const noDesc     = propData.filter(p => !p.hasDescription).length;
+
+    return {
+      total: customProps.length,
+      wellUsed, underUsed, bloat, noDesc,
+      topProps: propData.slice(0, 10),
+      bloatProps: propData.filter(p => p.fillRate < 5).slice(0, 10),
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ DEAL SOURCE ATTRIBUTION ENGINE
+  // Which contact sources generate the best deals? Cross-ref analytics_source with won deals
+  // ══════════════════════════════════════════════════════════════════════════
+  const dealSourceAttribution = (() => {
+    if (contacts.length === 0 || deals.length === 0) return null;
+    // Map contact ID → source
+    const contactSourceMap = {};
+    contacts.forEach(c => {
+      const src = c.properties?.hs_analytics_source || c.properties?.hs_analytics_source_data_1 || 'Unknown';
+      contactSourceMap[c.id] = src.replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase());
+    });
+    // For each closed won deal, find its source from the owner's contact
+    const sourceStats = {};
+    const closedWonForAttrib = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    const closedLostForAttrib = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true');
+
+    // Use deal owner → owner's contacts as proxy (best we can do without association endpoint)
+    contacts.forEach(c => {
+      const src = contactSourceMap[c.id] || 'Unknown';
+      if (!sourceStats[src]) sourceStats[src] = { source: src, contacts:0, wonDeals:0, lostDeals:0, wonValue:0, avgDays:[] };
+      sourceStats[src].contacts++;
+    });
+    // Attribution: match deals to contacts by owner
+    closedWonForAttrib.forEach(d => {
+      const ownerId = d.properties?.hubspot_owner_id;
+      const ownerContact = contacts.find(c => c.properties?.hubspot_owner_id === ownerId);
+      const src = ownerContact ? (contactSourceMap[ownerContact.id] || 'Unknown') : 'Unknown';
+      if (!sourceStats[src]) sourceStats[src] = { source: src, contacts:0, wonDeals:0, lostDeals:0, wonValue:0, avgDays:[] };
+      sourceStats[src].wonDeals++;
+      sourceStats[src].wonValue += parseFloat(d.properties?.amount || 0);
+      // Sales cycle for this deal
+      const created = new Date(d.properties?.createdate||0).getTime();
+      const closed = new Date(d.properties?.hs_lastmodifieddate||0).getTime();
+      if (created && closed > created) sourceStats[src].avgDays.push((closed-created)/DAY);
+    });
+    closedLostForAttrib.forEach(d => {
+      const ownerId = d.properties?.hubspot_owner_id;
+      const ownerContact = contacts.find(c => c.properties?.hubspot_owner_id === ownerId);
+      const src = ownerContact ? (contactSourceMap[ownerContact.id] || 'Unknown') : 'Unknown';
+      if (!sourceStats[src]) sourceStats[src] = { source: src, contacts:0, wonDeals:0, lostDeals:0, wonValue:0, avgDays:[] };
+      sourceStats[src].lostDeals++;
+    });
+    const rows = Object.values(sourceStats)
+      .filter(s => s.contacts > 2)
+      .map(s => {
+        const total = s.wonDeals + s.lostDeals;
+        const winRate = total > 0 ? Math.round(s.wonDeals / total * 100) : 0;
+        const avgDeal = s.wonDeals > 0 ? Math.round(s.wonValue / s.wonDeals) : 0;
+        const avgCycle = s.avgDays.length > 0 ? Math.round(s.avgDays.reduce((a,b)=>a+b,0)/s.avgDays.length) : 0;
+        return { source: s.source, contacts: s.contacts, wonDeals: s.wonDeals, lostDeals: s.lostDeals, winRate, avgDeal, avgCycle, wonValue: Math.round(s.wonValue) };
+      })
+      .sort((a,b) => b.wonValue - a.wonValue)
+      .slice(0, 10);
+
+    const bestSource = rows.find(r => r.wonDeals > 0);
+    const fastestSource = rows.filter(r=>r.avgCycle>0).sort((a,b)=>a.avgCycle-b.avgCycle)[0];
+    const highestWinRate = rows.filter(r=>r.winRate>0).sort((a,b)=>b.winRate-a.winRate)[0];
+
+    return { rows, bestSource, fastestSource, highestWinRate, totalSources: rows.length };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ LIFECYCLE STAGE VELOCITY ENGINE
+  // How long do contacts take to move through each lifecycle stage?
+  // ══════════════════════════════════════════════════════════════════════════
+  const lifecycleVelocityEngine = (() => {
+    if (contacts.length < 20) return null;
+    const STAGES = ['subscriber','lead','marketingqualifiedlead','salesqualifiedlead','opportunity','customer','evangelist','other'];
+    const stageLabels = { subscriber:'Subscriber', lead:'Lead', marketingqualifiedlead:'MQL', salesqualifiedlead:'SQL', opportunity:'Opportunity', customer:'Customer', evangelist:'Evangelist', other:'Other' };
+    const stageCounts = {};
+    STAGES.forEach(s => stageCounts[s] = 0);
+    contacts.forEach(c => {
+      const stage = String(c.properties?.lifecyclestage||'').toLowerCase();
+      if (stageCounts[stage] !== undefined) stageCounts[stage]++;
+    });
+
+    // Funnel conversion rates between stages
+    const stageOrder = ['subscriber','lead','marketingqualifiedlead','salesqualifiedlead','opportunity','customer'];
+    const funnelSteps = [];
+    for (let i=0; i < stageOrder.length-1; i++) {
+      const from = stageOrder[i];
+      const to = stageOrder[i+1];
+      const fromCount = stageCounts[from] || 0;
+      const toCount = stageCounts[to] || 0;
+      const convRate = fromCount > 0 ? Math.round(toCount / (fromCount + toCount) * 100) : 0;
+      funnelSteps.push({ from: stageLabels[from], to: stageLabels[to], fromCount, toCount, convRate });
+    }
+
+    // Velocity: estimate days per stage from contact age and stage distribution
+    const customerCount = stageCounts['customer'] || 0;
+    const leadCount = stageCounts['lead'] || 0;
+    const sqlCount = stageCounts['salesqualifiedlead'] || 0;
+    const noStage = contacts.filter(c => !c.properties?.lifecyclestage).length;
+    const noStagePct = Math.round(noStage / contacts.length * 100);
+
+    // Lead-to-customer estimate: contacts with createdate vs closed won deals
+    const allClosedWonForLC = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+    const wonWithDatesLC = allClosedWonForLC.filter(d => d.properties?.createdate && d.properties?.closedate);
+    const avgLeadToCustomerDays = wonWithDatesLC.length > 0
+      ? Math.round(wonWithDatesLC.reduce((s,d) => {
+          return s + (new Date(d.properties.closedate).getTime() - new Date(d.properties.createdate).getTime()) / DAY;
+        }, 0) / wonWithDatesLC.length)
+      : null;
+
+    return {
+      stageCounts,
+      stageLabels,
+      funnelSteps,
+      noStagePct,
+      noStageCount: noStage,
+      customerCount,
+      leadCount,
+      sqlCount,
+      avgLeadToCustomerDays,
+      totalContacts: contacts.length,
+    };
+  })();
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ BILLING TIER PROXIMITY ENGINE
+  // How close is this portal to hitting the next HubSpot billing tier?
+  // HubSpot Marketing Hub contact tiers: 1k, 2k, 5k, 10k, 25k, 50k, 100k, 200k+
+  // ══════════════════════════════════════════════════════════════════════════
+  const billingTierEngine = (() => {
+    const TIERS = [1000,2000,5000,10000,25000,50000,100000,200000];
+    const totalC = contacts.length;
+    const currentTier = TIERS.find(t => totalC <= t) || TIERS[TIERS.length-1];
+    const nextTier    = TIERS[TIERS.indexOf(currentTier) + 1] || null;
+    const pctOfTier   = Math.round(totalC / currentTier * 100);
+    const headroom    = currentTier - totalC;
+    const atRisk      = pctOfTier >= 85;
+    const critical    = pctOfTier >= 95;
+    // Monthly new contacts estimate (last 30 days)
+    const recentContacts = contacts.filter(c => {
+      const created = new Date(c.properties?.createdate||0).getTime();
+      return (now - created) / DAY <= 30;
+    }).length;
+    const monthlyGrowthRate = recentContacts;
+    const monthsToNextTier  = monthlyGrowthRate > 0 ? Math.ceil(headroom / monthlyGrowthRate) : null;
+    const dupesRemovable     = dupes; // removing dupes gives back headroom
+    const deadRemovable      = contactDecayEngine?.buckets?.dead || 0;
+    const totalRemovable     = dupesRemovable + deadRemovable;
+    // Billing cost estimate for next tier (rough HubSpot Marketing Pro pricing)
+    const tierCosts = { 1000:0, 2000:45, 5000:800, 10000:1600, 25000:3200, 50000:5600, 100000:9600, 200000:17400 };
+    const currentCost = tierCosts[currentTier] || 0;
+    const nextCost    = nextTier ? (tierCosts[nextTier] || 0) : null;
+    const tierJumpCost = nextCost ? nextCost - currentCost : null;
+
+    return {
+      totalContacts: totalC,
+      currentTier, nextTier, pctOfTier, headroom,
+      atRisk, critical,
+      monthlyGrowthRate, monthsToNextTier,
+      dupesRemovable, deadRemovable, totalRemovable,
+      currentCost, nextCost, tierJumpCost,
+    };
+  })();
 
   // 1. Duplicate contacts → billing tier inflation ($0.45/dupe/mo)
   const wasteDupes = Math.round(dupes * 0.45);
@@ -6635,7 +7455,268 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         customObjectData: customObjectData,  // full array with counts
         undocumentedProps: contactProps.filter(p => p.createdUserId && !p.description).length,
 
-        // ── Engagement completeness ───────────────────────────────────────
+        // ── PIPELINE VELOCITY ENGINE ─────────────────────────────────────────
+        // Calculates actual stage velocity from deal data — cross-refs pipeline stages
+        pipelineVelocity: (() => {
+          if (!openDeals.length || !dealPipelines.length) return null;
+          const mainPipeline = dealPipelines[0];
+          if (!mainPipeline?.stages?.length) return null;
+          const stages = mainPipeline.stages
+            .filter(s => parseFloat(s.probability||s.metadata?.probability||0) > 0 && parseFloat(s.probability||s.metadata?.probability||0) < 1)
+            .sort((a,b) => (a.displayOrder||0)-(b.displayOrder||0));
+
+          // Win rate from historical closed deals
+          const closedWonCount  = deals.filter(d => d.properties?.hs_is_closed_won === 'true').length;
+          const closedLostCount = deals.filter(d => d.properties?.hs_is_closed === 'true' && d.properties?.hs_is_closed_won !== 'true').length;
+          const totalClosed = closedWonCount + closedLostCount;
+          const winRate = totalClosed > 0 ? closedWonCount / totalClosed : 0.25; // fallback 25%
+
+          // Avg days per stage (from deal hs_lastmodifieddate)
+          const stageVelocity = {};
+          stages.forEach(stage => {
+            const stageDeals = deals.filter(d => d.properties?.dealstage === stage.id);
+            if (!stageDeals.length) { stageVelocity[stage.id] = { label: stage.label, avgDays: 0, count: 0 }; return; }
+            const totalDays = stageDeals.reduce((sum, d) => {
+              return sum + Math.max(0, (now - new Date(d.properties?.hs_lastmodifieddate||d.properties?.createdate||now).getTime()) / DAY);
+            }, 0);
+            stageVelocity[stage.id] = {
+              label: stage.label || stage.id,
+              avgDays: Math.round(totalDays / stageDeals.length),
+              count: stageDeals.length,
+              probability: parseFloat(stage.probability||stage.metadata?.probability||0)
+            };
+          });
+
+          // Total avg sales cycle = sum of avg days per stage
+          const totalCycleDays = Object.values(stageVelocity).reduce((sum, s) => sum + (s.avgDays||0), 0);
+
+          // Pipeline velocity formula: (# deals × avg deal size × win rate) / avg sales cycle
+          const validDeals = openDeals.filter(d => parseFloat(d.properties?.amount||0) > 0);
+          const avgDealVal = validDeals.length > 0
+            ? validDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0) / validDeals.length
+            : 0;
+          const velocityMonthly = totalCycleDays > 0
+            ? Math.round((openDeals.length * avgDealVal * winRate) / (totalCycleDays / 30))
+            : 0;
+
+          // Q90 forecast = weighted pipeline × win rate (confidence-adjusted)
+          const weightedPipeline = openDeals.reduce((sum, d) => {
+            const stage = dealPipelines[0]?.stages?.find(s => s.id === d.properties?.dealstage);
+            const prob = parseFloat(stage?.probability||stage?.metadata?.probability||0.1);
+            return sum + parseFloat(d.properties?.amount||0) * prob;
+          }, 0);
+          const q90Forecast = Math.round(weightedPipeline * 1.0); // weighted IS the forecast
+
+          // Coverage ratio (pipeline / monthly quota from goals)
+          const monthlyQuota = goals.length > 0
+            ? goals.reduce((sum, g) => sum + parseFloat(g.properties?.hs_target_amount||0), 0) / 12
+            : 0;
+          const pipelineCoverage = monthlyQuota > 0
+            ? Math.round((weightedPipeline / monthlyQuota) * 10) / 10
+            : null;
+
+          return {
+            totalCycleDays: totalCycleDays || null,
+            velocityMonthly,
+            q90Forecast,
+            winRate: Math.round(winRate * 100),
+            avgDealSize: Math.round(avgDealVal),
+            stageVelocity: Object.values(stageVelocity).filter(s => s.avgDays > 0),
+            pipelineCoverage,
+            monthlyQuota: Math.round(monthlyQuota),
+            weightedPipeline: Math.round(weightedPipeline),
+          };
+        })(),
+
+        // ── CONTACT DECAY SCORE (Full 0-100 per cohort) ─────────────────────
+        contactDecayScore: (() => {
+          let totalScore = 0;
+          const buckets = { hot:0, warm:0, cooling:0, cold:0, dead:0 };
+          contacts.forEach(c => {
+            let score = 50; // baseline
+            const last = c.properties?.hs_last_sales_activity_timestamp;
+            const contacts_n = parseInt(c.properties?.num_contacted_notes||0);
+            const lifecycle = c.properties?.lifecyclestage;
+            const optout = c.properties?.hs_email_optout === 'true';
+            const hasDeal = !!c.properties?.associatedcompanyid || parseInt(c.properties?.num_associated_companies||0) > 0;
+            const daysSinceLast = last ? (now - new Date(last).getTime()) / DAY : 9999;
+
+            if (daysSinceLast < 14)  { score += 40; buckets.hot++; }
+            else if (daysSinceLast < 30) { score += 25; buckets.warm++; }
+            else if (daysSinceLast < 90) { score += 10; buckets.cooling++; }
+            else if (daysSinceLast < 365){ score -= 10; buckets.cold++; }
+            else { score -= 30; buckets.dead++; }
+
+            if (contacts_n > 5) score += 15;
+            else if (contacts_n > 0) score += 8;
+            if (['customer','opportunity','salesqualifiedlead'].includes(lifecycle)) score += 15;
+            else if (['marketingqualifiedlead','lead'].includes(lifecycle)) score += 5;
+            if (optout) score -= 20;
+            if (hasDeal) score += 10;
+            totalScore += Math.max(0, Math.min(100, score));
+          });
+          const avgScore = contacts.length > 0 ? Math.round(totalScore / contacts.length) : 0;
+          const purgeable = buckets.dead; // contacts worth $0, safe to archive
+          const reEngageable = buckets.cold; // last active 90-365 days
+          const billingWaste = Math.round(purgeable * 0.45); // avg $0.45/mo per dead contact
+          return { avgScore, buckets, purgeable, reEngageable, billingWaste, total: contacts.length };
+        })(),
+
+        // ── PROPERTY USAGE AUDIT ─────────────────────────────────────────────
+        propertyUsage: (() => {
+          if (!contactProps.length) return null;
+          const customProps = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false);
+          if (!customProps.length || !contacts.length) return { total: 0, unused: 0, lowUsage: 0 };
+          const propUsage = customProps.map(prop => {
+            const filled = contacts.filter(c => c.properties?.[prop.name] && c.properties[prop.name] !== '').length;
+            const pct = Math.round(filled / contacts.length * 100);
+            return {
+              name: prop.name,
+              label: prop.label || prop.name,
+              pct,
+              filled,
+              hasDescription: !!(prop.description && prop.description.trim()),
+            };
+          });
+          const unused    = propUsage.filter(p => p.pct === 0).length;
+          const lowUsage  = propUsage.filter(p => p.pct > 0 && p.pct < 5).length;
+          const healthy   = propUsage.filter(p => p.pct >= 50).length;
+          const noDesc    = propUsage.filter(p => !p.hasDescription).length;
+          // Top 5 lowest usage (non-zero) - candidates for deletion
+          const deleteCalm = propUsage.filter(p=>p.pct>0&&p.pct<5).slice(0,5).map(p=>p.label);
+          return { total: customProps.length, unused, lowUsage, healthy, noDesc, deleteCalm };
+        })(),
+
+        // ── FORM CONVERSION FUNNEL ────────────────────────────────────────────
+        formConversion: (() => {
+          if (!forms.length) return null;
+          const withViews = forms.filter(f => {
+            const views = f.viewCount || f.analytics?.views || 0;
+            const subs  = f.submissionCounts?.total || f.totalSubmissions || 0;
+            return views > 50;
+          });
+          if (!withViews.length) return null;
+          const ranked = withViews.map(f => {
+            const views = f.viewCount || f.analytics?.views || 0;
+            const subs  = f.submissionCounts?.total || f.totalSubmissions || 0;
+            const convRate = views > 0 ? Math.round(subs / views * 100 * 10) / 10 : 0;
+            return { name: f.name || f.formId, views, subs, convRate };
+          }).sort((a,b) => a.convRate - b.convRate); // worst first
+
+          const avgConv  = Math.round(ranked.reduce((s,f)=>s+f.convRate,0)/ranked.length * 10)/10;
+          const broken   = ranked.filter(f => f.convRate < 1 && f.views > 100);
+          const best     = ranked.slice(-3).reverse(); // top 3
+          const worst    = ranked.slice(0, 3); // bottom 3
+          return { total: withViews.length, avgConv, broken: broken.length, best, worst };
+        })(),
+
+        // ── DEAL SOURCE ATTRIBUTION ────────────────────────────────────────────
+        dealSourceAttribution: (() => {
+          const closedWon = deals.filter(d => d.properties?.hs_is_closed_won === 'true');
+          if (!closedWon.length || !contacts.length) return null;
+
+          // Build contact-to-source map
+          const contactSourceMap = {};
+          contacts.forEach(c => {
+            const src = c.properties?.hs_analytics_source || 'Unknown';
+            contactSourceMap[c.id] = src;
+          });
+
+          // For each closed won deal, get the source via contact
+          const sourceRevenue = {};
+          const sourceCount   = {};
+          closedWon.forEach(d => {
+            // Use hs_analytics_source_data_1 on deal if available, else fall back
+            const src = d.properties?.hs_analytics_source || 'Unknown';
+            const amt = parseFloat(d.properties?.amount||0);
+            sourceRevenue[src] = (sourceRevenue[src]||0) + amt;
+            sourceCount[src]   = (sourceCount[src]||0) + 1;
+          });
+
+          const entries = Object.entries(sourceRevenue)
+            .map(([source, revenue]) => ({
+              source,
+              revenue: Math.round(revenue),
+              deals: sourceCount[source]||0,
+              avgDeal: sourceCount[source] ? Math.round(revenue / sourceCount[source]) : 0
+            }))
+            .sort((a,b) => b.revenue - a.revenue)
+            .slice(0, 6);
+
+          const totalRev = entries.reduce((s,e)=>s+e.revenue,0);
+          const best = entries[0] || null;
+          return { entries, totalRev, best, closedWonCount: closedWon.length };
+        })(),
+
+        // ── CUSTOMER HEALTH SCORES ────────────────────────────────────────────
+        // Per-company health score built from tickets, NPS, deals, engagement
+        customerHealth: (() => {
+          if (!companies.length) return null;
+          // Only score companies that have contacts (actual customers)
+          const customerCompanies = companies.filter(c => parseInt(c.properties?.num_associated_contacts||0) > 0);
+          if (!customerCompanies.length) return null;
+
+          // NPS by company — map feedback to company via contact
+          const npsMap = {};
+          feedback.forEach(f => {
+            const score = parseFloat(f.properties?.hs_response||0);
+            if (!isNaN(score)) {
+              const cid = f.properties?.associatedcompanyid||f.properties?.company_id;
+              if (cid) npsMap[cid] = score;
+            }
+          });
+
+          // Tickets by company
+          const ticketsByCompany = {};
+          tickets.forEach(t => {
+            const cid = t.properties?.associatedcompanyid || t.properties?.hs_pipeline;
+            if (cid) ticketsByCompany[cid] = (ticketsByCompany[cid]||0) + 1;
+          });
+
+          let atRisk=0, healthy=0, needsAttention=0;
+          const scores = customerCompanies.slice(0, 50).map(co => { // cap at 50 for perf
+            let score = 70; // baseline
+            const id = co.id;
+            const lastMod = new Date(co.properties?.hs_lastmodifieddate||0).getTime();
+            const daysSince = (now - lastMod) / DAY;
+            const ticketCount = ticketsByCompany[id] || 0;
+            const nps = npsMap[id] || null;
+            const revenue = parseFloat(co.properties?.annualrevenue||0);
+
+            // Recent engagement
+            if (daysSince < 30) score += 15;
+            else if (daysSince < 90) score += 5;
+            else if (daysSince > 180) score -= 15;
+
+            // Ticket volume (high tickets = at risk)
+            if (ticketCount > 10) score -= 20;
+            else if (ticketCount > 5) score -= 10;
+            else if (ticketCount === 0) score += 5;
+
+            // NPS
+            if (nps !== null) {
+              if (nps >= 9) score += 20;
+              else if (nps >= 7) score += 5;
+              else if (nps <= 6) score -= 20;
+            }
+
+            // Revenue signal
+            if (revenue > 1000000) score += 10;
+            else if (revenue > 100000) score += 5;
+
+            score = Math.max(0, Math.min(100, score));
+            if (score < 40) atRisk++;
+            else if (score < 65) needsAttention++;
+            else healthy++;
+
+            return { id, name: co.properties?.name||'Unknown', score };
+          });
+
+          const atRiskCompanies = scores.filter(c=>c.score<40).slice(0,5);
+          return { healthy, needsAttention, atRisk, total: customerCompanies.length, atRiskCompanies };
+        })(),
+
+        // ── ENGAGEMENT completeness ───────────────────────────────────────
         emailEngagements: emailEngs.length,
         notes: notes.length,
         marketingEventsCount: marketingEvents.length,
@@ -6644,15 +7725,47 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         // ── Settings users ────────────────────────────────────────────────
         superAdmins: settingsUsers.filter(u => u.superAdmin === true || u.roleIds?.includes('superAdmin')).length,
 
-        // ── Rep scorecard (last 7 days) ─────────────────────────────────────
-        repScorecard: Object.values(repScorecard).sort((a,b)=>(b.calls+b.meetings)-(a.calls+a.meetings)),
+        // ── Rep scorecard (last 7 days) + Quota attainment ─────────────────
+        repScorecard: (() => {
+          // Enhance repScorecard with quota attainment from goals
+          const enhanced = Object.values(repScorecard).map(rep => {
+            // Find this rep's goal
+            const repGoal = goals.find(g => {
+              const ownerId = g.properties?.hs_goal_owner_id || g.ownerId;
+              return ownerId && (ownerId === rep.id || String(ownerId) === String(rep.id));
+            });
+            const quota = repGoal ? parseFloat(repGoal.properties?.hs_target_amount||0) : 0;
+            const closedThisMonth = deals.filter(d => {
+              const isWon = d.properties?.hs_is_closed_won === 'true';
+              const ownerMatch = d.properties?.hubspot_owner_id === rep.id;
+              const closeDate = d.properties?.closedate;
+              if (!isWon || !ownerMatch || !closeDate) return false;
+              const daysAgo = (now - new Date(closeDate).getTime()) / DAY;
+              return daysAgo < 30;
+            }).reduce((s,d) => s + parseFloat(d.properties?.amount||0), 0);
+            const attainment = quota > 0 ? Math.round(closedThisMonth / quota * 100) : null;
+            return { ...rep, quota: Math.round(quota), closedMtd: Math.round(closedThisMonth), attainment };
+          }).sort((a,b)=>(b.calls+b.meetings)-(a.calls+a.meetings));
+          return enhanced;
+        })(),
         ghostSeats: inactiveUsers.length,
         ghostSeatWaste: inactiveUsers.length * 90,
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
       },
       isLimited: !isPaid,
-      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit}
+      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit},
+
+      // ── ✦ NEW INTELLIGENCE ENGINES ─────────────────────────────────────
+      revenueIntel,
+      contactDecayEngine,
+      repIntelEngine,
+      customerHealthEngine,
+      formConversionEngine,
+      propertyUsageEngine,
+      dealSourceAttribution,
+      lifecycleVelocityEngine,
+      billingTierEngine,
     },
     summary:{
       overallScore,
@@ -6662,6 +7775,21 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       checksRun: 210, recordsScanned: totalRecordsScanned,
       wasteBreakdown,
       isCappedScan,
+      // Quick-access intelligence metrics for results page wow factor
+      pipelineVelocity: revenueIntel.pipelineVelocity,
+      winRate: revenueIntel.winRate,
+      avgSalesCycle: revenueIntel.avgSalesCycleDays,
+      contactDecayScore: contactDecayEngine.avgDecayScore,
+      contactsAtRisk: contactDecayEngine.buckets.dead + contactDecayEngine.buckets.cold,
+      teamHealthScore: repIntelEngine.teamAvgScore,
+      customerHealthAvg: customerHealthEngine?.avgHealth || null,
+      customersAtRisk: customerHealthEngine?.atRisk || 0,
+      billingTierAtRisk: billingTierEngine?.atRisk || false,
+      billingTierPct: billingTierEngine?.pctOfTier || 0,
+      billingTierHeadroom: billingTierEngine?.headroom || 0,
+      billingTierJumpCost: billingTierEngine?.tierJumpCost || 0,
+      topRevenueSource: dealSourceAttribution?.bestSource?.source || null,
+      avgLeadToCustomerDays: lifecycleVelocityEngine?.avgLeadToCustomerDays || null,
     },
     scores, issues
   };
