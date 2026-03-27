@@ -5110,11 +5110,14 @@ async function runFullAudit(token, auditId, meta) {
   }
 
 
-        // ── SUBSCRIPTION HEALTH ────────────────────────────────────────
+  // ── SUBSCRIPTION HEALTH ────────────────────────────────────────
+  const mrrTotal = subscriptions.length > 0
+    ? subscriptions.filter(s=>String(s.properties?.hs_status||'').toLowerCase()==='active')
+        .reduce((s,sub)=>s+parseFloat(sub.properties?.hs_recurring_revenue||0),0)
+    : 0;
   if (subscriptions.length > 0) {
     const activeSubs = subscriptions.filter(sub=>String(sub.properties?.hs_status||'').toLowerCase()==='active');
     const cancelledSubs = subscriptions.filter(sub=>['cancelled','canceled'].includes(String(sub.properties?.hs_status||'').toLowerCase()));
-    const mrrTotal = activeSubs.reduce((s,sub)=>s+parseFloat(sub.properties?.hs_recurring_revenue||0),0);
     const renewNext30 = activeSubs.filter(sub=>{
       const nd = sub.properties?.hs_next_payment_due_date;
       if(!nd) return false;
@@ -5179,8 +5182,9 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── INVOICE HEALTH ───────────────────────────────────────────────
+  // Define outside if block so always available for portalStats/waste calculations
+  const overdueInvoices = invoices.filter(i=>String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due');
   if (invoices.length > 0) {
-    const overdueInvoices = invoices.filter(i=>String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due');
     if (overdueInvoices.length > 0) {
       const overdueRate = Math.round((overdueInvoices.length/invoices.length)*100);
       reportingScore -= Math.min(12, overdueInvoices.length * 3);
@@ -5231,9 +5235,9 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── 7. LISTS — Contact list health ───────────────────────────────────────
+  const staticLists = lists.filter(l => l.listType === 'STATIC' || l.dynamic === false);
+  const emptyLists  = lists.filter(l => (l.metaData?.size || l.size || 0) === 0);
   if (lists.length > 0) {
-    const staticLists = lists.filter(l => l.listType === 'STATIC' || l.dynamic === false);
-    const emptyLists  = lists.filter(l => (l.metaData?.size || l.size || 0) === 0);
     if (emptyLists.length > 5) {
       marketingScore -= Math.min(8, emptyLists.length);
       issues.push({
@@ -5258,8 +5262,8 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── 8. CART ABANDONMENT (ecommerce portals) ─────────────────────────────
+  const abandoned = carts.filter(c => String(c.properties?.hs_cart_status||'').toLowerCase() === 'abandoned');
   if (carts.length > 0) {
-    const abandoned = carts.filter(c => String(c.properties?.hs_cart_status||'').toLowerCase() === 'abandoned');
     if (abandoned.length > 0) {
       const pct = Math.round(abandoned.length / carts.length * 100);
       if (pct > 30) {
@@ -5375,8 +5379,8 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── 10. NPS / CSAT FEEDBACK ───────────────────────────────────────────────
+  const npsResponses = feedback.filter(f => f.properties?.hs_survey_type === 'NPS');
   if (feedback.length > 0) {
-    const npsResponses = feedback.filter(f => f.properties?.hs_survey_type === 'NPS');
     if (npsResponses.length >= 5) {
       const scores2 = npsResponses.map(f => parseFloat(f.properties?.hs_response || 0)).filter(n => !isNaN(n) && n >= 0);
       const promoters = scores2.filter(n => n >= 9).length;
@@ -5505,8 +5509,8 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── 12. LEADS OBJECT (Sales Hub Pro) ─────────────────────────────────────
+  const unownedLeads = leads.filter(l => !l.properties?.hubspot_owner_id);
   if (leads.length > 0) {
-    const unownedLeads = leads.filter(l => !l.properties?.hubspot_owner_id);
     const stalledLeads = leads.filter(l => {
       const created = l.properties?.hs_createdate;
       return created && (now - new Date(created).getTime()) / DAY > 14 &&
@@ -5850,8 +5854,8 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   const wasteDeadWorkflows = Math.round(deadWf.length * 22);                    // Rep time + missed automation
   const wasteGhostSeats    = Math.round(inactiveUsers.length * 75);             // ~$75/seat/mo HubSpot avg
   const wasteNoEmail       = Math.round(noEmail.length * 1.2);                  // Missed marketing value
-  const wasteOverdueInv    = overdueInvoices ? Math.round(overdueInvoices.length * 35) : 0;
-  const wasteExpiredQ      = expiredQuotes   ? Math.round(expiredQuotes.length * 28)   : 0;
+  const wasteOverdueInv    = invoices.length > 0 ? Math.round(invoices.filter(i=>String(i.properties?.hs_invoice_status||'').toLowerCase()==='past_due').length * 35) : 0;
+  const wasteExpiredQ      = quotes.length > 0   ? Math.round(quotes.filter(q=>String(q.properties?.hs_quote_status||'').toLowerCase()==='expired').length * 28) : 0;
   const monthlyWaste  = Math.round(
     wasteDupes + wasteStalledDeals + wasteDeadWorkflows +
     wasteGhostSeats + wasteNoEmail + wasteOverdueInv + wasteExpiredQ
