@@ -687,26 +687,49 @@ const sendPulseEmail = async (email, result, auditId, history, customer) => {
       .slice(0, 3);
 
     const topCriticals = issues.filter(i => i.severity === 'critical').slice(0,3);
-    const prompt = `You are FixOps, a HubSpot intelligence platform. Write a plain-English weekly briefing for ${pi.company || 'this portal'}.
+    const ri = ps.revenueIntel || {};
+    const dec = ps.contactDecayEngine || {};
+    const bil = ps.billingTierEngine || {};
+    const velDelta = ri.pipelineVelocity > 0 ? ri.pipelineVelocity : null;
 
-SCORE: ${s.overallScore}/100 ${scoreDiff !== null ? `(was ${prevScore}, ${scoreDiff >= 0 ? '+' : ''}${scoreDiff} this week)` : '(first scan)'}
-CRITICAL: ${s.criticalCount} | WARNINGS: ${s.warningCount} | WASTE: $${Number(s.monthlyWaste||0).toLocaleString()}/mo
-${dimChanges.length > 0 ? `\nBIGGEST CHANGES:\n${dimChanges.map(d=>`- ${d.label}: ${d.val}/100 (${d.delta>=0?'+':''}${d.delta})`).join('\n')}` : ''}
-TOP ISSUES:\n${topCriticals.map(i=>`- ${i.title}`).join('\n') || '- No critical issues'}
+    // Build a rich data context for the CEO brief
+    const briefContext = [
+      `PORTAL: ${pi.company || 'Unknown'}`,
+      `SCORE: ${s.overallScore}/100${scoreDiff !== null ? ` (${scoreDiff >= 0 ? '+' : ''}${scoreDiff} vs last week)` : ' (first scan)'}`,
+      `CRITICAL ISSUES: ${s.criticalCount} | WARNINGS: ${s.warningCount} | MONTHLY WASTE: $${Number(s.monthlyWaste||0).toLocaleString()}/mo`,
+      newIssues.length > 0 ? `NEW THIS WEEK: ${newIssues.slice(0,3).map(i=>i.title).join('; ')}` : 'NO NEW ISSUES THIS WEEK',
+      resolvedIssues.length > 0 ? `RESOLVED: ${resolvedIssues.slice(0,3).map(i=>i.title).join('; ')}` : '',
+      dimChanges.length > 0 ? `SCORE CHANGES: ${dimChanges.map(d=>`${d.label} ${d.delta>=0?'+':''}${d.delta}`).join(', ')}` : '',
+      velDelta ? `PIPELINE VELOCITY: $${velDelta.toLocaleString()}/day | WIN RATE: ${ri.winRate||0}%` : '',
+      dec.avgDecayScore ? `DATABASE HEALTH: ${dec.avgDecayScore}/100 | ${dec.buckets?.dead||0} dead contacts` : '',
+      bil.atRisk ? `BILLING ALERT: ${bil.pctOfTier}% of ${bil.currentTier?.toLocaleString()} contact tier` : '',
+      topCriticals.length > 0 ? `TOP PRIORITY: ${topCriticals[0].title}` : '',
+    ].filter(Boolean).join('\n');
 
-Write EXACTLY 2-3 sentences. Be direct and expert. State what happened, the biggest driver, and one specific next step with an exact location in HubSpot. No fluff. Output ONLY the explanation.`;
+    const prompt = `You are FixOps, an automated HubSpot intelligence platform. Write a Monday morning CEO brief for ${pi.company || 'this business'} — exactly 5 bullet points, no more.
+
+${briefContext}
+
+Format as EXACTLY 5 bullets using this structure:
+• SCORE: [one sentence on score, direction, and what drove it]
+• PIPELINE: [one sentence on pipeline health, velocity, or biggest deal risk]
+• DATA: [one sentence on contact database health or biggest data issue]
+• ACTION: [the single most important thing to fix THIS WEEK with exact HubSpot location]
+• OPPORTUNITY: [one sentence on the biggest revenue opportunity hiding in their data]
+
+Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts → Filters → Owner is unknown"). No fluff. No greetings. Output ONLY the 5 bullets starting with •`;
 
     const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 200,
+      max_tokens: 350,
       messages: [{ role: 'user', content: prompt }]
     }, {
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      timeout: 15000
+      timeout: 18000
     });
     aiExplanation = aiRes.data?.content?.[0]?.text?.trim() || '';
   } catch(e) {
-    console.warn('[PulseEmail] AI explanation skipped:', e.message?.substring(0,60));
+    console.warn('[PulseEmail] AI brief skipped:', e.message?.substring(0,60));
   }
 
   const html = `<!DOCTYPE html>
@@ -779,16 +802,27 @@ Write EXACTLY 2-3 sentences. Be direct and expert. State what happened, the bigg
     </table>
   </td></tr>
 
-  <!-- ✦ AI Score Explanation -->
+  <!-- ✦ Monday CEO Brief — 5 bullets -->
   ${aiExplanation ? `
-  <tr><td style="background:#0c0a20;padding:20px 32px;border-bottom:1px solid rgba(124,58,237,.15);">
-    <div style="display:flex;align-items:flex-start;gap:12px;">
-      <div style="flex-shrink:0;width:28px;height:28px;background:linear-gradient(135deg,#7c3aed,#a78bfa);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:1px;">✦</div>
-      <div>
-        <div style="font-size:10px;font-weight:700;color:#a78bfa;font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">FixOps AI · Weekly Briefing</div>
-        <div style="font-size:14px;color:rgba(255,255,255,.85);line-height:1.75;font-weight:400;">${aiExplanation}</div>
-      </div>
-    </div>
+  <tr><td style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td>
+          <div style="display:inline-block;padding:3px 10px;background:linear-gradient(135deg,rgba(124,58,237,.3),rgba(167,139,250,.2));border:1px solid rgba(124,58,237,.4);border-radius:20px;font-size:9px;font-weight:700;color:#a78bfa;font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;">📋 Monday CEO Brief · AI-Generated</div>
+          ${aiExplanation.split('\n').filter(l => l.trim().startsWith('•')).map(bullet => {
+            const text = bullet.replace(/^•\s*/, '');
+            const colonIdx = text.indexOf(':');
+            const label = colonIdx > 0 ? text.substring(0, colonIdx) : '';
+            const body = colonIdx > 0 ? text.substring(colonIdx + 1).trim() : text;
+            const labelColor = label === 'SCORE' ? '#a78bfa' : label === 'PIPELINE' ? '#3b82f6' : label === 'DATA' ? '#06b6d4' : label === 'ACTION' ? '#f43f5e' : label === 'OPPORTUNITY' ? '#10b981' : '#a78bfa';
+            return `<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:8px;border-left:3px solid ${labelColor};">
+              <div style="flex-shrink:0;min-width:80px;font-size:9px;font-weight:800;color:${labelColor};font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;">${label||'NOTE'}</div>
+              <div style="font-size:13px;color:rgba(255,255,255,.8);line-height:1.6;">${body}</div>
+            </div>`;
+          }).join('') || `<div style="font-size:13px;color:rgba(255,255,255,.7);line-height:1.75;">${aiExplanation}</div>`}
+        </td>
+      </tr>
+    </table>
   </td></tr>` : ''}
 
   <!-- Week-over-week summary bar -->
@@ -982,26 +1016,30 @@ Write EXACTLY 2-3 sentences. Be direct and expert. State what happened, the bigg
 </table>
 </body></html>`;
 
-  // Smart subject line — lead with the most impactful metric
+  // ── Monday CEO Brief subject — lead with what changed, not just the score ──
   const ghostCount = (issues.find(i=>i.ghostSeatData)?.ghostSeatData||[]).length;
   const ghostWaste = ghostCount * 90;
   const darkRepCount = (issues.find(i=>i.repScorecard)?.repScorecard||[]).filter(r=>r.calls===0&&r.meetings===0).length;
   const monthlyWasteAmt = Number(s.monthlyWaste||0);
+  const isMonday = new Date().getDay() === 1;
+  const briefLabel = isMonday ? '📋 Monday Brief' : '⚡ FixOps';
   let subject;
-  if(scoreDiff === null){
-    subject = '⚡ FixOps — ' + pi.company + ' — First Scan: ' + s.criticalCount + ' critical issues · $' + monthlyWasteAmt.toLocaleString() + '/mo at risk';
-  } else if(newIssues.length > 0 && monthlyWasteAmt > 0){
-    subject = '⚡ FixOps — ' + pi.company + ' — ' + newIssues.length + ' new issue' + (newIssues.length!==1?'s':'') + ' · $' + monthlyWasteAmt.toLocaleString() + '/mo waste found';
-  } else if(ghostCount > 0){
-    subject = '⚡ FixOps — ' + pi.company + ' — ' + ghostCount + ' ghost seat' + (ghostCount!==1?'s':'') + ' costing $' + ghostWaste.toLocaleString() + '/mo · Score ' + s.overallScore;
-  } else if(darkRepCount > 0){
-    subject = '⚡ FixOps — ' + pi.company + ' — ' + darkRepCount + ' rep' + (darkRepCount!==1?'s':'') + ' logged zero activity this week · Score ' + s.overallScore;
-  } else if(scoreDiff > 0){
-    subject = '⚡ FixOps — ' + pi.company + ' — Score ↑' + scoreDiff + ' to ' + s.overallScore + '/100 · ' + resolvedIssues.length + ' issue' + (resolvedIssues.length!==1?'s':'') + ' resolved';
-  } else if(scoreDiff < 0){
-    subject = '⚡ FixOps — ' + pi.company + ' — Score ↓' + Math.abs(scoreDiff) + ' · ' + newIssues.length + ' new issue' + (newIssues.length!==1?'s':'') + ' found';
+  if (scoreDiff === null) {
+    subject = `${briefLabel} — ${pi.company} — First scan complete: ${s.overallScore}/100 · ${s.criticalCount} critical · $${monthlyWasteAmt.toLocaleString()}/mo at risk`;
+  } else if (newIssues.length > 0 && scoreDiff < 0) {
+    subject = `${briefLabel} — ${pi.company} — Score ↓${Math.abs(scoreDiff)} · ${newIssues.length} new issue${newIssues.length!==1?'s':''} this week · ${s.criticalCount} critical`;
+  } else if (resolvedIssues.length > 0 && scoreDiff >= 0) {
+    subject = `${briefLabel} — ${pi.company} — Score ↑${scoreDiff||0} · ${resolvedIssues.length} issue${resolvedIssues.length!==1?'s':''} resolved ✅`;
+  } else if (ghostCount > 0) {
+    subject = `${briefLabel} — ${pi.company} — ${ghostCount} ghost seat${ghostCount!==1?'s':''} costing $${ghostWaste.toLocaleString()}/mo · Score ${s.overallScore}`;
+  } else if (darkRepCount > 0) {
+    subject = `${briefLabel} — ${pi.company} — ${darkRepCount} rep${darkRepCount!==1?'s':''} with zero activity this week · Score ${s.overallScore}`;
+  } else if (scoreDiff > 0) {
+    subject = `${briefLabel} — ${pi.company} — Score ↑${scoreDiff} to ${s.overallScore}/100 · ${resolvedIssues.length} resolved`;
+  } else if (scoreDiff < 0) {
+    subject = `${briefLabel} — ${pi.company} — Score ↓${Math.abs(scoreDiff)} to ${s.overallScore}/100 · action needed`;
   } else {
-    subject = '⚡ FixOps — ' + pi.company + ' — Score ' + s.overallScore + '/100 · ' + s.criticalCount + ' critical · Weekly Report';
+    subject = `${briefLabel} — ${pi.company} — ${s.overallScore}/100 · ${s.criticalCount} critical · $${monthlyWasteAmt.toLocaleString()}/mo`;
   }
 
 
@@ -7067,6 +7105,161 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
   // ✦ DEAL SOURCE ATTRIBUTION ENGINE
   // Which contact sources generate the best deals? Cross-ref analytics_source with won deals
   // ══════════════════════════════════════════════════════════════════════════
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ WORKFLOW DEPENDENCY MAP ENGINE
+  // What breaks if someone deletes a list, property, form, or owner?
+  // ══════════════════════════════════════════════════════════════════════════
+  const workflowDependencyEngine = (() => {
+    if (workflows.length === 0) return null;
+
+    // Build maps of what exists so we can check against it
+    const listIds     = new Set(lists.map(l => String(l.listId || l.id || '')));
+    const formIds     = new Set(forms.map(f => String(f.id || f.guid || '')));
+    const ownerIds    = new Set(owners.map(o => String(o.id || o.ownerId || '')));
+    const propertySet = new Set(contactProps.map(p => p.name));
+
+    const deps = []; // per-workflow dependency report
+    const risks = []; // cross-workflow fragility risks
+
+    // Track which entity → which workflows depend on it
+    const entityDeps = {}; // entityKey → [wf names]
+    const addDep = (key, wfName) => {
+      if (!entityDeps[key]) entityDeps[key] = [];
+      if (!entityDeps[key].includes(wfName)) entityDeps[key].push(wfName);
+    };
+
+    const activeWfs = workflows.filter(w => w.enabled || w.isEnabled || w.status === 'ACTIVE');
+
+    activeWfs.forEach(wf => {
+      const name = wf.name || wf.id || 'Unknown';
+      const wfDeps = { name, id: wf.id, issues: [] };
+
+      // Parse trigger criteria — v3 format has filterGroups or triggers array
+      const triggerGroups = wf.filterGroups || wf.triggers || [];
+      const actions = wf.actions || [];
+
+      // Helper: extract property references from filter groups
+      const extractFilters = (groups) => {
+        const filters = [];
+        if (Array.isArray(groups)) {
+          groups.forEach(g => {
+            const gFilters = g.filters || g.filterGroups || [];
+            if (Array.isArray(gFilters)) {
+              gFilters.forEach(f => {
+                if (f.property) filters.push({ property: f.property, value: f.value });
+                // Nested
+                if (f.filters) f.filters.forEach(ff => ff.property && filters.push({ property: ff.property, value: ff.value }));
+              });
+            }
+            // Direct filter on group
+            if (g.property) filters.push({ property: g.property, value: g.value });
+          });
+        }
+        return filters;
+      };
+
+      const filters = extractFilters(triggerGroups);
+
+      // Check: depends on owner that's inactive
+      const ownerFilter = filters.find(f => f.property === 'hubspot_owner_id');
+      if (ownerFilter && ownerFilter.value) {
+        const ownerExists = ownerIds.has(String(ownerFilter.value));
+        if (!ownerExists) {
+          wfDeps.issues.push({ type: 'missing_owner', detail: `Trigger references owner ID ${ownerFilter.value} who may no longer exist` });
+          addDep(`owner:${ownerFilter.value}`, name);
+        }
+      }
+
+      // Check: depends on list membership
+      const listFilter = filters.find(f => f.property === 'hs_list_membership' || f.property?.includes('list'));
+      if (listFilter && listFilter.value) {
+        const listExists = listIds.has(String(listFilter.value));
+        addDep(`list:${listFilter.value}`, name);
+        if (!listExists) {
+          wfDeps.issues.push({ type: 'missing_list', detail: `Trigger depends on list ID ${listFilter.value} which may be deleted or archived` });
+        }
+      }
+
+      // Check: depends on property that no longer exists
+      filters.forEach(f => {
+        if (f.property && !f.property.startsWith('hs_') && !propertySet.has(f.property)) {
+          // Could be a custom prop that was deleted
+          wfDeps.issues.push({ type: 'unknown_property', detail: `Filter uses property "${f.property}" — verify it still exists` });
+        }
+      });
+
+      // Check: owner-based actions (assign to specific owner)
+      actions.forEach(a => {
+        if (a.type === 'SET_CONTACT_PROPERTY' && a.propertyName === 'hubspot_owner_id' && a.propertyValue) {
+          const ownerExists = ownerIds.has(String(a.propertyValue));
+          if (!ownerExists) {
+            wfDeps.issues.push({ type: 'action_missing_owner', detail: `Action assigns to owner ID ${a.propertyValue} who no longer exists in HubSpot` });
+            addDep(`owner:${a.propertyValue}`, name);
+          }
+        }
+      });
+
+      // Check: form-based triggers
+      const formTriggers = filters.filter(f => f.property === 'hs_form_submissions' || f.property?.includes('form'));
+      formTriggers.forEach(f => {
+        if (f.value) {
+          const formExists = formIds.has(String(f.value));
+          addDep(`form:${f.value}`, name);
+          if (!formExists) {
+            wfDeps.issues.push({ type: 'missing_form', detail: `Trigger depends on form ID ${f.value} — verify form still exists` });
+          }
+        }
+      });
+
+      if (wfDeps.issues.length > 0) deps.push(wfDeps);
+    });
+
+    // Find entities that multiple workflows depend on (fragility risk)
+    Object.entries(entityDeps).forEach(([key, wfNames]) => {
+      if (wfNames.length >= 2) {
+        const [type, id] = key.split(':');
+        const label = type === 'list' ? `List ID ${id}` : type === 'form' ? `Form ID ${id}` : `Owner ID ${id}`;
+        risks.push({
+          entity: label,
+          type,
+          id,
+          workflowCount: wfNames.length,
+          workflows: wfNames,
+          warning: `${wfNames.length} workflows depend on this ${type} — if it's deleted or changed, all ${wfNames.length} automations break silently`,
+        });
+      }
+    });
+
+    risks.sort((a, b) => b.workflowCount - a.workflowCount);
+
+    // Inactive owner risk — workflows assigned to inactive users
+    const inactiveOwnerNames = {};
+    inactiveUsers.forEach(u => {
+      const id = String(u.id || u.ownerId || '');
+      const name = [u.properties?.firstname || u.firstName || '', u.properties?.lastname || u.lastName || ''].filter(Boolean).join(' ') || u.properties?.email || id;
+      if (id) inactiveOwnerNames[id] = name;
+    });
+
+    const inactiveOwnerDeps = [];
+    activeWfs.forEach(wf => {
+      const name = wf.name || wf.id || 'Unknown';
+      const filters = extractFilters(wf.filterGroups || wf.triggers || []);
+      const ownerFilter = filters.find(f => f.property === 'hubspot_owner_id');
+      if (ownerFilter && inactiveOwnerNames[String(ownerFilter.value)]) {
+        inactiveOwnerDeps.push({ workflow: name, ownerName: inactiveOwnerNames[String(ownerFilter.value)] });
+      }
+    });
+
+    return {
+      totalActive: activeWfs.length,
+      atRiskCount: deps.length,
+      atRiskWorkflows: deps.slice(0, 10),
+      fragmentileEntities: risks.slice(0, 8),
+      inactiveOwnerDeps: inactiveOwnerDeps.slice(0, 5),
+      totalRisks: deps.reduce((s, d) => s + d.issues.length, 0),
+    };
+  })();
+
   const dealSourceAttribution = (() => {
     if (contacts.length === 0 || deals.length === 0) return null;
     // Map contact ID → source
@@ -7272,6 +7465,7 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         contacts: contacts.length, companies: companies.length,
         deals: deals.length, tickets: tickets.length,
         workflows: workflows.length, forms: forms.length,
+        workflowList: workflows.slice(0, 100).map(w => ({ id: w.id, name: w.name||w.id, enabled: w.enabled||w.isEnabled, triggers: w.triggers||w.filterGroups||[], actions: w.actions||[], enrolledObjectsCount: w.enrolledObjectsCount||w.contactsEnrolled||0 })),
         // ── Automation ROI ──────────────────────────────────────────────────────
         automationROI: (() => {
           if (!workflows.length) return null;
@@ -7960,6 +8154,7 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       dealSourceAttribution,
       lifecycleVelocityEngine,
       billingTierEngine,
+      workflowDependencyEngine,
       setupHealthEngine,
       hubUtilizationEngine,
     },
