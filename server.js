@@ -4558,31 +4558,35 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/automation/v3/workflows?limit=100'),
     {data:{workflows:[]}}
   );
+  // Paginate forms (portals can have 200+)
   const formsR = await safe(
-    () => hs.get('/marketing/v3/forms?limit=50'),
+    () => paginate('/marketing/v3/forms', smallLimit),
     {data:{results:[]}}
   );
-  const usersR = await safe(()=>hs.get('/crm/v3/objects/users?limit=100'), {data:{results:[]}});
-  const listsR = await safe(()=>hs.get('/crm/v3/lists?count=100&offset=0'), {data:{lists:[]}});
+  const usersR = await safe(()=>hs.get('/settings/v3/users?limit=100'), {data:{results:[]}});
+  // Use the v3 lists endpoint that paginates properly
+  const listsR = await safe(
+    () => paginate('/crm/v3/lists?properties=name,listType,dynamic,metaData', smallLimit),
+    {data:{results:[]}}
+  );
 
   // ── New scope data — sequences, campaigns, opt-outs, conversations, NPS ────
   const sequencesR = await safe(
-    () => hs.get('/automation/v4/sequences?limit=100'),
+    () => paginate('/automation/v4/sequences', smallLimit),
     {data:{results:[]}}
   );
   const campaignsR = await safe(
-    () => hs.get('/marketing/v3/campaigns?limit=50'),
+    () => paginate('/marketing/v3/campaigns', smallLimit),
     {data:{results:[]}}
   );
-  // Marketing emails — requires content scope (Marketing Hub Pro+)
-  // Fetch email list first, then get aggregate stats
+  // Marketing emails — paginate all (portals with heavy marketing have 300+)
   const marketingEmailsR = await safe(
-    () => hs.get('/marketing/v3/emails?limit=100&orderBy=-updatedAt'),
+    () => paginate('/marketing/v3/emails?orderBy=-updatedAt', Math.min(smallLimit, 500)),
     {data:{results:[]}}
   );
-  // Fetch email aggregate stats (separate endpoint from list)
+  // Fetch email aggregate stats (paginate — large portals have many campaigns)
   const emailStatsR = await safe(
-    () => hs.get('/marketing/v3/emails/statistics/list?limit=100'),
+    () => paginate('/marketing/v3/emails/statistics/list', Math.min(smallLimit, 500)),
     {data:{results:[]}}
   );
   const optOutsR = await safe(
@@ -4675,7 +4679,7 @@ async function runFullAudit(token, auditId, meta) {
   const customObjectData = [];
   const customSchemasList = customSchemasR.data?.results || [];
   const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email','p_contact_event','p_deal_split']);
-  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name) && sc.objectTypeId).slice(0, 10);
+  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name) && sc.objectTypeId);
   for (const schema of userCustomSchemas) {
     // Use objectTypeId (e.g. "2-12345") which is the correct API identifier for custom objects
     const objectId = schema.objectTypeId || schema.name;
@@ -6171,8 +6175,8 @@ async function runFullAudit(token, auditId, meta) {
       const overallSpamRate   = totalSent > 0 ? Math.round(totalSpam   / totalSent * 10000) / 100 : 0;
 
       // Store for portalStats email health summary
-      if (!global._emailHealthSummary) global._emailHealthSummary = {};
-      global._emailHealthSummary = { totalSent, overallOpenRate, overallClickRate, overallBounceRate, overallUnsubRate, overallSpamRate, sentEmailCount: sentEmails.length };
+      // Store for portalStats email health summary — local scope only
+      const _emailHealthSummary = { totalSent, overallOpenRate, overallClickRate, overallBounceRate, overallUnsubRate, overallSpamRate, sentEmailCount: sentEmails.length };
 
       // ── Bounce rate check (Portal IQ benchmark: >3.62% = warning, >5% = critical) ──
       if (overallBounceRate > 5) {
@@ -8124,88 +8128,73 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         draftEmails: marketingEmails.filter(e => String(e.state||e.currentState||'').toUpperCase() === 'DRAFT').length,
         scheduledEmails: marketingEmails.filter(e => String(e.state||e.currentState||'').toUpperCase() === 'SCHEDULED').length,
 
-        // Totals across all sent emails
-        emailTotalSent: (() => {
-          return marketingEmails.reduce((sum, e) => {
+        // Per-email performance table (top 50 by sends — for marketing view)
+        topEmails: marketingEmails
+          .map(e => {
             const s = e.stats || e.counters || {};
-            return sum + (s.sent || s.delivered || 0);
-          }, 0);
-        })(),
+            const sent = s.sent || s.delivered || 0;
+            const opens = s.open || s.opened || s.opens || 0;
+            const clicks = s.click || s.clicks || s.uniqueClicks || 0;
+            const bounces = s.bounce || s.bounced || s.hardBounced || 0;
+            const unsubs = s.unsubscribed || s.unsubscribe || s.optOut || 0;
+            const spam = s.spamreport || s.spam || s.spamReport || 0;
+            return {
+              id: e.id,
+              name: e.name || e.subject || 'Unnamed Email',
+              subject: e.subject || '',
+              state: String(e.state || e.currentState || '').toUpperCase(),
+              sentAt: e.publishDate || e.publishedAt || e.updatedAt || null,
+              sent,
+              openRate:   sent > 0 ? Math.round(opens   / sent * 1000) / 10 : 0,
+              clickRate:  sent > 0 ? Math.round(clicks   / sent * 1000) / 10 : 0,
+              bounceRate: sent > 0 ? Math.round(bounces  / sent * 10000) / 100 : 0,
+              unsubRate:  sent > 0 ? Math.round(unsubs   / sent * 10000) / 100 : 0,
+              spamRate:   sent > 0 ? Math.round(spam     / sent * 10000) / 100 : 0,
+              opens, clicks, bounces, unsubs,
+            };
+          })
+          .filter(e => e.sent > 0)
+          .sort((a, b) => b.sent - a.sent)
+          .slice(0, 50),
 
-        // Avg open rate (only emails with >100 sends)
-        avgOpenRate: (() => {
-          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
-          if (!sent.length) return 0;
-          const total = sent.reduce((sum, e) => {
+        // Aggregate email health summary
+        emailHealthSummary: (() => {
+          const sent = marketingEmails.filter(e => {
             const s = e.stats || e.counters || {};
-            const n = s.sent || s.delivered || 0;
-            const o = s.open || s.opened || s.opens || 0;
-            return sum + (n > 0 ? o / n * 100 : 0);
-          }, 0);
-          return Math.round(total / sent.length * 10) / 10;
-        })(),
-
-        // Avg click rate (CTR)
-        avgClickRate: (() => {
-          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
-          if (!sent.length) return 0;
-          const total = sent.reduce((sum, e) => {
-            const s = e.stats || e.counters || {};
-            const n = s.sent || s.delivered || 0;
-            const c = s.click || s.clicks || s.uniqueClicks || 0;
-            return sum + (n > 0 ? c / n * 100 : 0);
-          }, 0);
-          return Math.round(total / sent.length * 10) / 10;
-        })(),
-
-        // Avg bounce rate
-        avgBounceRate: (() => {
-          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
-          if (!sent.length) return 0;
-          const total = sent.reduce((sum, e) => {
-            const s = e.stats || e.counters || {};
-            const n = s.sent || s.delivered || 0;
-            const b = s.bounce || s.bounced || s.hardBounced || 0;
-            return sum + (n > 0 ? b / n * 100 : 0);
-          }, 0);
-          return Math.round(total / sent.length * 100) / 100;
-        })(),
-
-        // Avg unsubscribe rate
-        avgUnsubRate: (() => {
-          const sent = marketingEmails.filter(e => (e.stats||e.counters||{}).sent > 100 || (e.stats||e.counters||{}).delivered > 100);
-          if (!sent.length) return 0;
-          const total = sent.reduce((sum, e) => {
+            return (s.sent || s.delivered || 0) > 100;
+          });
+          if (!sent.length) return null;
+          let tSent=0,tOpen=0,tClick=0,tBounce=0,tUnsub=0,tSpam=0;
+          sent.forEach(e => {
             const s = e.stats || e.counters || {};
             const n = s.sent || s.delivered || 0;
-            const u = s.unsubscribed || s.unsubscribe || s.optOut || 0;
-            return sum + (n > 0 ? u / n * 100 : 0);
-          }, 0);
-          return Math.round(total / sent.length * 100) / 100;
+            tSent   += n;
+            tOpen   += s.open || s.opened || s.opens || 0;
+            tClick  += s.click || s.clicks || s.uniqueClicks || 0;
+            tBounce += s.bounce || s.bounced || s.hardBounced || 0;
+            tUnsub  += s.unsubscribed || s.unsubscribe || s.optOut || 0;
+            tSpam   += s.spamreport || s.spam || s.spamReport || 0;
+          });
+          return {
+            totalSent:    tSent,
+            emailCount:   sent.length,
+            openRate:     tSent > 0 ? Math.round(tOpen   / tSent * 1000) / 10 : 0,
+            clickRate:    tSent > 0 ? Math.round(tClick  / tSent * 1000) / 10 : 0,
+            bounceRate:   tSent > 0 ? Math.round(tBounce / tSent * 10000) / 100 : 0,
+            unsubRate:    tSent > 0 ? Math.round(tUnsub  / tSent * 10000) / 100 : 0,
+            spamRate:     tSent > 0 ? Math.round(tSpam   / tSent * 10000) / 100 : 0,
+          };
         })(),
 
-        // High bounce emails (>5% bounce rate with >100 sends)
-        highBounceEmails: marketingEmails.filter(e => {
-          const s = e.stats || e.counters || {};
-          const n = s.sent || s.delivered || 0;
-          const b = s.bounce || s.bounced || s.hardBounced || 0;
-          return n > 100 && b / n > 0.05;
-        }).length,
-
-        // Low open rate emails (<15% with >500 sends)
-        lowOpenEmails: marketingEmails.filter(e => {
-          const s = e.stats || e.counters || {};
-          const n = s.sent || s.delivered || 0;
-          const o = s.open || s.opened || s.opens || 0;
-          return n > 500 && o / n * 100 < 15;
-        }).length,
-
-        // Stale drafts (untouched 90+ days)
-        staleDraftEmails: marketingEmails.filter(e => {
-          const isDraft = ['DRAFT'].includes(String(e.state||e.currentState||'').toUpperCase());
-          const updated = e.updatedAt || e.updated;
-          return isDraft && updated && (now - new Date(updated).getTime()) / DAY > 90;
-        }).length,
+        // Backward-compat aliases used by existing frontend code
+        emailTotalSent:    (() => { const h = marketingEmails; return h.reduce((s,e) => s+(e.stats||e.counters||{}).sent||(e.stats||e.counters||{}).delivered||0, 0); })(),
+        avgOpenRate:       null, // computed below from emailHealthSummary
+        avgClickRate:      null,
+        avgBounceRate:     null,
+        avgUnsubRate:      null,
+        highBounceEmails:  marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||0; const b=s.bounce||s.bounced||s.hardBounced||0; return n>100&&b/n>0.05; }).length,
+        lowOpenEmails:     marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||0; const o=s.open||s.opened||s.opens||0; return n>500&&o/n*100<15; }).length,
+        staleDraftEmails:  marketingEmails.filter(e => { const isDraft=['DRAFT'].includes(String(e.state||e.currentState||'').toUpperCase()); const u=e.updatedAt||e.updated; return isDraft&&u&&(now-new Date(u).getTime())/DAY>90; }).length,
 
         // ── Sequences & Campaigns ─────────────────────────────────────────
         sequences: sequences.length,
