@@ -40,6 +40,21 @@ const STRIPE_PRICE_MAP = {
   [process.env.STRIPE_PRICE_PROAUDIT || 'price_proaudit']:  'pro-audit',
 };
 
+// ── Server-side formatting helpers (used in audit engines + email templates) ──
+const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+const fmtMoney = (n) => {
+  n = Number(n || 0);
+  if (n >= 1_000_000) return '$' + (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000)     return '$' + (n / 1_000).toFixed(1) + 'K';
+  return '$' + Math.round(n).toLocaleString('en-US');
+};
+const fmtDays = (d) => {
+  if (!d || d <= 0) return '—';
+  if (d < 7)  return d + ' day' + (d !== 1 ? 's' : '');
+  if (d < 30) return Math.round(d / 7) + ' week' + (Math.round(d / 7) !== 1 ? 's' : '');
+  return Math.round(d / 30) + ' month' + (Math.round(d / 30) !== 1 ? 's' : '');
+};
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const resend = new Resend(RESEND_API_KEY);
@@ -143,6 +158,76 @@ async function initDb() {
       created_at    TIMESTAMP DEFAULT NOW()
     )
   `).catch(() => {});
+
+  // ── White-Label Agency Accounts ─────────────────────────────────────────────
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS agency_accounts (
+      id                SERIAL PRIMARY KEY,
+      api_key           VARCHAR(64) UNIQUE NOT NULL,
+      email             VARCHAR(255) UNIQUE NOT NULL,
+      agency_name       VARCHAR(255) NOT NULL,
+      agency_slug       VARCHAR(100) UNIQUE NOT NULL,
+      -- Branding
+      logo_url          TEXT,
+      primary_color     VARCHAR(20) DEFAULT '#7c3aed',
+      secondary_color   VARCHAR(20) DEFAULT '#a78bfa',
+      accent_color      VARCHAR(20) DEFAULT '#10b981',
+      custom_domain     VARCHAR(255),
+      report_footer     TEXT,
+      -- Credits & limits
+      audit_credits     INT DEFAULT 5,
+      credits_used      INT DEFAULT 0,
+      monthly_credits   INT DEFAULT 0,
+      monthly_used      INT DEFAULT 0,
+      monthly_reset_at  TIMESTAMP,
+      -- Plan
+      plan              VARCHAR(50) DEFAULT 'agency_starter',
+      plan_status       VARCHAR(50) DEFAULT 'active',
+      stripe_customer   VARCHAR(255),
+      subscription_id   VARCHAR(255),
+      -- Status
+      is_active         BOOLEAN DEFAULT true,
+      last_login_at     TIMESTAMP,
+      created_at        TIMESTAMP DEFAULT NOW(),
+      updated_at        TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
+  // Safe migrations for agency_accounts
+  const agencyCols = [
+    'logo_url TEXT', 'primary_color VARCHAR(20)', 'secondary_color VARCHAR(20)',
+    'accent_color VARCHAR(20)', 'custom_domain VARCHAR(255)', 'report_footer TEXT',
+    'audit_credits INT DEFAULT 5', 'credits_used INT DEFAULT 0',
+    'monthly_credits INT DEFAULT 0', 'monthly_used INT DEFAULT 0',
+    'monthly_reset_at TIMESTAMP', 'plan VARCHAR(50) DEFAULT \'agency_starter\'',
+    'plan_status VARCHAR(50) DEFAULT \'active\'', 'stripe_customer VARCHAR(255)',
+    'subscription_id VARCHAR(255)', 'is_active BOOLEAN DEFAULT true',
+    'last_login_at TIMESTAMP',
+  ];
+  for (const col of agencyCols) {
+    await db.query(`ALTER TABLE agency_accounts ADD COLUMN IF NOT EXISTS ${col}`).catch(()=>{});
+  }
+
+  // agency_audits — track every audit run by an agency account
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS agency_audits (
+      id              SERIAL PRIMARY KEY,
+      agency_id       INT REFERENCES agency_accounts(id),
+      audit_id        VARCHAR(24) NOT NULL,
+      client_name     VARCHAR(255),
+      client_email    VARCHAR(255),
+      token_used      VARCHAR(64),
+      plan            VARCHAR(50) DEFAULT 'deep',
+      score           INT,
+      critical_count  INT DEFAULT 0,
+      monthly_waste   INT DEFAULT 0,
+      status          VARCHAR(50) DEFAULT 'pending',
+      share_url       TEXT,
+      created_at      TIMESTAMP DEFAULT NOW(),
+      completed_at    TIMESTAMP
+    )
+  `).catch(() => {});
+  await db.query(`ALTER TABLE audit_tokens ADD COLUMN IF NOT EXISTS agency_id INT REFERENCES agency_accounts(id)`).catch(()=>{});
+  await db.query(`ALTER TABLE audit_tokens ADD COLUMN IF NOT EXISTS client_name VARCHAR(255)`).catch(()=>{});
 
   // Cleanup: free results after 7 days, paid after 365
   await db.query(`
@@ -2338,7 +2423,417 @@ app.post('/share/generate', async (req, res) => {
   }
 });
 
-// ── Daily Sentinel Scan ───────────────────────────────────────────────────────
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ✦ WHITE-LABEL AGENCY SYSTEM
+// Agencies get their own dashboard, branding, and audit credit pool.
+// All audit results generated under their account show their branding.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Agency auth middleware ────────────────────────────────────────────────────
+const agencyAuth = async (req, res, next) => {
+  const apiKey = req.headers['x-agency-key'] || req.query.apiKey || req.body?.apiKey;
+  if (!apiKey) return res.status(401).json({ error: 'Agency API key required' });
+  try {
+    const r = await db.query(
+      `SELECT * FROM agency_accounts WHERE api_key = $1 AND is_active = true`,
+      [apiKey]
+    );
+    if (!r.rows[0]) return res.status(401).json({ error: 'Invalid or inactive API key' });
+    req.agency = r.rows[0];
+    // Update last login
+    await db.query(`UPDATE agency_accounts SET last_login_at = NOW() WHERE id = $1`, [r.rows[0].id]).catch(()=>{});
+    next();
+  } catch(e) {
+    res.status(500).json({ error: 'Auth error' });
+  }
+};
+
+// Credit plans — what each tier gets
+const AGENCY_PLANS = {
+  agency_starter:  { monthlyCredits: 5,   name: 'Starter',   price: 299  },  // $299/mo — 5 audits
+  agency_pro:      { monthlyCredits: 15,  name: 'Pro',       price: 549  },  // $549/mo — 15 audits
+  agency_scale:    { monthlyCredits: 40,  name: 'Scale',     price: 999  },  // $999/mo — 40 audits
+  agency_unlimited:{ monthlyCredits: 999, name: 'Unlimited', price: 1999 },  // $1,999/mo — unlimited
+};
+
+// ── Register new agency account (admin or Stripe webhook) ─────────────────────
+app.post('/agency/register', async (req, res) => {
+  try {
+    const { email, agencyName, plan, stripeCustomer, subscriptionId, adminKey } = req.body;
+    // Simple admin protection — only FixOps internal can create accounts
+    if (adminKey !== process.env.FIXOPS_ADMIN_KEY && process.env.FIXOPS_ADMIN_KEY) {
+      return res.status(403).json({ error: 'Admin key required' });
+    }
+    if (!email || !agencyName) return res.status(400).json({ error: 'email and agencyName required' });
+
+    // Generate API key and slug
+    const apiKey = 'fxa_' + crypto.randomBytes(24).toString('hex');
+    const slug = agencyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 50)
+      + '_' + crypto.randomBytes(4).toString('hex');
+    const planKey = plan || 'agency_starter';
+    const planConfig = AGENCY_PLANS[planKey] || AGENCY_PLANS.agency_starter;
+
+    const r = await db.query(
+      `INSERT INTO agency_accounts
+        (api_key, email, agency_name, agency_slug, plan, plan_status, audit_credits, monthly_credits, monthly_used, monthly_reset_at, stripe_customer, subscription_id)
+       VALUES ($1,$2,$3,$4,$5,'active',$6,$7,0, NOW() + INTERVAL '30 days',$8,$9)
+       ON CONFLICT (email) DO UPDATE SET
+         plan=$5, audit_credits=agency_accounts.audit_credits+$6, monthly_credits=$7,
+         stripe_customer=COALESCE($8,agency_accounts.stripe_customer),
+         subscription_id=COALESCE($9,agency_accounts.subscription_id),
+         updated_at=NOW()
+       RETURNING *`,
+      [apiKey, email, agencyName, slug, planKey, planConfig.monthlyCredits, planConfig.monthlyCredits, stripeCustomer||null, subscriptionId||null]
+    );
+    const agency = r.rows[0];
+
+    // Welcome email
+    await resend.emails.send({
+      from: 'FixOps Agency <reports@fixops.io>',
+      to: email,
+      subject: `🎉 Your FixOps Agency Account is Ready — ${agencyName}`,
+      html: `<div style="font-family:system-ui;max-width:560px;margin:0 auto;padding:40px 20px;">
+        <h2 style="color:#7c3aed;">Welcome to FixOps Agency, ${agencyName}!</h2>
+        <p>Your white-label HubSpot audit platform is ready. Here's everything you need:</p>
+        <div style="background:#f9fafb;border-radius:8px;padding:20px;margin:20px 0;">
+          <p><strong>Agency Dashboard:</strong> <a href="https://fixops.io/agency.html">fixops.io/agency.html</a></p>
+          <p><strong>Your API Key:</strong> <code style="background:#e5e7eb;padding:2px 6px;border-radius:4px;">${apiKey}</code></p>
+          <p><strong>Monthly Audit Credits:</strong> ${planConfig.monthlyCredits}</p>
+          <p><strong>Plan:</strong> ${planConfig.name}</p>
+        </div>
+        <p><strong>How it works:</strong></p>
+        <ol>
+          <li>Log in to your dashboard with your API key</li>
+          <li>Upload your logo and set your brand colors</li>
+          <li>Create a client audit link — uses 1 credit</li>
+          <li>Send the link to your client — they connect HubSpot and see YOUR branding</li>
+          <li>You get notified when complete and can view all results in your dashboard</li>
+        </ol>
+        <p style="color:#6b7280;font-size:13px;">Questions? Reply to this email or contact support@fixops.io</p>
+      </div>`
+    }).catch(e => console.error('Agency welcome email error:', e.message));
+
+    res.json({ success: true, apiKey, slug, agency: { id: agency.id, email, agencyName, plan: planKey, monthlyCredits: planConfig.monthlyCredits } });
+  } catch(e) {
+    console.error('Agency register error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Get agency account details + credit balance ───────────────────────────────
+app.get('/agency/account', agencyAuth, async (req, res) => {
+  try {
+    const agency = req.agency;
+    const planConfig = AGENCY_PLANS[agency.plan] || AGENCY_PLANS.agency_starter;
+
+    // Reset monthly credits if past reset date
+    if (agency.monthly_reset_at && new Date(agency.monthly_reset_at) < new Date()) {
+      await db.query(
+        `UPDATE agency_accounts SET monthly_used = 0, monthly_reset_at = NOW() + INTERVAL '30 days' WHERE id = $1`,
+        [agency.id]
+      );
+      agency.monthly_used = 0;
+    }
+
+    // Get recent audits
+    const auditsRes = await db.query(
+      `SELECT * FROM agency_audits WHERE agency_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [agency.id]
+    );
+
+    const creditsRemaining = agency.monthly_credits > 0
+      ? Math.max(0, agency.monthly_credits - (agency.monthly_used || 0))
+      : Math.max(0, agency.audit_credits - (agency.credits_used || 0));
+
+    res.json({
+      success: true,
+      agency: {
+        id: agency.id,
+        email: agency.email,
+        agencyName: agency.agency_name,
+        slug: agency.agency_slug,
+        plan: agency.plan,
+        planName: planConfig.name,
+        // Branding
+        logoUrl: agency.logo_url,
+        primaryColor: agency.primary_color || '#7c3aed',
+        secondaryColor: agency.secondary_color || '#a78bfa',
+        accentColor: agency.accent_color || '#10b981',
+        reportFooter: agency.report_footer,
+        // Credits
+        monthlyCredits: agency.monthly_credits,
+        monthlyUsed: agency.monthly_used || 0,
+        creditsRemaining,
+        totalCreditsUsed: agency.credits_used || 0,
+        resetAt: agency.monthly_reset_at,
+        // Usage
+        totalAudits: auditsRes.rows.length,
+        audits: auditsRes.rows,
+      }
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Update agency branding ────────────────────────────────────────────────────
+app.post('/agency/branding', agencyAuth, async (req, res) => {
+  try {
+    const { logoUrl, primaryColor, secondaryColor, accentColor, reportFooter } = req.body;
+    const agency = req.agency;
+
+    // Validate hex colors
+    const hexRe = /^#[0-9a-fA-F]{6}$/;
+    const safeColor = (c, def) => (c && hexRe.test(c)) ? c : def;
+
+    await db.query(
+      `UPDATE agency_accounts SET
+        logo_url = COALESCE($1, logo_url),
+        primary_color = $2,
+        secondary_color = $3,
+        accent_color = $4,
+        report_footer = COALESCE($5, report_footer),
+        updated_at = NOW()
+       WHERE id = $6`,
+      [
+        logoUrl || null,
+        safeColor(primaryColor, agency.primary_color || '#7c3aed'),
+        safeColor(secondaryColor, agency.secondary_color || '#a78bfa'),
+        safeColor(accentColor, agency.accent_color || '#10b981'),
+        reportFooter || null,
+        agency.id,
+      ]
+    );
+    res.json({ success: true, message: 'Branding updated — all future audit links will use your new branding' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Create a new client audit token (uses 1 credit) ──────────────────────────
+app.post('/agency/create-audit', agencyAuth, async (req, res) => {
+  try {
+    const { clientName, clientEmail, clientCompany, plan } = req.body;
+    const agency = req.agency;
+
+    if (!clientEmail || !clientCompany) {
+      return res.status(400).json({ error: 'clientEmail and clientCompany required' });
+    }
+
+    // Check credit balance
+    const usesMonthly = agency.monthly_credits > 0;
+    const creditsRemaining = usesMonthly
+      ? Math.max(0, agency.monthly_credits - (agency.monthly_used || 0))
+      : Math.max(0, agency.audit_credits - (agency.credits_used || 0));
+
+    if (creditsRemaining <= 0) {
+      return res.status(402).json({
+        error: 'No audit credits remaining',
+        creditsRemaining: 0,
+        upgradeUrl: 'https://fixops.io/agency#pricing',
+        message: `You've used all ${usesMonthly ? agency.monthly_credits + ' monthly' : agency.audit_credits} credits. Upgrade your plan or purchase additional credits.`
+      });
+    }
+
+    // Generate audit token
+    const tokenStr = 'agt_' + crypto.randomBytes(16).toString('hex');
+    const auditPlan = plan || 'deep';
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    await db.query(
+      `INSERT INTO audit_tokens (token, email, plan, company, expires_at, agency_id, client_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [tokenStr, clientEmail, auditPlan, clientCompany, expiresAt, agency.id, clientName || clientCompany]
+    );
+
+    // Deduct credit
+    if (usesMonthly) {
+      await db.query(`UPDATE agency_accounts SET monthly_used = monthly_used + 1, updated_at = NOW() WHERE id = $1`, [agency.id]);
+    } else {
+      await db.query(`UPDATE agency_accounts SET credits_used = credits_used + 1, updated_at = NOW() WHERE id = $1`, [agency.id]);
+    }
+
+    // Record in agency_audits
+    await db.query(
+      `INSERT INTO agency_audits (agency_id, audit_id, client_name, client_email, token_used, plan, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
+      [agency.id, tokenStr, clientName || clientCompany, clientEmail, tokenStr, auditPlan]
+    );
+
+    // Build the client audit URL with agency branding params
+    const brandParams = new URLSearchParams({
+      auditToken: tokenStr,
+      brand: agency.agency_name,
+      color: agency.primary_color || '#7c3aed',
+      accent: agency.accent_color || '#10b981',
+    });
+    if (agency.logo_url) brandParams.set('logo', agency.logo_url);
+
+    const clientUrl = `${FRONTEND_URL}/confirm.html?${brandParams.toString()}`;
+
+    // Notify the agency
+    await resend.emails.send({
+      from: 'FixOps Agency <reports@fixops.io>',
+      to: agency.email,
+      subject: `✅ Audit link created for ${clientCompany}`,
+      html: `<p>Audit link created for <strong>${clientCompany}</strong> (${clientEmail}).</p>
+             <p><strong>Send this link to your client:</strong><br><a href="${clientUrl}">${clientUrl}</a></p>
+             <p>Credits remaining: ${creditsRemaining - 1}</p>`
+    }).catch(()=>{});
+
+    res.json({
+      success: true,
+      token: tokenStr,
+      clientUrl,
+      creditsRemaining: creditsRemaining - 1,
+      expiresAt: expiresAt.toISOString(),
+      message: `Audit link ready for ${clientCompany}. Send clientUrl to your client.`
+    });
+  } catch(e) {
+    console.error('Agency create-audit error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Get agency audit results ──────────────────────────────────────────────────
+app.get('/agency/audits', agencyAuth, async (req, res) => {
+  try {
+    const agency = req.agency;
+    const auditsRes = await db.query(
+      `SELECT aa.*, at.used as token_redeemed, at.expires_at as token_expires
+       FROM agency_audits aa
+       LEFT JOIN audit_tokens at ON at.token = aa.token_used
+       WHERE aa.agency_id = $1
+       ORDER BY aa.created_at DESC`,
+      [agency.id]
+    );
+
+    // Enrich with latest audit result for completed audits
+    const enriched = await Promise.all(auditsRes.rows.map(async row => {
+      let result = null;
+      if (row.status === 'complete' && row.audit_id && !row.audit_id.startsWith('agt_')) {
+        result = await getResult(row.audit_id).catch(() => null);
+      }
+      const shareBase = new URLSearchParams({
+        id: row.audit_id,
+        brand: agency.agency_name,
+        color: agency.primary_color || '#7c3aed',
+        accent: agency.accent_color || '#10b981',
+      });
+      if (agency.logo_url) shareBase.set('logo', agency.logo_url);
+
+      return {
+        ...row,
+        score: result?.summary?.overallScore || row.score,
+        criticalCount: result?.summary?.criticalCount || row.critical_count || 0,
+        monthlyWaste: result?.summary?.monthlyWaste || row.monthly_waste || 0,
+        brandedResultsUrl: row.status === 'complete' ? `${FRONTEND_URL}/results.html?${shareBase}` : null,
+        brandedReportUrl: row.status === 'complete' ? `${FRONTEND_URL}/reporting.html?${shareBase}` : null,
+      };
+    }));
+
+    const planConfig = AGENCY_PLANS[agency.plan] || AGENCY_PLANS.agency_starter;
+    const creditsRemaining = agency.monthly_credits > 0
+      ? Math.max(0, agency.monthly_credits - (agency.monthly_used || 0))
+      : Math.max(0, agency.audit_credits - (agency.credits_used || 0));
+
+    res.json({
+      success: true,
+      audits: enriched,
+      totalAudits: enriched.length,
+      creditsRemaining,
+      monthlyCredits: agency.monthly_credits,
+      monthlyUsed: agency.monthly_used || 0,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Get single audit result (agency-gated) ────────────────────────────────────
+app.get('/agency/audit/:auditId', agencyAuth, async (req, res) => {
+  try {
+    const agency = req.agency;
+    const { auditId } = req.params;
+    // Verify this audit belongs to this agency
+    const check = await db.query(
+      `SELECT * FROM agency_audits WHERE agency_id = $1 AND audit_id = $2`,
+      [agency.id, auditId]
+    );
+    if (!check.rows[0]) return res.status(403).json({ error: 'Audit not found in your account' });
+    const result = await getResult(auditId);
+    if (!result) return res.status(404).json({ error: 'Audit result not found' });
+    res.json({ success: true, result, branding: {
+      agencyName: agency.agency_name,
+      logoUrl: agency.logo_url,
+      primaryColor: agency.primary_color,
+      secondaryColor: agency.secondary_color,
+      accentColor: agency.accent_color,
+      reportFooter: agency.report_footer,
+    }});
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Hook: when an agency audit completes, update agency_audits record ─────────
+// This is called from the OAuth callback after runFullAudit completes
+const updateAgencyAudit = async (tokenStr, realAuditId, result) => {
+  try {
+    await db.query(
+      `UPDATE agency_audits SET
+        audit_id = $1, status = 'complete', completed_at = NOW(),
+        score = $2, critical_count = $3, monthly_waste = $4
+       WHERE token_used = $5`,
+      [realAuditId, result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.monthlyWaste||0, tokenStr]
+    );
+    // Look up agency for notification
+    const agAudit = await db.query(`SELECT aa.*, ac.email as agency_email, ac.agency_name FROM agency_audits aa JOIN agency_accounts ac ON ac.id = aa.agency_id WHERE aa.token_used = $1`, [tokenStr]).catch(()=>({rows:[]}));
+    const row = agAudit.rows[0];
+    if (row) {
+      const brandParams = new URLSearchParams({ id: realAuditId, brand: row.agency_name });
+      await resend.emails.send({
+        from: 'FixOps Agency <reports@fixops.io>',
+        to: row.agency_email,
+        subject: `✅ Audit complete — ${row.client_name} — Score ${result.summary?.overallScore}/100`,
+        html: `<p><strong>${row.client_name}</strong>'s audit is complete.</p>
+               <p>Score: <strong>${result.summary?.overallScore}/100</strong> · ${result.summary?.criticalCount} critical issues · $${Number(result.summary?.monthlyWaste||0).toLocaleString()}/mo waste</p>
+               <p><a href="${FRONTEND_URL}/results.html?${brandParams}">View branded results →</a></p>`
+      }).catch(()=>{});
+    }
+  } catch(e) {
+    console.error('updateAgencyAudit error:', e.message);
+  }
+};
+
+// ── Add purchase credits endpoint ─────────────────────────────────────────────
+app.post('/agency/add-credits', async (req, res) => {
+  try {
+    const { apiKey, credits, adminKey } = req.body;
+    if (adminKey !== process.env.FIXOPS_ADMIN_KEY) return res.status(403).json({ error: 'Admin key required' });
+    await db.query(
+      `UPDATE agency_accounts SET audit_credits = audit_credits + $1, updated_at = NOW() WHERE api_key = $2`,
+      [credits, apiKey]
+    );
+    res.json({ success: true, message: `Added ${credits} credits` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Branding resolution — used by results/reporting pages ────────────────────
+// When ?brand= params are in URL, results page can fetch branding from agency slug
+app.get('/agency/branding/:slug', async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT agency_name, logo_url, primary_color, secondary_color, accent_color, report_footer
+       FROM agency_accounts WHERE agency_slug = $1 AND is_active = true`,
+      [req.params.slug]
+    );
+    if (!r.rows[0]) return res.status(404).json({ error: 'Agency not found' });
+    res.json({ success: true, branding: r.rows[0] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 // Lightweight daily check — workflow errors, ghost seats, billing tier risk
 // Not a full 210-point audit — just the 5 critical health signals that change daily
 const runSentinelCheck = async (customer) => {
@@ -2953,6 +3448,12 @@ app.get('/auth/callback', async (req, res) => {
         }
         notifyMatthew(result, auditIdCopy, auditMeta.plan)
           .catch(e => console.error(`[${auditIdCopy}] ⚠️ Notify failed:`, e.message));
+
+        // If this was an agency audit, update their dashboard
+        if (auditMeta.auditToken) {
+          updateAgencyAudit(auditMeta.auditToken, auditIdCopy, result)
+            .catch(e => console.error(`[${auditIdCopy}] ⚠️ Agency audit update failed:`, e.message));
+        }
 
         // Update customer last audit
         if (auditMeta.email) {
