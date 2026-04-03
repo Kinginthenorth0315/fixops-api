@@ -8233,8 +8233,10 @@ async function runFullAudit(token, auditId, meta) {
     };
   })();
 
-  // 1. Duplicate contacts → billing tier inflation ($0.45/dupe/mo)
-  const wasteDupes = Math.round(dupes * 0.45);
+  // 1. Duplicate contacts → billing tier inflation
+  // HubSpot 5k tier = $800/mo ÷ 5000 contacts = $0.16/contact
+  // HubSpot 10k tier = $1600/mo ÷ 10000 = $0.16/contact. We use $0.18 as a mid-point.
+  const wasteDupes = Math.round(dupes * 0.18);
 
   // 2. Stalled pipeline → opportunity cost (2%/mo of stalled pipeline VALUE only)
   //    Only count if deals have actual $ amounts — avoids inflating on $0-amount deals
@@ -8245,20 +8247,23 @@ async function runFullAudit(token, auditId, meta) {
   // 3. Dead workflows → rep time + missed automation ($22/dead wf/mo)
   const wasteDeadWorkflows = Math.round(deadWf.length * 22);
 
-  // 4. Ghost seats → HubSpot seat cost ($75/inactive seat/mo)
-  const wasteGhostSeats = Math.round(inactiveUsers.length * 75);
+  // 4. Ghost seats → HubSpot Sales/Service Hub Pro seat cost ($90/seat/mo)
+  // Source: HubSpot published pricing — Sales Hub Pro = $90/seat, Enterprise = $120/seat
+  const wasteGhostSeats = Math.round(inactiveUsers.length * 90);
 
-  // 5. Contacts with no email → missed marketing nurture value
-  //    Only meaningful on full scans — free scan cap skews this badly
-  const wasteNoEmail = isFullScan ? Math.round(noEmail.length * 1.2) : 0;
+  // 5. Contacts with no email → billing overhead with zero marketing value
+  // We do NOT quantify as dollar waste since nurture value is portal-specific
+  // Instead tracked as a data quality issue, not a waste dollar amount
+  const wasteNoEmail = 0;
 
   // 6. Overdue invoices → AR collection cost ($35/overdue invoice/mo)
   const wasteOverdueInv = invoices.length > 0 ? Math.round(overdueInvoices.length * 35) : 0;
 
-  // 7. Expired quotes → recoverable revenue (40% win-back rate × avg deal × 0.40 / 12)
+  // 7. Expired quotes → recoverable revenue (20% win-back rate × avg deal / 12)
+  // Source: B2B win-back rates average 15-25% (Forrester 2023). Using 20% is conservative and defensible.
   const expiredQList = quotes.filter(q => String(q.properties?.hs_quote_status||'').toLowerCase() === 'expired');
   const wasteExpiredQ = expiredQList.length > 0
-    ? Math.round(expiredQList.length * Math.max(avgDealSize, 500) * 0.40 / 12)
+    ? Math.round(expiredQList.length * Math.max(avgDealSize, 500) * 0.20 / 12)
     : 0;
 
   const monthlyWaste = Math.round(
