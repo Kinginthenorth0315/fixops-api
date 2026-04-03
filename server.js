@@ -7307,7 +7307,7 @@ async function runFullAudit(token, auditId, meta) {
   const scores = Object.fromEntries(
     Object.entries(scoreMap).filter(([,v]) => v !== null)
   );
-const criticalCount = issues.filter(i=>i.severity==='critical').length;
+  const criticalCount = issues.filter(i=>i.severity==='critical').length;
   const warningCount  = issues.filter(i=>i.severity==='warning').length;
   const infoCount     = issues.filter(i=>i.severity==='info').length;
     // Overall = weighted average + critical penalty
