@@ -4497,7 +4497,7 @@ async function runFullAudit(token, auditId, meta) {
   // These are the highest-value objects. Sequential to avoid 429s on large portals.
   await up(12, 'Reading contacts…');
   const contactsR = await paginate(
-    '/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason,hs_email_optout,hs_calculated_merged_vids,hs_persona,num_associated_companies,hs_analytics_source,hs_analytics_source_data_1,associatedcompanyid',
+    '/crm/v3/objects/contacts?properties=email,firstname,lastname,phone,company,hubspot_owner_id,lifecyclestage,hs_lead_status,createdate,num_contacted_notes,hs_last_sales_activity_timestamp,hs_email_hard_bounce_reason,hs_email_optout,hs_calculated_merged_vids,hs_persona,num_associated_companies,hs_analytics_source,hs_analytics_source_data_1,associatedcompanyid,hubspotscore',
     contactLimit
   );
 
@@ -4648,7 +4648,38 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
 
-  // ── Setup Health Data ─────────────────────────────────────────────────────
+  // ── Connected Integrations (for sync error detection) ─────────────────────
+  const integrationsR = await safe(
+    () => hs.get('/integrations/v1/me'),
+    {data:{results:[]}}
+  );
+  // Timeline event types — tells us what integrations are actively writing data
+  const timelineAppsR = await safe(
+    () => hs.get('/crm/v3/timeline/event-types?limit=100'),
+    {data:{results:[]}}
+  );
+  // Lead scoring — new HubSpot Lead Scoring tool (replaced score properties Aug 31, 2025)
+  // The new tool creates properties with fieldType = "score" accessible via the properties API
+  // We fetch ALL contact properties filtered for score type to detect new tool AND legacy
+  const allContactPropsR = await safe(
+    () => hs.get('/crm/v3/properties/contacts?limit=500&archived=false'),
+    {data:{results:[]}}
+  );
+  const allContactProps = allContactPropsR.data?.results || [];
+  // Score-type properties = new Lead Scoring tool (type: "score" fieldType)
+  const scoreProps = allContactProps.filter(p =>
+    p.fieldType === 'score' || p.type === 'score' ||
+    // Also catch legacy hubspotscore (fieldType=calculation) so we can flag migration needed
+    p.name === 'hubspotscore'
+  );
+  // New lead score properties (not the legacy hubspotscore)
+  const newLeadScoreProps = scoreProps.filter(p => p.name !== 'hubspotscore');
+  // Legacy score property still present
+  const legacyScoreProp = scoreProps.find(p => p.name === 'hubspotscore');
+  // The primary score property to check values on — prefer new tool, fall back to legacy
+  const primaryScoreProp = newLeadScoreProps[0] || legacyScoreProp || null;
+  // For backward compat with engine below
+  const leadScoreProperty = primaryScoreProp;
   // Domain/email authentication (SPF, DKIM, DMARC)
   const domainsR = await safe(
     () => hs.get('/cms/v3/domains?limit=100'),
@@ -4697,10 +4728,8 @@ async function runFullAudit(token, auditId, meta) {
       total: typeof total === 'number' ? total : 0,
     });
   }
-  const contactPropsR = await safe(
-    () => hs.get('/crm/v3/properties/contacts?limit=500'),
-    {data:{results:[]}}
-  );
+  // Reuse allContactPropsR fetched above for lead scoring (avoids duplicate API call)
+  const contactPropsR = allContactPropsR;
   const emailEngR = await safe(
     () => hs.get('/crm/v3/objects/emails?limit=100&properties=hs_email_direction,hs_email_status,hs_createdate,hubspot_owner_id'),
     {data:{results:[]}}
@@ -4754,6 +4783,10 @@ async function runFullAudit(token, auditId, meta) {
   const emailDomains    = emailDomainsR.data?.results||[];
   const importHistory   = importsR.data?.results||[];
   const accountInfo     = accountInfoR.data||{};
+  // Integration data
+  const connectedIntegrations = integrationsR.data?.results || [];
+  const timelineApps    = timelineAppsR.data?.results || [];
+  // leadScoreProperty already set above from new lead scoring tool detection
   const emailEngs       = emailEngR.data?.results||[];
   const notes           = notesR.data?.results||[];
   const carts           = cartsR.data?.results||[];
@@ -5863,6 +5896,247 @@ async function runFullAudit(token, auditId, meta) {
         ]
       });
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ LEAD SCORING INTELLIGENCE ENGINE
+  // Detects new HubSpot Lead Scoring tool (Aug 2025+) — not the old hubspotscore
+  // New tool creates score-type properties for contacts, companies, and deals
+  // Legacy hubspotscore stopped updating Aug 31 2025 — flag migration needed
+  // ══════════════════════════════════════════════════════════════════════════
+  const leadScoringEngine = (() => {
+    // isConfigured = using the NEW lead scoring tool (not just legacy)
+    const isNewToolConfigured = newLeadScoreProps.length > 0;
+    const isLegacyOnly = !isNewToolConfigured && !!legacyScoreProp;
+    const isConfigured  = isNewToolConfigured || isLegacyOnly;
+
+    // Determine which property name to read score values from
+    const scorePropName = primaryScoreProp?.name || null;
+
+    const scoredContacts = scorePropName ? contacts.filter(c => {
+      const score = parseFloat(c.properties?.[scorePropName] || 0);
+      return score > 0;
+    }) : [];
+    const pctScored = contacts.length > 0 ? Math.round(scoredContacts.length / contacts.length * 100) : 0;
+
+    // Score distribution
+    const dist = { low: 0, medium: 0, high: 0, veryHigh: 0 };
+    scoredContacts.forEach(c => {
+      const s = parseFloat(c.properties?.[scorePropName] || 0);
+      if (s >= 75) dist.veryHigh++;
+      else if (s >= 50) dist.high++;
+      else if (s >= 25) dist.medium++;
+      else dist.low++;
+    });
+
+    const highScoreContacts = scoredContacts.filter(c => parseFloat(c.properties?.[scorePropName]||0) >= 50);
+    const lowScoreContacts  = scoredContacts.filter(c => parseFloat(c.properties?.[scorePropName]||0) < 50 && parseFloat(c.properties?.[scorePropName]||0) > 0);
+
+    // Pattern analysis: what are winning contacts' common properties?
+    const winnerSources = {};
+    const winnerPersonas = {};
+    contacts.forEach(c => {
+      const lc  = c.properties?.lifecyclestage || '';
+      const src = c.properties?.hs_analytics_source || '';
+      const persona = c.properties?.hs_persona || '';
+      if (['customer','opportunity'].includes(lc)) {
+        if (src) winnerSources[src] = (winnerSources[src] || 0) + 1;
+        if (persona) winnerPersonas[persona] = (winnerPersonas[persona] || 0) + 1;
+      }
+    });
+    const totalCustomers = contacts.filter(c => c.properties?.lifecyclestage === 'customer').length;
+
+    // Recommendations based on data patterns
+    const recommendations = [];
+    if (totalCustomers > 10) {
+      const topSources = Object.entries(winnerSources).sort((a,b)=>b[1]-a[1]).slice(0,3);
+      if (topSources.length > 0) recommendations.push({
+        property: 'hs_analytics_source',
+        criterion: `Original source = ${topSources[0][0]}`,
+        points: 15,
+        reason: `${topSources[0][1]} of your ${totalCustomers} customers came from this source — highest converting channel`,
+        hubspotPath: 'Marketing → Lead Scoring → + Add Score → Fit Criteria → Contact Property → Original Source'
+      });
+      recommendations.push({
+        property: 'lifecyclestage',
+        criterion: 'Lifecycle stage is MQL or SQL',
+        points: 20,
+        reason: 'Contacts at MQL/SQL stage are actively being sales-qualified — highest close probability',
+        hubspotPath: 'Marketing → Lead Scoring → + Add Score → Fit Criteria → Contact Property → Lifecycle Stage'
+      });
+    }
+    recommendations.push(
+      { property: 'hs_email_open_count', criterion: 'Email opens in last 30 days > 2', points: 8,
+        reason: 'Email engagement is a strong buying signal', hubspotPath: 'Marketing → Lead Scoring → Engagement Criteria → Marketing Email Opens' },
+      { property: 'num_associated_deals', criterion: 'Has an associated deal', points: 25,
+        reason: 'Contact has been moved to active sales pipeline — highest intent signal', hubspotPath: 'Marketing → Lead Scoring → Fit Criteria → Associated Deal exists' },
+      { property: 'hs_email_hard_bounce_reason', criterion: 'Email bounced = is not known', points: -20,
+        reason: 'Hard-bounced contacts cannot be reached — negative signal', hubspotPath: 'Marketing → Lead Scoring → Fit Criteria → Email Bounce' }
+    );
+
+    return {
+      isConfigured,
+      isNewToolConfigured,
+      isLegacyOnly,
+      needsMigration: isLegacyOnly, // legacy stopped updating Aug 31 2025
+      scoreProperties: newLeadScoreProps.map(p => ({ name: p.name, label: p.label, type: p.type })),
+      legacyPropertyExists: !!legacyScoreProp,
+      pctScored,
+      scoredCount: scoredContacts.length,
+      totalContacts: contacts.length,
+      distribution: dist,
+      highScoreCount: highScoreContacts.length,
+      totalCustomers,
+      recommendations: recommendations.slice(0, 6),
+      topWinnerSources: Object.entries(winnerSources).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([source,count])=>({source,count})),
+    };
+  })();
+
+  // Add lead scoring issues — using new HubSpot Lead Scoring tool (Aug 2025+)
+  if (leadScoringEngine.needsMigration) {
+    // Legacy hubspotscore exists but stopped updating Aug 31 2025
+    marketingScore -= 15;
+    issues.push({
+      severity: 'critical',
+      title: 'Legacy HubSpot Score stopped updating Aug 31, 2025 — migrate to new Lead Scoring tool now',
+      description: `Your portal has the old HubSpot Score property, which stopped updating on August 31, 2025. Contacts are no longer being scored, workflows that relied on score changes have gone silent, and your lead prioritization is frozen at pre-cutoff values.`,
+      detail: 'HubSpot replaced score properties with the new Lead Scoring tool. The new tool supports separate Fit scores (who they are), Engagement scores (what they do), and Combined scores — all updating in real time.',
+      impact: `${fmt(contacts.length)} contacts no longer being scored · score-based workflows silent · lead prioritization broken`,
+      dimension: 'Marketing',
+      leadScoringEngine,
+      guide: [
+        'Go to: Marketing → Lead Scoring (in Marketing Hub Pro+) or Sales → Lead Scoring (in Sales Hub Pro+)',
+        'Click + Create score → choose Combined score (Fit + Engagement) to replicate your old setup',
+        'Add Fit criteria based on contact properties (industry, company size, job title)',
+        'Add Engagement criteria based on activities (email opens, page views, form fills, meetings)',
+        'Update any workflows that used HubSpot Score changes to reference the new score property name',
+        'Set an MQL threshold and build a workflow to update lifecycle stage when score crosses it'
+      ]
+    });
+  } else if (!leadScoringEngine.isConfigured && contacts.length > 100) {
+    marketingScore -= 8;
+    issues.push({
+      severity: 'warning',
+      title: 'Lead Scoring not configured — no way to prioritize which contacts to work',
+      description: `You have ${fmt(contacts.length)} contacts but no lead score. HubSpot's Lead Scoring tool (Marketing Hub or Sales Hub Pro+) lets you build Engagement scores (what contacts do) and Fit scores (who they are) — separately or combined. Without it, every contact looks the same to your reps.`,
+      detail: 'The new HubSpot Lead Scoring tool (2024–2025) replaced the old HubSpot Score property. It scores contacts, companies, and deals with separate Fit + Engagement dimensions, time-based criteria, and optional AI-assisted scoring.',
+      impact: `${fmt(contacts.length)} contacts unscored · reps cannot prioritize · no MQL automation · sequence targeting is generic`,
+      dimension: 'Marketing',
+      leadScoringEngine,
+      fixItService: 'Lead Scoring Setup',
+      fixItEstimate: '$349',
+      guide: [
+        'Go to: Marketing → Lead Scoring → + Create score → Combined (Fit + Engagement)',
+        `Start with these criteria from your portal data: ${leadScoringEngine.recommendations.slice(0,2).map(r=>r.criterion+' (+'+r.points+' pts)').join(', ')}`,
+        'Add Engagement criteria: email opens, page views, form submissions, meeting booked',
+        'Add Fit criteria: job title, company size, industry — score who they are not just what they do',
+        'Set an MQL threshold (A1/A2 combined grade) and automate lifecycle stage update via workflow',
+        'FixOps Lead Scoring Setup builds a custom model from YOUR contact patterns and winning customer data'
+      ]
+    });
+  } else if (leadScoringEngine.isNewToolConfigured && leadScoringEngine.pctScored < 10 && contacts.length > 200) {
+    issues.push({
+      severity: 'warning',
+      title: `Lead Scoring configured but only ${leadScoringEngine.pctScored}% of contacts have a score — criteria too narrow`,
+      description: `The Lead Scoring tool is active with ${leadScoringEngine.scoreProperties.length} score propert${leadScoringEngine.scoreProperties.length!==1?'ies':'y'}, but only ${fmt(leadScoringEngine.scoredCount)} of ${fmt(contacts.length)} contacts have a score. Criteria are likely too specific or contacts aren't engaging with the tracked activities.`,
+      impact: `${fmt(contacts.length - leadScoringEngine.scoredCount)} contacts invisible to scoring · prioritization broken`,
+      dimension: 'Marketing',
+      leadScoringEngine,
+      guide: [
+        'Marketing → Lead Scoring → open each score → review Engagement and Fit criteria',
+        'Add broader Engagement criteria: "Marketing email opened in last 90 days" or "Page view in last 30 days"',
+        `Your top converting sources: ${leadScoringEngine.topWinnerSources.slice(0,3).map(s=>s.source).join(', ')} — add these as Fit score criteria`,
+        'Use the Preview Distribution feature to see how contacts cluster before publishing changes'
+      ]
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✦ INTEGRATION SYNC ERROR DETECTION
+  // Connected apps, auth failures, sync issues causing data gaps
+  // ══════════════════════════════════════════════════════════════════════════
+  const integrationErrors = [];
+
+  // Check connected integrations for auth/sync issues
+  if (connectedIntegrations.length > 0) {
+    connectedIntegrations.forEach(integration => {
+      const name = integration.portalName || integration.name || integration.type || 'Unknown Integration';
+      const status = String(integration.status || integration.authStatus || '').toLowerCase();
+      if (['error','failed','disconnected','expired','unauthorized','invalid'].some(s => status.includes(s))) {
+        integrationErrors.push({
+          name,
+          type: 'auth_failure',
+          message: `Authentication expired or invalid — no data syncing`,
+          severity: 'critical',
+          fix: `Reconnect ${name}: Settings → Integrations → Connected Apps → ${name} → Reconnect`
+        });
+      }
+    });
+  }
+
+  // Detect integration issues from workflow errors — common cause is broken integration auth
+  const workflowsWithIntegrationErrors = workflows.filter(wf => {
+    const status = String(wf.executionState || wf.status || '').toUpperCase();
+    const name = String(wf.name || '').toLowerCase();
+    // Workflows erroring that reference integration keywords
+    return ['ERROR','FAILED','PAUSED_DUE_TO_ERROR'].includes(status) &&
+      (name.includes('salesforce') || name.includes('slack') || name.includes('zoom') ||
+       name.includes('gong') || name.includes('outreach') || name.includes('salesloft') ||
+       name.includes('zapier') || name.includes('gmail') || name.includes('outlook') ||
+       name.includes('calendar') || name.includes('stripe') || name.includes('netsuite') ||
+       name.includes('quickbooks') || wf.errorCount > 10);
+  });
+
+  if (workflowsWithIntegrationErrors.length > 0) {
+    workflowsWithIntegrationErrors.forEach(wf => {
+      integrationErrors.push({
+        name: wf.name || wf.id,
+        type: 'workflow_integration_error',
+        message: `Workflow "${wf.name}" erroring — likely a broken integration connection`,
+        errorCount: wf.errorCount || 0,
+        severity: 'critical',
+        fix: `Automation → Workflows → open "${wf.name}" → check Error details tab for the specific integration causing failures`
+      });
+    });
+  }
+
+  // Check for Salesforce sync errors via contact source analysis
+  const sfContacts = contacts.filter(c => {
+    const src = String(c.properties?.hs_analytics_source || '').toLowerCase();
+    return src.includes('salesforce') || src.includes('crm');
+  });
+  if (sfContacts.length > 10) {
+    // If we have Salesforce contacts but many have missing owner/company, likely sync issue
+    const sfNoOwner = sfContacts.filter(c => !c.properties?.hubspot_owner_id).length;
+    if (sfNoOwner > sfContacts.length * 0.3) {
+      integrationErrors.push({
+        name: 'Salesforce Sync',
+        type: 'sync_gap',
+        message: `${sfNoOwner} of ${sfContacts.length} Salesforce-sourced contacts have no HubSpot owner — owner sync may be misconfigured`,
+        severity: 'warning',
+        fix: 'Settings → Integrations → Salesforce → Sync Settings → verify Owner field mapping is configured'
+      });
+    }
+  }
+
+  // Add integration error issues
+  if (integrationErrors.length > 0) {
+    const criticalErrors = integrationErrors.filter(e => e.severity === 'critical');
+    autoScore -= Math.min(20, integrationErrors.length * 5);
+    issues.push({
+      severity: criticalErrors.length > 0 ? 'critical' : 'warning',
+      title: `${integrationErrors.length} integration ${integrationErrors.length===1?'issue':'issues'} detected — data may not be syncing correctly`,
+      description: `Integration failures cause silent data gaps: contacts created in Salesforce don't appear in HubSpot, deals don't update, email activity stops logging. Your team makes decisions on incomplete data without knowing it. ${criticalErrors.length > 0 ? `${criticalErrors.length} critical issue${criticalErrors.length!==1?'s':''} need immediate attention.` : ''}`,
+      detail: 'Integration sync errors compound over time — a break that started last week means weeks of missing data. Contacts created, deals updated, and emails sent during the outage are not reflected in HubSpot reporting.',
+      impact: `${integrationErrors.length} integration ${integrationErrors.length===1?'issue':'issues'} · data gaps growing daily · reporting accuracy compromised`,
+      dimension: 'Automation',
+      integrationErrors,
+      fixItService: 'Integration Repair',
+      fixItEstimate: 'From $299',
+      guide: integrationErrors.slice(0,4).map((e,i) => `${i+1}. ${e.message} → ${e.fix}`).concat([
+        'FixOps Integration Repair reconnects, re-syncs historical data, and maps all fields correctly — same business day'
+      ])
+    });
   }
 
   // 4. WORKFLOW ERRORS  -  detect broken workflows when Public App scope available
@@ -8332,6 +8606,14 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
         customObjectNames: customObjectData.map(o => o.labelPlural || o.label),
         customObjectData: customObjectData,  // full array with counts
         undocumentedProps: contactProps.filter(p => p.createdUserId && !p.description).length,
+
+        // ── Lead Scoring Intelligence ──────────────────────────────────────
+        leadScoringEngine,
+
+        // ── Integration Health ─────────────────────────────────────────────
+        connectedIntegrationCount: connectedIntegrations.length,
+        integrationErrorCount: integrationErrors.length,
+        integrationErrors: integrationErrors.slice(0, 10),
 
         // ── PIPELINE VELOCITY ENGINE ─────────────────────────────────────────
         // Calculates actual stage velocity from deal data — cross-refs pipeline stages
