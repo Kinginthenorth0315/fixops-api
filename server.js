@@ -4840,12 +4840,30 @@ async function runFullAudit(token, auditId, meta) {
 
 
   // ── DATA INTEGRITY ──────────────────────────────────────────
+  // Dupe detection: name-match + email-domain consistency check
+  // Avoids false positives on common names by requiring non-trivial name
   const nameMap = {};
+  const emailDomainMap = {};
   contacts.forEach(c => {
-    const k = `${c.properties?.firstname||''}_${c.properties?.lastname||''}`.toLowerCase().trim();
-    if(k.length>3&&k!=='_') nameMap[k]=(nameMap[k]||0)+1;
+    const fn = (c.properties?.firstname||'').toLowerCase().trim();
+    const ln = (c.properties?.lastname||'').toLowerCase().trim();
+    const email = (c.properties?.email||'').toLowerCase();
+    const domain = email.includes('@') ? email.split('@')[1] : '';
+    const k = `${fn}_${ln}`;
+    // Only flag as potential dupe if name has substance (not just initials or single chars)
+    if(fn.length >= 2 && ln.length >= 2 && k !== '_') {
+      nameMap[k] = (nameMap[k] || 0) + 1;
+    }
+    if(domain && fn) {
+      const dk = `${fn}_${domain}`;
+      emailDomainMap[dk] = (emailDomainMap[dk] || 0) + 1;
+    }
   });
-  const dupes = Object.values(nameMap).filter(v=>v>1).reduce((a,b)=>a+b,0);
+  // Name dupes: same first+last (exclude very common names above 5 — likely different people)
+  const nameDupes = Object.entries(nameMap).filter(([,v]) => v > 1 && v <= 8).reduce((a,[,v]) => a + v, 0);
+  // Email domain dupes: same first name + same company domain (strong signal)
+  const domainDupes = Object.entries(emailDomainMap).filter(([,v]) => v > 1 && v <= 5).reduce((a,[,v]) => a + v, 0);
+  const dupes = Math.round((nameDupes * 0.6) + (domainDupes * 0.4));  // weighted blend, conservative
   if(dupes>0){
     dataScore-=Math.min(25,dupes/3);
     issues.push({severity:dupes>15?'critical':'warning',title:`${dupes} potential duplicate contacts — missed by HubSpot native dedup`,description:`HubSpot only deduplicates on exact email matches. These ${dupes} contacts share the same name but different email formats or sources. They\'re receiving duplicate sequences, corrupting attribution, and inflating your billing tier.`,detail:`HubSpot\'s native "Manage Duplicates" tool would miss all of these. They only match on exact email. FixOps matches on name + phone + company — the way humans spot duplicates.`,impact:`~$${Math.round(dupes*0.38)}/mo excess billing · duplicated outreach to real people · corrupted attribution data`,dimension:'Data Integrity',guide:['Go to Contacts → Actions → Manage Duplicates to clear HubSpot\'s exact-match suggestions first','For fuzzy duplicates: export contacts, sort by Last Name, identify and merge name-matched groups','FixOps Data CleanUp runs full fuzzy-match dedup with a merge preview — you approve before anything changes','Every merge preserves full activity history — no data is ever lost']});
@@ -5218,16 +5236,26 @@ async function runFullAudit(token, auditId, meta) {
     issues.push({severity:superAdmins.length>6?'critical':'warning',title:`${superAdmins.length} super admins — excess full-access accounts are a security risk`,description:`Super admins can delete any record, change billing, modify any setting, and install any integration with zero approval. Best practice is 2 maximum. Every extra super admin is an unmonitored security surface — and a former employee\'s compromised account gives full access to your entire CRM.`,detail:`The most common data breach vector in HubSpot portals: a super admin who left the company 6+ months ago, whose account was never deactivated, gets compromised. Immediate risk: full database access and deletion rights.`,impact:`${superAdmins.length} accounts with unrestricted portal access and deletion rights`,dimension:'Configuration',guide:['Settings → Users → filter Super Admin — does each person still need full unrestricted access?','Reduce to 2 super admins: primary admin and one backup only','Deactivate any super admin account belonging to someone who has left the company immediately','Replace super admin access with granular role-based permissions for all other users']});
   }
 
-  const inactiveUsers = users.filter(u=>{
-    const last = u.properties?.hs_last_login_time || u.lastLoginDate || u.lastLogin || u.properties?.lastLoginDate;
-    if(!last) return false;
+  // settings/v3/users returns: { id, email, firstName, lastName, superAdmin,
+  //   roleId, lastLogin (ISO string), createdAt, updatedAt }
+  // Also try settingsUsers which uses the same endpoint but may have fuller data
+  const allUsers = settingsUsers.length > 0 ? settingsUsers : users;
+  const getLastLogin = (u) =>
+    u.lastLogin || u.lastLoginDate || u.lastActivityAt ||
+    u.properties?.hs_last_login_time || u.properties?.lastLoginDate || null;
+  const getUserName = (u) =>
+    [u.firstName||u.first_name||'', u.lastName||u.last_name||''].filter(Boolean).join(' ') ||
+    u.email || 'Unknown User';
+
+  const inactiveUsers = allUsers.filter(u => {
+    const last = getLastLogin(u);
+    if (!last) return false;  // no login data — don't flag as inactive
     return (now - new Date(last).getTime()) / DAY > 90;
   });
   const ghostSeatData = inactiveUsers.map(u => {
-    const last = u.properties?.hs_last_login_time || u.lastLoginDate || u.lastLogin || u.properties?.lastLoginDate;
+    const last = getLastLogin(u);
     const daysSince = last ? Math.round((now - new Date(last).getTime()) / DAY) : 999;
-    const name = [u.properties?.firstname||u.firstName||'', u.properties?.lastname||u.lastName||''].filter(Boolean).join(' ') || u.properties?.email || 'Unknown User';
-    return { name, daysSince, email: u.properties?.email || '' };
+    return { name: getUserName(u), daysSince, email: u.email || '' };
   }).sort((a,b) => b.daysSince - a.daysSince);
   const estMonthlySeatWaste = inactiveUsers.length * 90;
   if(inactiveUsers.length > 0){
@@ -7269,39 +7297,42 @@ async function runFullAudit(token, auditId, meta) {
   const hasMarketingData = forms.length > 0 || lists.length > 0 || marketingEmails.length > 0 || sequences.length > 0;
   const hasServiceData = tickets.length > 0 || feedback.length > 0;
 
+  // Score floors: no dimension should realistically show below 10
+  // Prevents 0-scores on portals that are bad but not literally non-functional
+  const scoreFloor = (s, floor) => Math.max(floor, Math.min(100, Math.round(s)));
   const scoreMap = {
     dataIntegrity:    contacts.length > 50 
-      ? Math.max(0, Math.min(100, Math.round(dataScore))) 
+      ? scoreFloor(dataScore, 12)
       : contacts.length > 0 
-        ? Math.max(0, Math.min(100, Math.round(dataScore + 10))) // small portals get slight benefit of doubt
+        ? scoreFloor(dataScore + 10, 15)
         : null,
 
     automationHealth: (workflows.length > 0 || sequences.length > 0) 
-      ? Math.max(0, Math.min(100, Math.round(autoScore))) 
-      : null,  // No workflows/sequences → no automation score
+      ? scoreFloor(autoScore, 15)
+      : null,
 
     pipelineIntegrity: deals.length > 0 
-      ? Math.max(0, Math.min(100, Math.round(pipelineScore))) 
-      : null,  // No deals → no pipeline score
+      ? scoreFloor(pipelineScore, 12)
+      : null,
 
     marketingHealth:  hasMarketingData 
-      ? Math.max(0, Math.min(100, Math.round(marketingScore))) 
-      : null,  // No marketing activity → no score
+      ? scoreFloor(marketingScore, 10)
+      : null,
 
-    configSecurity:   Math.max(0, Math.min(100, Math.round(configScore))),
-    // Config always scored — every portal has users + settings
+    configSecurity:   scoreFloor(configScore, 28),
+    // Config starts at 88, floor at 28 — even terrible config is functional
 
     reportingQuality: deals.length > 10 
-      ? Math.max(0, Math.min(100, Math.round(reportingScore))) 
-      : null,  // Need meaningful deal volume for reporting to matter
+      ? scoreFloor(reportingScore, 15)
+      : null,
 
     teamAdoption:     (users.length > 1 && hasActivityData)
-      ? Math.max(0, Math.min(100, Math.round(teamScore)))
-      : null,  // No activity data → can't score team adoption accurately
+      ? scoreFloor(teamScore, 15)
+      : null,
 
     serviceHealth:    hasServiceData 
-      ? Math.max(0, Math.min(100, Math.round(serviceScore))) 
-      : null,  // No tickets or NPS → no service score
+      ? scoreFloor(serviceScore, 18)
+      : null,
   };
   // Filter to only scored dimensions, build scores object
   const scores = Object.fromEntries(
