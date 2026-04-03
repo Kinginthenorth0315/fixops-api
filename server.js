@@ -4427,6 +4427,8 @@ cron.schedule('30 14 * * 1', async () => {
 async function runFullAudit(token, auditId, meta) {
   // Works with both MCP OAuth tokens AND HubSpot Private App tokens
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 30000 }); // 30s per request
+  // Add .post shorthand matching .get pattern (used for CRM search endpoints)
+  hs.post = (url, body) => axios.post('https://api.hubapi.com' + url, body, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 });
   const safe = async (fn, fb) => { try { return await fn(); } catch(e) { if(e.response?.status !== 403) console.log('API skip:', e.message?.substring(0,50)); return fb; } };
 
   // Smart sampling fetch — scales to any portal size
@@ -4564,9 +4566,9 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
   const usersR = await safe(()=>hs.get('/settings/v3/users?limit=100'), {data:{results:[]}});
-  // Use the v3 lists endpoint that paginates properly
+  // Use the v3 lists endpoint - no ?properties= param (not supported, causes 400)
   const listsR = await safe(
-    () => paginate('/crm/v3/lists?properties=name,listType,dynamic,metaData', smallLimit),
+    () => paginate('/crm/v3/lists', smallLimit),
     {data:{results:[]}}
   );
 
@@ -4706,26 +4708,34 @@ async function runFullAudit(token, auditId, meta) {
     {data:{}}
   );
 
-  // Fetch record counts for each custom object (up to 10)
+  // Fetch record counts for each custom object using search endpoint (returns true .total)
   const customObjectData = [];
   const customSchemasList = customSchemasR.data?.results || [];
   const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email','p_contact_event','p_deal_split']);
   const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name) && sc.objectTypeId);
   for (const schema of userCustomSchemas) {
-    // Use objectTypeId (e.g. "2-12345") which is the correct API identifier for custom objects
     const objectId = schema.objectTypeId || schema.name;
+    // POST search with limit:0 reliably returns .total - GET list endpoint does not
     const countR = await safe(
-      () => hs.get(`/crm/v3/objects/${encodeURIComponent(objectId)}?limit=1`),
-      {data:{total:0}}
+      () => hs.post(`/crm/v3/objects/${encodeURIComponent(objectId)}/search`, { limit: 0, filterGroups: [], properties: [] }),
+      {data:{total:null}}
     );
-    // HubSpot returns total in the paging object for CRM v3
-    const total = countR.data?.total ?? countR.data?.paging?.next?.after ?? 0;
+    let total = countR.data?.total;
+    // Fallback: GET list if search fails or returns null (some portals restrict search)
+    if (total == null) {
+      const listR = await safe(
+        () => hs.get(`/crm/v3/objects/${encodeURIComponent(objectId)}?limit=1`),
+        {data:{total:0}}
+      );
+      total = listR.data?.total ?? 0;
+    }
     customObjectData.push({
       name: schema.name,
       objectTypeId: objectId,
       label: schema.labels?.singular || schema.name,
       labelPlural: schema.labels?.plural || schema.name,
       total: typeof total === 'number' ? total : 0,
+      primaryDisplayProperty: schema.primaryDisplayProperty || null,
     });
   }
   // Reuse allContactPropsR fetched above for lead scoring (avoids duplicate API call)
@@ -7909,6 +7919,24 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
 
     const activeWfs = workflows.filter(w => w.enabled || w.isEnabled || w.status === 'ACTIVE');
 
+    // Helper: extract property references from filter groups — hoisted so all loops can use it
+    const extractFilters = (groups) => {
+      const filters = [];
+      if (Array.isArray(groups)) {
+        groups.forEach(g => {
+          const gFilters = g.filters || g.filterGroups || [];
+          if (Array.isArray(gFilters)) {
+            gFilters.forEach(f => {
+              if (f.property) filters.push({ property: f.property, value: f.value });
+              if (f.filters) f.filters.forEach(ff => ff.property && filters.push({ property: ff.property, value: ff.value }));
+            });
+          }
+          if (g.property) filters.push({ property: g.property, value: g.value });
+        });
+      }
+      return filters;
+    };
+
     activeWfs.forEach(wf => {
       const name = wf.name || wf.id || 'Unknown';
       const wfDeps = { name, id: wf.id, issues: [] };
@@ -7916,26 +7944,6 @@ const criticalCount = issues.filter(i=>i.severity==='critical').length;
       // Parse trigger criteria — v3 format has filterGroups or triggers array
       const triggerGroups = wf.filterGroups || wf.triggers || [];
       const actions = wf.actions || [];
-
-      // Helper: extract property references from filter groups
-      const extractFilters = (groups) => {
-        const filters = [];
-        if (Array.isArray(groups)) {
-          groups.forEach(g => {
-            const gFilters = g.filters || g.filterGroups || [];
-            if (Array.isArray(gFilters)) {
-              gFilters.forEach(f => {
-                if (f.property) filters.push({ property: f.property, value: f.value });
-                // Nested
-                if (f.filters) f.filters.forEach(ff => ff.property && filters.push({ property: ff.property, value: ff.value }));
-              });
-            }
-            // Direct filter on group
-            if (g.property) filters.push({ property: g.property, value: g.value });
-          });
-        }
-        return filters;
-      };
 
       const filters = extractFilters(triggerGroups);
 
