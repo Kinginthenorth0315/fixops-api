@@ -2284,10 +2284,12 @@ app.get('/audit/enrichment-gaps', async (req, res) => {
       { key: 'industry',      label: 'Industry',         impact: 'Cannot segment by vertical or run industry-specific nurture', priority: 4 },
     ];
 
-    const contactCompleteness = ps.contactCompleteness || {};
+    const completenessData = ps.contactCompleteness || {};
+    // missingByField stores count of contacts MISSING each field
+    const missingByField = completenessData.missingByField || {};
     const gaps = fields.map(f => {
-      const filled = contactCompleteness[f.key] || 0;
-      const missing = total - filled;
+      const missing = missingByField[f.key] !== undefined ? missingByField[f.key] : Math.round(total * 0.3); // fallback estimate
+      const filled = total - missing;
       const pct = total > 0 ? Math.round((missing / total) * 100) : 0;
       return {
         ...f,
@@ -4439,7 +4441,8 @@ async function runFullAudit(token, auditId, meta) {
 
   const paginate = async (url, maxRecords) => {
     const results = [];
-    let after = null;
+    let after = null;   // cursor-based (most CRM endpoints)
+    let offset = null;  // offset-based (lists endpoint)
     const limit = 100;
     let pages = 0;
     maxRecords = maxRecords || 999999;
@@ -4448,15 +4451,32 @@ async function runFullAudit(token, auditId, meta) {
     while (pages < maxPages && results.length < maxRecords) {
       try {
         const sep = url.includes('?') ? '&' : '?';
-        const params = after ? `${url}${sep}limit=${limit}&after=${after}` : `${url}${sep}limit=${limit}`;
+        let params = url + sep + 'limit=' + limit;
+        if (after)  params += '&after='  + after;
+        if (offset) params += '&offset=' + offset;
+
         const res = await hs.get(params);
-        const data = res.data?.results || res.data?.workflows || res.data?.lists || [];
+        // Support multiple response shapes
+        const data = res.data?.results || res.data?.workflows || res.data?.lists || res.data?.items || [];
         results.push(...data);
         pages++;
+
+        // Cursor-based pagination (CRM objects, marketing emails)
         const nextAfter = res.data?.paging?.next?.after;
-        if (!nextAfter || data.length < limit) break;
-        after = nextAfter;
-        await sleep(200); // avoid 429s on large portals
+        // Offset-based pagination (legacy lists, some marketing endpoints)
+        const hasMore   = res.data?.hasMore || res.data?.has_more;
+        const nextOffset = res.data?.offset !== undefined ? res.data.offset : null;
+
+        if (nextAfter) {
+          after = nextAfter;
+        } else if (hasMore && nextOffset !== null) {
+          offset = nextOffset;
+        } else {
+          break; // no more pages
+        }
+
+        if (data.length < limit) break; // partial page = last page
+        await sleep(150); // avoid 429s on large portals
       } catch(e) {
         if (e.response?.status === 429) {
           const wait = parseInt(e.response.headers?.['retry-after'] || '10') * 1000;
@@ -4464,13 +4484,13 @@ async function runFullAudit(token, auditId, meta) {
           await sleep(wait);
           continue; // retry same page
         }
-        if(e.response?.status !== 403) console.log('Paginate skip:', e.message?.substring(0,50));
+        if (e.response?.status !== 403) console.log('Paginate skip:', url.split('?')[0].split('/').pop(), '-', e.message?.substring(0,60));
         break;
       }
     }
 
     const obj = url.split('/').pop().split('?')[0];
-    console.log(`  [${obj}] ${results.length} records loaded`);
+    console.log(`  [paginate:${obj}] ${results.length} records (${pages} pages)`);
     return { data: { results } };
   };
 
@@ -4711,8 +4731,24 @@ async function runFullAudit(token, auditId, meta) {
   // Fetch record counts for each custom object using search endpoint (returns true .total)
   const customObjectData = [];
   const customSchemasList = customSchemasR.data?.results || [];
-  const nativeObjects = new Set(['contact','company','deal','ticket','product','line_item','quote','feedback_submission','communication','postal_mail','note','meeting','task','call','email','p_contact_event','p_deal_split']);
-  const userCustomSchemas = customSchemasList.filter(sc => !nativeObjects.has(sc.name) && sc.objectTypeId);
+  // HubSpot native object names - exclude these from custom object detection
+  const nativeObjects = new Set([
+    'contact','company','deal','ticket','product','line_item','quote',
+    'feedback_submission','communication','postal_mail','note','meeting',
+    'task','call','email','p_contact_event','p_deal_split',
+    'order','invoice','subscription','cart','marketing_event','lead',
+    'goal_target','commerce_payment','discount','fee','tax',
+  ]);
+  // Custom objects have objectTypeId starting with "2-" (e.g. "2-12345678")
+  // or are simply not in the native set
+  const userCustomSchemas = customSchemasList.filter(sc => {
+    if (!sc.objectTypeId) return false;
+    if (nativeObjects.has(sc.name)) return false;
+    // HubSpot native objectTypeIds are "0-1" through "0-30" range
+    const typeId = String(sc.objectTypeId);
+    if (/^0-\d+$/.test(typeId)) return false; // native type
+    return true; // custom type (2-XXXXXXXX or other)
+  });
   for (const schema of userCustomSchemas) {
     const objectId = schema.objectTypeId || schema.name;
     // POST search with limit:0 reliably returns .total - GET list endpoint does not
@@ -4740,12 +4776,14 @@ async function runFullAudit(token, auditId, meta) {
   }
   // Reuse allContactPropsR fetched above for lead scoring (avoids duplicate API call)
   const contactPropsR = allContactPropsR;
+  // Email engagements and notes - paginate for full rep intelligence data
+  // Capped at 1000 to avoid excessive API calls on high-volume portals
   const emailEngR = await safe(
-    () => hs.get('/crm/v3/objects/emails?limit=100&properties=hs_email_direction,hs_email_status,hs_createdate,hubspot_owner_id'),
+    () => paginate('/crm/v3/objects/emails?properties=hs_email_direction,hs_email_status,hs_createdate,hubspot_owner_id', Math.min(smallLimit, 1000)),
     {data:{results:[]}}
   );
   const notesR = await safe(
-    () => hs.get('/crm/v3/objects/notes?limit=100&properties=hs_note_body,hs_createdate,hubspot_owner_id'),
+    () => paginate('/crm/v3/objects/notes?properties=hs_note_body,hs_createdate,hubspot_owner_id', Math.min(smallLimit, 1000)),
     {data:{results:[]}}
   );
   const cartsR = await safe(
@@ -4808,9 +4846,13 @@ async function runFullAudit(token, auditId, meta) {
   (emailStatsR.data?.results||[]).forEach(s => {
     if (s.id) emailStatsMap[s.id] = s.counters || s.stats || {};
   });
+  // Always merge stats from statistics/list endpoint - overwrites any empty stats on the email object
   marketingEmails.forEach(e => {
-    if (!e.stats && !e.counters) {
-      e.stats = emailStatsMap[e.id] || {};
+    const mappedStats = emailStatsMap[e.id];
+    if (mappedStats && Object.keys(mappedStats).length > 0) {
+      e.stats = mappedStats; // prefer the dedicated stats endpoint over inline stats
+    } else if (!e.stats && !e.counters) {
+      e.stats = {};
     }
   });
   const tasks         = tasksR.data?.results||[];
@@ -4957,9 +4999,8 @@ async function runFullAudit(token, auditId, meta) {
       });
     }
 
-    // Store completeness data for dashboard display
-    if (!global._auditExtra) global._auditExtra = {};
-    global._auditExtra.contactCompleteness = { score: completenessScore, missingByField, total: contacts.length };
+    // contactCompleteness stored below in portalStats directly
+    const contactCompletenessData = { score: completenessScore, missingByField, total: contacts.length };
   }
 
   // ── CONTACT FIRST NAME CHECK (Portal IQ benchmark) ────────────
@@ -6461,9 +6502,10 @@ async function runFullAudit(token, auditId, meta) {
   // ── 10. MARKETING EMAIL HEALTH (content scope) ───────────────────────────
   if (marketingEmails.length > 0) {
     // Aggregate email stats across all sent emails
+    // Filter by email state - HubSpot returns PUBLISHED, SENT, SCHEDULED, DRAFT, ARCHIVED
     const sentEmails = marketingEmails.filter(e => {
-      const s = e.stats || e.counters || {};
-      return (s.sent || s.delivered || 0) > 100;
+      const state = String(e.state || e.currentState || e.hs_email_status || '').toUpperCase();
+      return ['PUBLISHED','SENT'].includes(state);
     });
 
     if (sentEmails.length > 0) {
@@ -8289,6 +8331,24 @@ async function runFullAudit(token, auditId, meta) {
         deals: deals.length, tickets: tickets.length,
         workflows: workflows.length, forms: forms.length,
         workflowList: workflows.slice(0, 100).map(w => ({ id: w.id, name: w.name||w.id, enabled: w.enabled||w.isEnabled, triggers: w.triggers||w.filterGroups||[], actions: w.actions||[], enrolledObjectsCount: w.enrolledObjectsCount||w.contactsEnrolled||0 })),
+        // Store open deals for deal-risk endpoint (capped to avoid storage bloat)
+        dealList: deals.filter(d => d.properties?.hs_is_closed !== 'true').slice(0, 500).map(d => ({
+          id: d.id,
+          properties: {
+            dealname: d.properties?.dealname,
+            amount: d.properties?.amount,
+            dealstage: d.properties?.dealstage,
+            closedate: d.properties?.closedate,
+            hubspot_owner_id: d.properties?.hubspot_owner_id,
+            hs_lastmodifieddate: d.properties?.hs_lastmodifieddate,
+            notes_last_updated: d.properties?.notes_last_updated,
+            hs_deal_stage_probability: d.properties?.hs_deal_stage_probability,
+            hs_is_closed: d.properties?.hs_is_closed,
+            hs_is_closed_won: d.properties?.hs_is_closed_won,
+            num_associated_contacts: d.properties?.num_associated_contacts,
+            pipeline: d.properties?.pipeline,
+          }
+        })),
         // ── Automation ROI ──────────────────────────────────────────────────────
         automationROI: (() => {
           if (!workflows.length) return null;
@@ -8478,8 +8538,8 @@ async function runFullAudit(token, auditId, meta) {
         // Aggregate email health summary
         emailHealthSummary: (() => {
           const sent = marketingEmails.filter(e => {
-            const s = e.stats || e.counters || {};
-            return (s.sent || s.delivered || 0) > 100;
+            const state = String(e.state || e.currentState || '').toUpperCase();
+            return ['PUBLISHED','SENT'].includes(state);
           });
           if (!sent.length) return null;
           let tSent=0,tOpen=0,tClick=0,tBounce=0,tUnsub=0,tSpam=0;
@@ -8556,38 +8616,54 @@ async function runFullAudit(token, auditId, meta) {
           });
           return byPri;
         })(),
+        // Ticket open detection: a ticket is closed if it has time_to_close set (resolved)
+        // OR if its stage matches known closed stage names/IDs
+        // HubSpot default: stage 4 = Closed. Custom pipelines vary.
+        // time_to_close being set is the most reliable closed signal.
         openTickets: tickets.filter(t => {
-          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          return !['closed','resolved','4'].includes(s);
+          const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
+          return !hasClosed && !closedStages.includes(stage);
         }).length,
         ticketsOver3Days: tickets.filter(t => {
-          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const isOpen = !['closed','resolved','4'].includes(s);
+          const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
+          const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 3;
         }).length,
         ticketsOver7Days: tickets.filter(t => {
-          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const isOpen = !['closed','resolved','4'].includes(s);
+          const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
+          const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 7;
         }).length,
         ticketsUnassigned: tickets.filter(t => {
-          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const isOpen = !['closed','resolved','4'].includes(s);
+          const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
+          const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && !t.properties?.hubspot_owner_id;
         }).length,
         avgTicketAgeOpenDays: (() => {
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const open = tickets.filter(t => {
-            const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-            return !['closed','resolved','4'].includes(s);
+            const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+            const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+            return !hasClosed && !closedStages.includes(stage);
           });
           if (!open.length) return 0;
           const total = open.reduce((sum,t) => sum + (now - new Date(t.properties?.createdate||0).getTime()) / DAY, 0);
           return Math.round(total / open.length);
         })(),
         ticketHighPriorityOpen: tickets.filter(t => {
-          const s = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
+          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const p = String(t.properties?.hs_ticket_priority||'').toLowerCase();
-          return !['closed','resolved','4'].includes(s) && p === 'high';
+          return !hasClosed && !closedStages.includes(stage) && p === 'high';
         }).length,
 
         // ── Multi-currency ────────────────────────────────────────────────
@@ -8644,6 +8720,7 @@ async function runFullAudit(token, auditId, meta) {
         })(),
         duplicateContactCount: dupes || 0,
         noEmailContactCount: noEmail ? noEmail.length : 0,
+        contactCompleteness: contactCompletenessData || {},
 
         // Custom objects (Enterprise)
         customObjectCount: customObjectData.length,
@@ -8956,11 +9033,8 @@ async function runFullAudit(token, auditId, meta) {
         ghostSeatWaste: inactiveUsers.length * 90,
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
-      },
-      isLimited: !isPaid,
-      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit},
 
-      // ── ✦ NEW INTELLIGENCE ENGINES ─────────────────────────────────────
+      // ── Intelligence Engines (moved inside portalStats so ps.engineName works) ──
       revenueIntel,
       contactDecayEngine,
       repIntelEngine,
@@ -8973,6 +9047,11 @@ async function runFullAudit(token, auditId, meta) {
       workflowDependencyEngine,
       setupHealthEngine,
       hubUtilizationEngine,
+
+    },
+      isLimited: !isPaid,
+      limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit},
+
     },
     summary:{
       overallScore,
