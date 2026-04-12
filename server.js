@@ -1073,7 +1073,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   ${plan === 'pulse' ? `
   <tr><td style="background:#120f30;padding:20px 32px;border-bottom:1px solid rgba(255,255,255,.06);">
     <div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.25);border-radius:10px;padding:16px 20px;">
-      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $199/mo</div>
+      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $1299/mo</div>
       <div style="font-size:13px;color:rgba(255,255,255,.7);margin-bottom:12px;">Get 15 intelligence views, score trends, ROI tracking, revenue health, contact engagement analysis, and the full snapshot dashboard for your team.</div>
       <a href="${FRONTEND_URL}/#pricing" style="display:inline-block;padding:10px 22px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12px;">See Pro Features →</a>
     </div>
@@ -1110,13 +1110,13 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:12px;overflow:hidden;">
     <tr><td style="padding:20px 24px;">
       <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ Exclusive Offer — FixOps Customers</div>
-      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $99</div>
+      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $199</div>
       <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:14px;">
-        Normally $199/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
+        Normally $1299/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
         Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout. Cancel anytime.
       </div>
-      <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $99 First Month →</a>
-      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $199/mo · cancel anytime · no contract</div>
+      <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $199 First Month →</a>
+      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $549/mo · cancel anytime · no contract</div>
     </td></tr>
   </table>
 </td></tr>
@@ -2485,10 +2485,10 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 99   },  // $99/mo — 5 audits
-  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 199  },  // $199/mo — 15 audits
-  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $999/mo — 40 audits
-  agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,999/mo — unlimited
+  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $2299/mo — 5 audits
+  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $1299/mo — 15 audits
+  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $9299/mo — 40 audits
+  agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,9299/mo — unlimited
 };
 
 // ── Register new agency account (admin or Stripe webhook) ─────────────────────
