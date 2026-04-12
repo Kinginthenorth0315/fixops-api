@@ -839,305 +839,213 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   }
 
   const html = `<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FixOps FixOps Monitor Report</title>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>FixOps Weekly — ${pi.company || 'Your Portal'}</title>
 </head>
-<body style="margin:0;padding:0;background:#f0f0f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-
-<!-- Wrapper -->
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f0f5;padding:24px 0;">
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:28px 16px 40px;">
 <tr><td align="center">
 <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
 
-  <!-- Header -->
-  <tr><td style="background:#08061a;border-radius:14px 14px 0 0;padding:28px 32px;border-bottom:1px solid rgba(124,58,237,.3);">
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>
-        <td>
-          <div style="font-size:20px;font-weight:800;color:#fff;letter-spacing:-0.5px;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
-          <div style="font-size:11px;color:rgba(255,255,255,.35);margin-top:3px;font-family:monospace;letter-spacing:1px;">WEEKLY PULSE REPORT</div>
-        </td>
-        <td align="right">
-          <div style="font-size:11px;color:rgba(255,255,255,.35);">${auditDate}</div>
-          <div style="font-size:11px;color:#7c3aed;margin-top:3px;font-family:monospace;">Week #${weekNum} · ${plan.toUpperCase()}</div>
-        </td>
-      </tr>
-    </table>
-  </td></tr>
-
-  <!-- Score Hero -->
-  <tr><td style="background:linear-gradient(135deg,#0e0b28,#120f30);padding:32px;border-bottom:1px solid rgba(255,255,255,.06);">
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>
-        <td width="140" align="center" style="vertical-align:middle;">
-          <div style="width:110px;height:110px;border-radius:50%;background:${scoreColor}15;border:3px solid ${scoreColor};display:inline-flex;align-items:center;justify-content:center;text-align:center;margin:0 auto;">
-            <div>
-              <div style="font-size:42px;font-weight:900;color:${scoreColor};line-height:1;">${s.overallScore}</div>
-              <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px;">/100</div>
-            </div>
-          </div>
-          ${scoreDiff !== null ? `<div style="margin-top:10px;font-size:13px;font-weight:700;color:${trendColor};">${scoreArrow} vs last week</div>` : '<div style="margin-top:10px;font-size:11px;color:rgba(255,255,255,.3);">First scan</div>'}
-        </td>
-        <td style="padding-left:24px;vertical-align:middle;">
-          <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:6px;">${pi.company || 'Your Portal'}</div>
-          <div style="font-size:13px;color:rgba(255,255,255,.5);margin-bottom:16px;">Portal Health — ${s.overallScore>=85?'Excellent':s.overallScore>=70?'Good':s.overallScore>=55?'Needs Attention':'Critical'}</div>
-          <!-- Stats row -->
-          <table cellpadding="0" cellspacing="0">
-            <tr>
-              <td style="padding-right:16px;">
-                <div style="font-size:20px;font-weight:800;color:#f43f5e;">${s.criticalCount||0}</div>
-                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Critical</div>
-              </td>
-              <td style="padding-right:16px;">
-                <div style="font-size:20px;font-weight:800;color:#f59e0b;">${s.warningCount||0}</div>
-                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Warnings</div>
-              </td>
-              <td style="padding-right:16px;">
-                <div style="font-size:20px;font-weight:800;color:#a78bfa;">$${Number(s.monthlyWaste||0).toLocaleString()}</div>
-                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Est. Waste/mo</div>
-              </td>
-              <td>
-                <div style="font-size:20px;font-weight:800;color:#10b981;">${Number(s.recordsScanned||0).toLocaleString()}</div>
-                <div style="font-size:10px;color:rgba(255,255,255,.35);font-family:monospace;text-transform:uppercase;">Scanned</div>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
-  </td></tr>
-
-  <!-- ✦ Monday CEO Brief — 5 bullets -->
-  ${aiExplanation ? `
-  <tr><td style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>
-        <td>
-          <div style="display:inline-block;padding:3px 10px;background:linear-gradient(135deg,rgba(124,58,237,.3),rgba(167,139,250,.2));border:1px solid rgba(124,58,237,.4);border-radius:20px;font-size:9px;font-weight:700;color:#a78bfa;font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;">📋 Monday CEO Brief · AI-Generated</div>
-          ${aiExplanation.split('\n').filter(l => l.trim().startsWith('•')).map(bullet => {
-            const text = bullet.replace(/^•\s*/, '');
-            const colonIdx = text.indexOf(':');
-            const label = colonIdx > 0 ? text.substring(0, colonIdx) : '';
-            const body = colonIdx > 0 ? text.substring(colonIdx + 1).trim() : text;
-            const labelColor = label === 'SCORE' ? '#a78bfa' : label === 'PIPELINE' ? '#3b82f6' : label === 'DATA' ? '#06b6d4' : label === 'ACTION' ? '#f43f5e' : label === 'OPPORTUNITY' ? '#10b981' : '#a78bfa';
-            return `<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(255,255,255,.03);border-radius:8px;border-left:3px solid ${labelColor};">
-              <div style="flex-shrink:0;min-width:80px;font-size:9px;font-weight:800;color:${labelColor};font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;">${label||'NOTE'}</div>
-              <div style="font-size:13px;color:rgba(255,255,255,.8);line-height:1.6;">${body}</div>
-            </div>`;
-          }).join('') || `<div style="font-size:13px;color:rgba(255,255,255,.7);line-height:1.75;">${aiExplanation}</div>`}
-        </td>
-      </tr>
-    </table>
-  </td></tr>` : ''}
-
-  <!-- Week-over-week summary bar -->
-  ${prev ? `
-  <tr><td style="background:#0a0820;padding:16px 32px;border-bottom:1px solid rgba(255,255,255,.05);">
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>
-        <td width="33%" align="center">
-          <div style="font-size:18px;font-weight:800;color:${newIssues.length>0?'#f43f5e':'#10b981'};">${newIssues.length}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">New Issues</div>
-        </td>
-        <td width="33%" align="center" style="border-left:1px solid rgba(255,255,255,.06);border-right:1px solid rgba(255,255,255,.06);">
-          <div style="font-size:18px;font-weight:800;color:${resolvedIssues.length>0?'#10b981':'rgba(255,255,255,.3)'};">${resolvedIssues.length}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">Resolved</div>
-        </td>
-        <td width="33%" align="center">
-          <div style="font-size:18px;font-weight:800;color:rgba(255,255,255,.6);">${persistentIssues.length}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,.4);font-family:monospace;text-transform:uppercase;margin-top:2px;">Ongoing</div>
-        </td>
-      </tr>
-    </table>
-  </td></tr>` : ''}
-
-  <!-- New Issues This Week -->
-  ${newIssues.length > 0 ? `
-  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#f43f5e;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">🚨 New This Week — ${newIssues.length} New Issue${newIssues.length!==1?'s':''} Found</div>
-    ${newIssues.slice(0,5).map(i => `
-    <div style="display:flex;align-items:flex-start;padding:12px;background:${i.severity==='critical'?'#fff5f5':i.severity==='warning'?'#fffbeb':'#faf5ff'};border-radius:8px;margin-bottom:8px;border-left:3px solid ${i.severity==='critical'?'#f43f5e':i.severity==='warning'?'#f59e0b':'#a78bfa'};">
-      <div style="flex:1;">
-        <div style="font-size:13px;font-weight:700;color:#111;margin-bottom:3px;">${i.title||''}</div>
-        ${i.impact ? `<div style="font-size:11px;color:#f59e0b;font-family:monospace;">${i.impact}</div>` : ''}
-      </div>
-      <div style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;margin-left:10px;flex-shrink:0;background:${i.severity==='critical'?'#fee2e2':i.severity==='warning'?'#fef3c7':'#ede9fe'};color:${i.severity==='critical'?'#dc2626':i.severity==='warning'?'#d97706':'#7c3aed'};">${(i.severity||'').toUpperCase()}</div>
-    </div>`).join('')}
-  </td></tr>` : ''}
-
-  <!-- Week-over-Week Delta Banner -->
-  ${pulseDeltaHtml}
-
-  <!-- New Issues This Week -->
-  ${pulseNewIssuesHtml}
-
-  <!-- Portal Snapshot Data -->
-  ${pulseNewDataHtml}
-
-  <!-- Resolved Issues -->
-  ${resolvedIssues.length > 0 ? `
-  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#10b981;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">✅ Resolved This Week — ${resolvedIssues.length} Issue${resolvedIssues.length!==1?'s':''} Fixed</div>
-    ${resolvedIssues.slice(0,3).map(i => `
-    <div style="display:flex;align-items:center;padding:10px 12px;background:#f0fdf4;border-radius:8px;margin-bottom:6px;border-left:3px solid #10b981;">
-      <div style="color:#10b981;font-size:14px;margin-right:10px;">✓</div>
-      <div style="font-size:13px;color:#166534;">${i.title||''}</div>
-    </div>`).join('')}
-  </td></tr>` : ''}
-
-  <!-- Current Critical Issues -->
-  ${criticals.length > 0 ? `
-  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px;">🔴 Critical Issues Requiring Attention</div>
-    ${criticals.map((i,idx) => `
-    <div style="padding:14px 16px;background:#fff5f5;border-radius:8px;margin-bottom:10px;border:1px solid #fecaca;">
-      <div style="font-size:13px;font-weight:700;color:#111;margin-bottom:5px;">${i.title||''}</div>
-      ${i.description ? `<div style="font-size:12px;color:#666;line-height:1.6;margin-bottom:8px;">${(i.description||'').substring(0,180)}${(i.description||'').length>180?'...':''}</div>` : ''}
-      ${i.impact ? `<div style="font-size:11px;color:#f59e0b;font-family:monospace;margin-bottom:8px;">💸 ${i.impact}</div>` : ''}
-      ${i.guide && i.guide[0] ? `<div style="font-size:11px;color:#374151;background:#f9fafb;padding:8px 10px;border-radius:6px;border-left:2px solid #d1d5db;"><strong>Quick fix:</strong> ${i.guide[0]}</div>` : ''}
-    </div>`).join('')}
-  </td></tr>` : ''}
-
-  <!-- Health Dimensions -->
-  <tr><td style="background:#fff;padding:24px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:16px;">📊 Health Dimensions This Week</div>
-    <table width="100%" cellpadding="0" cellspacing="4">
-      ${Object.entries(scores).map(([k,v]) => {
-        const prev_v = prevScores[k];
-        const diff = prev_v !== undefined ? v - prev_v : null;
-        const bar_color = v>=80?'#10b981':v>=60?'#f59e0b':'#f43f5e';
-        const trend = diff===null?'':diff>0?`<span style="color:#10b981;font-size:10px;"> ↑${diff}</span>`:diff<0?`<span style="color:#f43f5e;font-size:10px;"> ↓${Math.abs(diff)}</span>`:'<span style="color:#9ca3af;font-size:10px;"> →</span>';
-        return `<tr>
-          <td width="130" style="font-size:12px;color:#374151;padding:4px 0;">${dimNames[k]||k}${trend}</td>
-          <td style="padding:4px 8px;">
-            <div style="background:#f3f4f6;border-radius:4px;height:8px;overflow:hidden;">
-              <div style="background:${bar_color};height:100%;width:${v}%;border-radius:4px;"></div>
-            </div>
-          </td>
-          <td width="40" align="right" style="font-size:12px;font-weight:700;color:${bar_color};padding:4px 0;">${v}</td>
-        </tr>`;
-      }).join('')}
-    </table>
-  </td></tr>
-
-  <!-- Portal Snapshot -->
-  <tr><td style="background:#fafafa;padding:20px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">📈 Portal Snapshot</div>
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>
-        ${[
-          ['Contacts', ps.contacts],
-          ['Companies', ps.companies],
-          ['Deals', ps.deals],
-          ['Tickets', ps.tickets],
-          ['Workflows', ps.workflows],
-          ['Forms', ps.forms],
-          ['Sequences', ps.sequences],
-          ['Lists', ps.listCount],
-          ['Leads', ps.leads],
-          ['Users', ps.users]
-        ].filter(([,v])=>v!==undefined&&v!==null&&v!==0).slice(0,6).map(([l,v])=>`
-        <td align="center" style="padding:8px;">
-          <div style="font-size:18px;font-weight:800;color:#111;">${Number(v||0).toLocaleString()}</div>
-          <div style="font-size:10px;color:#9ca3af;font-family:monospace;text-transform:uppercase;margin-top:2px;">${l}</div>
-        </td>`).join('')}
-      </tr>
-      ${(ps.openPipelineValue||0)>0||((ps.mrrTotal||0)>0) ? `<tr>
-        ${ps.openPipelineValue>0?`<td colspan="3" style="padding:8px;text-align:center;"><div style="font-size:11px;color:#6b7280;margin-bottom:2px;">Open Pipeline</div><div style="font-size:16px;font-weight:800;color:#3b82f6;">$${Number(ps.openPipelineValue).toLocaleString()}</div></td>`:''}
-        ${ps.mrrTotal>0?`<td colspan="3" style="padding:8px;text-align:center;"><div style="font-size:11px;color:#6b7280;margin-bottom:2px;">MRR</div><div style="font-size:16px;font-weight:800;color:#10b981;">$${Number(ps.mrrTotal).toLocaleString()}</div></td>`:''}
-      </tr>` : ''}
-    </table>
-  </td></tr>
-
-  <!-- Score History -->
-  ${sparkHistory.length > 1 ? `
-  <tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">📉 Score History (Last ${sparkHistory.length} Weeks)</div>
-    <table width="100%" cellpadding="0" cellspacing="0"><tr>
-      ${sparkHistory.map((score,i)=>`
-      <td align="center" style="vertical-align:bottom;padding:0 4px;">
-        <div style="background:${score>=80?'#10b981':score>=60?'#f59e0b':'#f43f5e'};width:100%;height:${Math.round((score/100)*60)}px;border-radius:3px 3px 0 0;min-height:4px;"></div>
-        <div style="font-size:10px;color:#374151;font-weight:700;margin-top:4px;">${score}</div>
-        <div style="font-size:9px;color:#9ca3af;">W${i+1}</div>
-      </td>`).join('')}
-    </tr></table>
-  </td></tr>` : ''}
-
-  <!-- Warnings summary -->
-  ${warnings.length > 0 ? `
-  <tr><td style="background:#fff;padding:20px 32px;border-bottom:1px solid #eee;">
-    <div style="font-size:11px;font-weight:700;color:#374151;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;">⚠️ Warnings to Address</div>
-    ${warnings.map(i=>`
-    <div style="display:flex;align-items:center;padding:10px 12px;background:#fffbeb;border-radius:8px;margin-bottom:6px;border-left:3px solid #f59e0b;">
-      <div style="flex:1;font-size:12px;color:#92400e;">${i.title||''}</div>
-      ${i.dimension?`<div style="font-size:9px;font-weight:700;padding:2px 6px;background:#fef3c7;color:#d97706;border-radius:4px;margin-left:8px;flex-shrink:0;">${i.dimension}</div>`:''}
-    </div>`).join('')}
-  </td></tr>` : ''}
-
-  <!-- Rep Activity Scorecard -->
-  ${pulseRepHtml}
-
-  <!-- Ghost Seats Alert -->
-  ${pulseGhostHtml}
-
-  <!-- Ticket SLA Section -->
-  ${pulseTicketHtml}
-
-  <!-- Upgrade nudge for Pulse — show Pro benefits if not already on Pro -->
-  ${plan === 'pulse' ? `
-  <tr><td style="background:#120f30;padding:20px 32px;border-bottom:1px solid rgba(255,255,255,.06);">
-    <div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.25);border-radius:10px;padding:16px 20px;">
-      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $549/mo</div>
-      <div style="font-size:13px;color:rgba(255,255,255,.7);margin-bottom:12px;">Get 15 intelligence views, score trends, ROI tracking, revenue health, contact engagement analysis, and the full snapshot dashboard for your team.</div>
-      <a href="${FRONTEND_URL}/#pricing" style="display:inline-block;padding:10px 22px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12px;">See Pro Features →</a>
-    </div>
-  </td></tr>` : ''}
-
-  ${dealBriefHtml}
-
-  <!-- CTAs -->
-  <tr><td style="background:#08061a;padding:28px 32px;border-radius:0 0 14px 14px;">
-    <div style="text-align:center;margin-bottom:20px;">
-      <a href="${reportUrl}" style="display:inline-block;padding:14px 30px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;margin-right:10px;">📊 View Full Report →</a>
-      <a href="${resultsUrl}" style="display:inline-block;padding:14px 30px;background:rgba(124,58,237,.15);color:#a78bfa;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(124,58,237,.3);">View Audit Results →</a>
-      <a href="${leaksUrl}" style="display:inline-block;padding:14px 30px;background:rgba(255,59,59,.12);color:#ff6b6b;text-decoration:none;border-radius:10px;font-weight:700;font-size:14px;border:1px solid rgba(255,59,59,.3);">💸 Revenue Leak Report →</a>
-    </div>
-    ${(s.criticalCount||0) > 0 ? `
-    <div style="margin-bottom:16px;padding:14px 16px;background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.2);border-radius:8px;text-align:center;">
-      <div style="font-size:12px;color:rgba(255,255,255,.6);margin-bottom:8px;">${s.criticalCount} critical issue${s.criticalCount!==1?'s':''} found — we can fix these for you</div>
-      <a href="${FRONTEND_URL}/results.html?id=${auditId}" style="font-size:12px;font-weight:700;color:#f43f5e;text-decoration:none;">View Fix-It Options → </a>
-    </div>` : ''}
-    <div style="text-align:center;margin-bottom:16px;">
-      <a href="https://calendly.com/matthew-fixops/30min" style="font-size:12px;color:rgba(255,255,255,.4);text-decoration:none;">📅 Book a 30-min strategy call to discuss these findings</a>
-    </div>
-    <div style="border-top:1px solid rgba(255,255,255,.06);padding-top:16px;text-align:center;font-size:11px;color:rgba(255,255,255,.25);">
-      <a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;font-weight:600;">fixops.io</a> · matthew@fixops.io · HubSpot Systems. Fixed.<br>
-      <span style="font-size:10px;">Your portal is scanned every Monday · 185 checkpoints · <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.25);text-decoration:none;">Pause monitoring</a></span>
-    </div>
-  </td></tr>
-
-</table>
+<!-- ── HEADER ── -->
+<tr><td style="background:linear-gradient(135deg,#0c0920 0%,#100c28 60%,#0c1520 100%);border-radius:18px 18px 0 0;padding:28px 36px 24px;border-bottom:1px solid rgba(124,58,237,.2);">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr>
+    <td>
+      <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.5px;line-height:1;">⚡ Fix<span style="color:#a78bfa;">Ops</span><span style="font-size:13px;color:rgba(255,255,255,.2);font-weight:400;">.io</span></div>
+      <div style="font-size:9px;color:rgba(255,255,255,.3);letter-spacing:3px;text-transform:uppercase;margin-top:5px;font-family:monospace;">Monday Intelligence Report · Week ${weekNum}</div>
+    </td>
+    <td align="right" valign="middle">
+      <div style="background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.3);border-radius:7px;padding:6px 14px;font-size:9px;font-weight:800;color:#a78bfa;font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;white-space:nowrap;">${planLabel || plan.toUpperCase()}</div>
+    </td>
+  </tr></table>
 </td></tr>
 
-<!-- ── First-Month Discount Offer ── -->
-<tr><td style="padding:0 24px 32px;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:12px;overflow:hidden;">
-    <tr><td style="padding:20px 24px;">
-      <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ Exclusive Offer — FixOps Customers</div>
-      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $199</div>
-      <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:14px;">
-        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
-        Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout. Cancel anytime.
+<!-- ── SCORE HERO ── -->
+<tr><td style="background:linear-gradient(180deg,#0e0b24 0%,#0a0818 100%);padding:32px 36px 28px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr valign="middle">
+    <td width="55%">
+      <div style="font-size:11px;color:rgba(255,255,255,.3);font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">${pi.company || 'Your Portal'} · ${auditDate}</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.45);margin-bottom:4px;">Portal Health Score</div>
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span style="font-size:64px;font-weight:900;letter-spacing:-3px;line-height:1;color:${scoreColor};">${score}</span>
+        <span style="font-size:22px;color:rgba(255,255,255,.2);font-weight:300;">/100</span>
       </div>
-      <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $199 First Month →</a>
-      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $549/mo · cancel anytime · no contract</div>
-    </td></tr>
+      <div style="margin-top:8px;">
+        <span style="display:inline-block;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700;background:${scoreColor}18;color:${scoreColor};border:1px solid ${scoreColor}30;">${grade}</span>
+        ${scoreDiff !== null ? `<span style="margin-left:8px;font-size:12px;font-weight:700;color:${scoreDiff>=0?'#10b981':'#f43f5e'};">${scoreArrow} ${Math.abs(scoreDiff)} pts vs last week</span>` : '<span style="margin-left:8px;font-size:11px;color:rgba(255,255,255,.25);">First scan</span>'}
+      </div>
+    </td>
+    <td width="45%" align="right" valign="top">
+      <!-- Score sparkline using table bars -->
+      ${sparkHistory.length > 1 ? `
+      <div style="font-size:9px;color:rgba(255,255,255,.25);font-family:monospace;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;text-align:right;">12-Week Trend</div>
+      <table cellpadding="0" cellspacing="2" align="right" style="height:44px;">
+      <tr valign="bottom">
+        ${sparkHistory.slice(-12).map((sc,i)=>`<td style="vertical-align:bottom;"><div style="width:6px;background:${sc>=80?'#10b981':sc>=65?'#f59e0b':'#f43f5e'};border-radius:3px 3px 0 0;height:${Math.max(4,Math.round((sc/100)*44))}px;opacity:${i===sparkHistory.slice(-12).length-1?'1':'0.5'};"></div></td>`).join('')}
+      </tr>
+      </table>` : ''}
+      <!-- Stats pills -->
+      <table cellpadding="0" cellspacing="0" style="margin-top:${sparkHistory.length>1?'10':'0'}px;" align="right">
+        <tr>
+          <td style="padding:4px;"><div style="background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.25);border-radius:6px;padding:5px 10px;text-align:center;"><div style="font-size:16px;font-weight:800;color:#f43f5e;">${s.criticalCount||0}</div><div style="font-size:8px;color:rgba(244,63,94,.6);font-family:monospace;letter-spacing:1px;text-transform:uppercase;">Critical</div></div></td>
+          <td style="padding:4px;"><div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.2);border-radius:6px;padding:5px 10px;text-align:center;"><div style="font-size:16px;font-weight:800;color:#f59e0b;">${s.warningCount||0}</div><div style="font-size:8px;color:rgba(245,158,11,.5);font-family:monospace;letter-spacing:1px;text-transform:uppercase;">Warning</div></div></td>
+          <td style="padding:4px;"><div style="background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.15);border-radius:6px;padding:5px 10px;text-align:center;"><div style="font-size:16px;font-weight:800;color:#f43f5e;">$${Number(s.monthlyWaste||0).toLocaleString()}</div><div style="font-size:8px;color:rgba(244,63,94,.5);font-family:monospace;letter-spacing:1px;text-transform:uppercase;">/mo Leak</div></div></td>
+        </tr>
+      </table>
+    </td>
+  </tr></table>
+</td></tr>
+
+<!-- ── AI BRIEF ── -->
+${aiExplanation ? `
+<tr><td style="background:rgba(124,58,237,.06);border-left:none;border-right:none;padding:24px 36px;border-bottom:1px solid rgba(124,58,237,.12);">
+  <div style="font-size:9px;font-weight:800;color:rgba(167,139,250,.6);letter-spacing:2px;text-transform:uppercase;font-family:monospace;margin-bottom:12px;">✦ AI Monday Brief</div>
+  ${aiExplanation.split('\n').filter(l=>l.trim().startsWith('•')).map(line => {
+    const parts = line.replace('• ','').split(':');
+    const label = parts[0] || '';
+    const body  = parts.slice(1).join(':').trim();
+    const labelColor = label==='SCORE'?'#a78bfa':label==='PIPELINE'?'#3b82f6':label==='DATA'?'#10b981':label==='ACTION'?'#f43f5e':'#f59e0b';
+    return '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;padding:10px 14px;background:rgba(255,255,255,.03);border-radius:8px;border-left:3px solid '+labelColor+';"><div style="flex-shrink:0;min-width:72px;font-size:8px;font-weight:800;color:'+labelColor+';font-family:monospace;letter-spacing:1.5px;text-transform:uppercase;margin-top:2px;">'+(label||'NOTE')+'</div><div style="font-size:12px;color:rgba(255,255,255,.75);line-height:1.65;">'+(body||line)+'</div></div>';
+  }).join('')}
+</td></tr>` : ''}
+
+<!-- ── NEW / RESOLVED ISSUES ── -->
+${newIssues.length > 0 ? `
+<tr><td style="background:#0d0b1e;padding:24px 36px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <div style="font-size:9px;font-weight:800;color:rgba(244,63,94,.6);letter-spacing:2px;text-transform:uppercase;font-family:monospace;margin-bottom:14px;">⚠ ${newIssues.length} New Issue${newIssues.length!==1?'s':''} This Week</div>
+  ${newIssues.slice(0,5).map(i => `
+  <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 14px;background:${i.severity==='critical'?'rgba(244,63,94,.06)':'rgba(245,158,11,.05)'};border-radius:8px;border-left:3px solid ${i.severity==='critical'?'#f43f5e':'#f59e0b'};margin-bottom:8px;">
+    <div style="flex:1;">
+      <div style="font-size:12px;font-weight:700;color:#fff;margin-bottom:3px;">${i.title||''}</div>
+      ${i.description?`<div style="font-size:11px;color:rgba(255,255,255,.45);line-height:1.5;">${(i.description||'').length>140?i.description.substring(0,140)+'…':i.description}</div>`:''}
+      ${i.impact?`<div style="font-size:10px;color:#f59e0b;font-family:monospace;margin-top:4px;">${i.impact}</div>`:''}
+    </div>
+    <div style="flex-shrink:0;font-size:8px;font-weight:800;padding:3px 8px;border-radius:4px;color:${i.severity==='critical'?'#f43f5e':'#f59e0b'};background:${i.severity==='critical'?'rgba(244,63,94,.15)':'rgba(245,158,11,.12)'};font-family:monospace;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;">${(i.severity||'').toUpperCase()}</div>
+  </div>`).join('')}
+</td></tr>` : ''}
+
+${resolvedIssues.length > 0 ? `
+<tr><td style="background:#0d0b1e;padding:16px 36px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <div style="font-size:9px;font-weight:800;color:rgba(16,185,129,.5);letter-spacing:2px;text-transform:uppercase;font-family:monospace;margin-bottom:10px;">✓ ${resolvedIssues.length} Resolved</div>
+  ${resolvedIssues.slice(0,3).map(i => `
+  <div style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:rgba(16,185,129,.05);border-radius:7px;border-left:3px solid rgba(16,185,129,.3);margin-bottom:6px;">
+    <span style="font-size:10px;color:#10b981;">✓</span>
+    <div style="font-size:12px;color:rgba(255,255,255,.55);">${i.title||''}</div>
+  </div>`).join('')}
+</td></tr>` : ''}
+
+<!-- ── PIPELINE SNAPSHOT ── -->
+${(ps.openPipelineValue||0) > 0 ? `
+<tr><td style="background:#0a0818;padding:24px 36px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <div style="font-size:9px;font-weight:800;color:rgba(59,130,246,.6);letter-spacing:2px;text-transform:uppercase;font-family:monospace;margin-bottom:14px;">📊 Pipeline Snapshot</div>
+  <table width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td width="25%" align="center" style="padding:0 6px;">
+        <div style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.15);border-radius:10px;padding:14px 10px;">
+          <div style="font-size:17px;font-weight:800;color:#3b82f6;">$${Number(ps.openPipelineValue||0)>=1000000?(Number(ps.openPipelineValue)/1000000).toFixed(1)+'M':Number(ps.openPipelineValue||0)>=1000?(Number(ps.openPipelineValue)/1000).toFixed(0)+'K':''+Number(ps.openPipelineValue||0).toLocaleString()}</div>
+          <div style="font-size:9px;color:rgba(255,255,255,.3);font-family:monospace;margin-top:4px;text-transform:uppercase;letter-spacing:1px;">Open Pipeline</div>
+        </div>
+      </td>
+      <td width="25%" align="center" style="padding:0 6px;">
+        <div style="background:${(ps.stalledDeals||0)>3?'rgba(244,63,94,.08)':'rgba(255,255,255,.04)'};border:1px solid ${(ps.stalledDeals||0)>3?'rgba(244,63,94,.2)':'rgba(255,255,255,.06)'};border-radius:10px;padding:14px 10px;">
+          <div style="font-size:17px;font-weight:800;color:${(ps.stalledDeals||0)>3?'#f43f5e':'rgba(255,255,255,.6)'};">${ps.stalledDeals||0}</div>
+          <div style="font-size:9px;color:rgba(255,255,255,.3);font-family:monospace;margin-top:4px;text-transform:uppercase;letter-spacing:1px;">Stalled Deals</div>
+        </div>
+      </td>
+      <td width="25%" align="center" style="padding:0 6px;">
+        <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 10px;">
+          <div style="font-size:17px;font-weight:800;color:rgba(255,255,255,.7);">${ri.winRate||0}%</div>
+          <div style="font-size:9px;color:rgba(255,255,255,.3);font-family:monospace;margin-top:4px;text-transform:uppercase;letter-spacing:1px;">Win Rate</div>
+        </div>
+      </td>
+      <td width="25%" align="center" style="padding:0 6px;">
+        <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 10px;">
+          <div style="font-size:17px;font-weight:800;color:rgba(255,255,255,.7);">${ps.zeroDollarDeals||0}</div>
+          <div style="font-size:9px;color:rgba(255,255,255,.3);font-family:monospace;margin-top:4px;text-transform:uppercase;letter-spacing:1px;">$0 Deals</div>
+        </div>
+      </td>
+    </tr>
+  </table>
+  ${dealBriefHtml || ''}
+</td></tr>` : ''}
+
+<!-- ── DIMENSION SCORES ── -->
+<tr><td style="background:#0d0b1e;padding:24px 36px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <div style="font-size:9px;font-weight:800;color:rgba(255,255,255,.3);letter-spacing:2px;text-transform:uppercase;font-family:monospace;margin-bottom:14px;">Health Dimensions</div>
+  <table width="100%" cellpadding="0" cellspacing="0">
+  ${Object.entries(scores).map(([k,v]) => {
+    const prev_v = prevScores[k];
+    const diff = prev_v !== undefined ? (Number(v) - Number(prev_v)) : null;
+    const pct = Math.round((Number(v)/100)*100);
+    const barColor = Number(v)>=80?'#10b981':Number(v)>=60?'#f59e0b':'#f43f5e';
+    const name = dimNames[k]||k;
+    return `<tr style="margin-bottom:8px;"><td style="padding:5px 0;">
+      <table width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td width="110" style="font-size:11px;color:rgba(255,255,255,.55);padding-right:10px;white-space:nowrap;">${name}</td>
+        <td style="padding-right:10px;">
+          <div style="background:rgba(255,255,255,.06);border-radius:4px;height:6px;overflow:hidden;">
+            <div style="background:linear-gradient(90deg,${barColor},${barColor}aa);height:6px;width:${pct}%;border-radius:4px;"></div>
+          </div>
+        </td>
+        <td width="30" align="right" style="font-size:11px;font-weight:700;color:${barColor};white-space:nowrap;">${v}</td>
+        <td width="40" align="right" style="font-size:10px;color:${diff===null?'transparent':diff>=0?'#10b981':'#f43f5e'};font-family:monospace;white-space:nowrap;">${diff!==null?(diff>=0?'+':'')+diff:''}</td>
+      </tr></table>
+    </td></tr>`;
+  }).join('')}
   </table>
 </td></tr>
 
+<!-- ── CTA BUTTONS ── -->
+<tr><td style="background:#0a0818;padding:28px 36px;border-bottom:1px solid rgba(255,255,255,.05);">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr>
+    <td align="center" style="padding:0 6px;">
+      <a href="${reportUrl}" style="display:inline-block;padding:12px 22px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;text-decoration:none;border-radius:9px;font-weight:700;font-size:13px;white-space:nowrap;">View Full Dashboard →</a>
+    </td>
+    <td align="center" style="padding:0 6px;">
+      <a href="${resultsUrl}" style="display:inline-block;padding:12px 20px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.25);color:#3b82f6;text-decoration:none;border-radius:9px;font-weight:600;font-size:13px;white-space:nowrap;">Audit Results</a>
+    </td>
+    <td align="center" style="padding:0 6px;">
+      <a href="${leaksUrl}" style="display:inline-block;padding:12px 20px;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.2);color:#f43f5e;text-decoration:none;border-radius:9px;font-weight:600;font-size:13px;white-space:nowrap;">Revenue Leaks</a>
+    </td>
+  </tr></table>
+</td></tr>
+
+<!-- ── UPGRADE NUDGE (non-Sentinel) ── -->
+${plan === 'pulse' ? `
+<tr><td style="background:rgba(124,58,237,.06);border-top:none;padding:20px 36px;border-bottom:1px solid rgba(124,58,237,.15);">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr valign="middle">
+    <td>
+      <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,.8);margin-bottom:3px;">✦ Unlock AI Deal Coach + RevOps Strategy</div>
+      <div style="font-size:11px;color:rgba(255,255,255,.35);">Sentinel includes AI-powered deal coaching, RevOps strategy memos, and billing optimization. First month $199.</div>
+    </td>
+    <td align="right" style="padding-left:16px;white-space:nowrap;">
+      <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:9px 18px;background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.3);color:#a78bfa;text-decoration:none;border-radius:8px;font-size:11px;font-weight:700;white-space:nowrap;">Try for $199 →</a>
+    </td>
+  </tr></table>
+</td></tr>` : ''}
+
+<!-- ── FOOTER ── -->
+<tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.05);border-radius:0 0 18px 18px;padding:20px 36px;">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr>
+    <td>
+      <div style="font-size:10px;color:rgba(255,255,255,.2);line-height:1.7;">
+        FixOps.io · Automated HubSpot Intelligence<br>
+        <a href="mailto:matthew@fixops.io?subject=Pause Pulse - ${email}" style="color:rgba(255,255,255,.2);text-decoration:none;">Pause monitoring</a> · <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.4);text-decoration:none;">fixops.io</a>
+      </div>
+    </td>
+    <td align="right">
+      <div style="font-size:9px;color:rgba(255,255,255,.15);font-family:monospace;letter-spacing:1px;text-transform:uppercase;">Week ${weekNum} · ${auditDate.split(',')[0]}</div>
+    </td>
+  </tr></table>
+</td></tr>
+
 </table>
-</body></html>`;
+</td></tr>
+</table>
+</body></html>`;;
 
   // ── Monday CEO Brief subject — lead with what changed, not just the score ──
   const ghostCount = (issues.find(i=>i.ghostSeatData)?.ghostSeatData||[]).length;
@@ -1555,38 +1463,95 @@ app.post('/auth/magic-link', async (req, res) => {
         from: 'FixOps <reports@fixops.io>',
         to: email,
         subject: `Your FixOps dashboard link — ${cust.company || 'Your Portal'}`,
-        html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
-<div style="max-width:520px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,.08);">
-  <div style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
-    <div style="font-size:20px;font-weight:800;color:#fff;">⚡ FixOps<span style="color:#a78bfa;">.io</span></div>
-  </div>
-  <div style="padding:32px;">
-    <div style="font-size:22px;font-weight:800;color:#111;margin-bottom:10px;">Here's your dashboard link</div>
-    <p style="font-size:14px;color:#555;line-height:1.7;margin-bottom:24px;">
-      Click below to access your FixOps Intelligence Dashboard for <strong>${cust.company || 'your portal'}</strong>.
-      This link is valid for 30 days.
-    </p>
-    <div style="text-align:center;margin-bottom:24px;">
-      <a href="${dashUrl}" style="display:inline-block;padding:14px 32px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">
-        Open My Dashboard →
-      </a>
+        html: `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Your FixOps Dashboard</title>
+</head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:32px 16px;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+  <!-- Header -->
+  <tr><td style="background:linear-gradient(135deg,#0d0b1e 0%,#120e2a 100%);border-radius:16px 16px 0 0;padding:28px 36px;border-bottom:1px solid rgba(124,58,237,.25);">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td>
+        <div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span><span style="color:rgba(255,255,255,.25);font-size:14px;font-weight:400;">.io</span></div>
+        <div style="font-size:10px;color:rgba(255,255,255,.3);letter-spacing:3px;text-transform:uppercase;margin-top:3px;font-family:monospace;">Intelligence Dashboard</div>
+      </td>
+      <td align="right">
+        <div style="background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.35);border-radius:6px;padding:5px 12px;font-size:10px;font-weight:700;color:#a78bfa;font-family:monospace;letter-spacing:1px;text-transform:uppercase;">${cust.plan === 'pro' ? 'SENTINEL' : cust.plan === 'command' ? 'COMMAND' : 'MONITOR'}</div>
+      </td>
+    </tr></table>
+  </td></tr>
+
+  <!-- Body -->
+  <tr><td style="background:#0d0b1e;padding:36px;">
+
+    <div style="font-size:24px;font-weight:800;color:#fff;margin-bottom:8px;letter-spacing:-0.5px;">Your dashboard is ready.</div>
+    <div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.7;margin-bottom:28px;">
+      Click below to access your FixOps Intelligence Dashboard for <strong style="color:rgba(255,255,255,.9);">${cust.company || 'your portal'}</strong>. This link is valid for 30 days and logs you in automatically.
     </div>
-    <div style="background:#f9f9f9;border-radius:8px;padding:14px 16px;font-size:12px;color:#888;line-height:1.6;">
-      <strong style="color:#555;">Your dashboard includes:</strong><br>
-      Pipeline health · Deal velocity · Lifecycle funnel · Contact intelligence ·
-      Product revenue · Service health · AI report builder
-    </div>
+
+    <!-- CTA Button -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
+    <tr><td align="center">
+      <a href="${dashUrl}" style="display:inline-block;padding:15px 40px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;letter-spacing:-0.2px;">Open My Dashboard →</a>
+    </td></tr>
+    </table>
+
+    <!-- What's inside grid -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;margin-bottom:20px;">
+    <tr><td style="padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.06);">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:2px;text-transform:uppercase;font-family:monospace;">What's in your dashboard</div>
+    </td></tr>
+    <tr><td style="padding:16px 20px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="50%" style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>Pipeline health &amp; deal risk</td>
+          <td width="50%" style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>Contact decay &amp; data health</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>Rep performance scorecard</td>
+          <td style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>Workflow conflict detector</td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>Revenue &amp; billing intelligence</td>
+          <td style="padding:4px 0;font-size:12px;color:rgba(255,255,255,.6);"><span style="color:#10b981;margin-right:6px;">✓</span>AI report builder</td>
+        </tr>
+        ${['pro','command','command_unlimited'].includes(cust.plan) ? `<tr>
+          <td style="padding:4px 0;font-size:12px;color:#a78bfa;"><span style="margin-right:6px;">✦</span>AI Deal Coach</td>
+          <td style="padding:4px 0;font-size:12px;color:#a78bfa;"><span style="margin-right:6px;">✦</span>RevOps AI Coach</td>
+        </tr>` : ''}
+      </table>
+    </td></tr>
+    </table>
+
     ${isPaidPlan ? `
-    <div style="margin-top:16px;background:#f5f3ff;border:1px solid #ede9fe;border-radius:8px;padding:14px 16px;font-size:12px;color:#6d28d9;">
-      <strong>Pulse active</strong> — Your portal is scanned every Monday at 9am ET.
-      Your next report arrives automatically.
-    </div>` : ''}
-  </div>
-  <div style="background:#f9f9f9;border-top:1px solid #eee;padding:16px 32px;text-align:center;font-size:11px;color:#aaa;">
-    This link was requested for ${email}. If you didn't request this, ignore it.
-    <br><a href="${FRONTEND_URL}" style="color:#7c3aed;text-decoration:none;">fixops.io</a>
-  </div>
-</div></body></html>`
+    <!-- Monitoring active pill -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+    <tr><td style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:10px;padding:14px 18px;">
+      <table width="100%" cellpadding="0" cellspacing="0"><tr>
+        <td><div style="width:8px;height:8px;border-radius:50%;background:#10b981;display:inline-block;margin-right:8px;"></div><span style="font-size:13px;font-weight:700;color:#10b981;">Monitoring active</span> <span style="font-size:12px;color:rgba(255,255,255,.4);">— Your portal scans every Monday at 9am ET</span></div></td>
+      </tr></table>
+    </td></tr>
+    </table>` : ''}
+
+  </td></tr>
+
+  <!-- Footer -->
+  <tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 16px 16px;padding:18px 36px;text-align:center;">
+    <div style="font-size:11px;color:rgba(255,255,255,.2);line-height:1.7;">
+      Requested for <span style="color:rgba(255,255,255,.4);">${email}</span> · If you didn't request this, ignore it.<br>
+      <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.6);text-decoration:none;">fixops.io</a> · <a href="mailto:matthew@fixops.io" style="color:rgba(124,58,237,.6);text-decoration:none;">matthew@fixops.io</a>
+    </div>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body></html>`
       });
 
       console.log(`Magic link sent to ${email} (${cust.plan})`);
@@ -3226,24 +3191,60 @@ const runSentinelCheck = async (customer) => {
         from: 'FixOps Sentinel <reports@fixops.io>',
         to: customer.email,
         subject: `🛡 FixOps Sentinel: ${criticalAlerts.length} critical issue${criticalAlerts.length!==1?'s':''} — ${customer.company || 'your portal'}`,
-        html: `<!DOCTYPE html><html><body style="margin:0;padding:0;font-family:system-ui,sans-serif;background:#f9fafb;">
-          <div style="max-width:560px;margin:0 auto;padding:32px 16px;">
-            <div style="background:#08061a;border-radius:14px 14px 0 0;padding:20px 28px;text-align:center;">
-              <div style="font-size:20px;font-weight:800;color:#fff;">🛡 FixOps <span style="color:#a78bfa;">Sentinel</span></div>
-              <div style="font-size:10px;color:rgba(255,255,255,.4);margin-top:4px;font-family:monospace;letter-spacing:2px;">DAILY HEALTH CHECK</div>
-            </div>
-            <div style="background:#fff;border:1px solid #eee;border-top:none;padding:24px 28px;">
-              <div style="font-size:15px;font-weight:700;color:#111;margin-bottom:16px;">${criticalAlerts.length} critical issue${criticalAlerts.length!==1?'s':''} found in <strong>${customer.company || 'your portal'}</strong></div>
-              <table style="width:100%;border-collapse:collapse;background:#fff5f5;border:1px solid #fee2e2;border-radius:8px;overflow:hidden;margin-bottom:20px;">
-                ${alertRows}
-              </table>
-              <div style="text-align:center;">
-                <a href="${FRONTEND_URL}/results.html?id=${customer.last_audit_id}" style="display:inline-block;padding:12px 26px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:14px;">View Dashboard →</a>
-              </div>
-            </div>
-            <div style="text-align:center;font-size:11px;color:#999;padding:14px;">FixOps Sentinel · Daily monitoring · fixops.io</div>
-          </div>
-        </body></html>`
+        html: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Critical Alert</title></head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:32px 16px;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+  <!-- Header — red alert theme -->
+  <tr><td style="background:linear-gradient(135deg,#1a0a0a,#200808);border-radius:16px 16px 0 0;padding:24px 32px;border-bottom:1px solid rgba(244,63,94,.3);">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td>
+        <div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:-0.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span></div>
+        <div style="font-size:10px;color:rgba(255,255,255,.3);letter-spacing:3px;text-transform:uppercase;margin-top:3px;font-family:monospace;">Sentinel Alert</div>
+      </td>
+      <td align="right">
+        <div style="background:rgba(244,63,94,.15);border:1px solid rgba(244,63,94,.4);border-radius:6px;padding:5px 12px;font-size:10px;font-weight:800;color:#f43f5e;font-family:monospace;letter-spacing:1px;">⚠ ${criticalAlerts.length} CRITICAL</div>
+      </td>
+    </tr></table>
+  </td></tr>
+
+  <!-- Body -->
+  <tr><td style="background:#0d0b1e;padding:32px;">
+    <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:6px;letter-spacing:-0.5px;">${criticalAlerts.length} critical issue${criticalAlerts.length!==1?'s':''} found in ${customer.company || 'your portal'}</div>
+    <div style="font-size:13px;color:rgba(255,255,255,.45);margin-bottom:24px;">Detected during today's automated health check. These need attention.</div>
+
+    <!-- Issue cards -->
+    ${criticalAlerts.map((a, i) => `
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(244,63,94,.06);border:1px solid rgba(244,63,94,.2);border-radius:12px;overflow:hidden;margin-bottom:10px;">
+    <tr><td style="padding:0 0 0 4px;background:rgba(244,63,94,.7);width:4px;border-radius:4px 0 0 4px;"></td>
+    <td style="padding:16px 20px;">
+      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:4px;">${a.message || a.title || 'Critical Issue'}</div>
+      ${a.detail ? '<div style="font-size:12px;color:rgba(255,255,255,.5);margin-bottom:6px;line-height:1.5;">' + a.detail + '</div>' : ''}
+      ${a.action ? '<div style="font-size:11px;color:#f59e0b;font-weight:600;">→ ' + a.action + '</div>' : ''}
+    </td></tr></table>`).join('')}
+
+    <!-- CTA -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;margin-bottom:20px;">
+    <tr><td align="center">
+      <a href="${FRONTEND_URL}/reporting.html?token=${customer.portal_token || ''}" style="display:inline-block;padding:13px 32px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;text-decoration:none;border-radius:9px;font-weight:700;font-size:14px;">View Full Portal Intelligence →</a>
+    </td></tr>
+    </table>
+
+    <div style="font-size:12px;color:rgba(255,255,255,.25);text-align:center;line-height:1.7;">
+      FixOps Sentinel runs daily checks on your portal.<br>
+      <a href="mailto:matthew@fixops.io" style="color:rgba(124,58,237,.5);text-decoration:none;">matthew@fixops.io</a> · <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.5);text-decoration:none;">fixops.io</a>
+    </div>
+
+  </td></tr>
+  <tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 16px 16px;padding:14px 32px;text-align:center;">
+    <div style="font-size:10px;color:rgba(255,255,255,.15);font-family:monospace;letter-spacing:1px;text-transform:uppercase;">Sentinel · Daily Monitoring · fixops.io</div>
+  </td></tr>
+
+</table></td></tr></table>
+</body></html>`
       }).catch(e => console.warn('Sentinel email err:', e.message));
     }
 
@@ -3524,12 +3525,66 @@ app.post('/webhook', async (req, res) => {
           from: 'FixOps <reports@fixops.io>',
           to: email,
           subject: `✅ Payment confirmed — start your ${planKey === 'pro-audit' ? 'Pro' : 'Deep'} Audit`,
-          html: `<h2>Your audit is ready</h2>
-            <p>Thanks for your purchase! Click the button below to connect your HubSpot portal and start your ${planKey === 'pro-audit' ? 'FixOps Full Audit ($699)' : 'FixOps Diagnostic ($399)'}.</p>
-            <p style="text-align:center;margin:24px 0;">
-              <a href="${auditStartUrl}" style="display:inline-block;padding:14px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">Start Your Audit →</a>
-            </p>
-            <p style="font-size:12px;color:#666;">This link expires in 7 days. If you need help, reply to this email.</p>`
+          html: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Start Your Audit</title></head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:32px 16px;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+  <tr><td style="background:linear-gradient(135deg,#0d0b1e,#120e2a);border-radius:16px 16px 0 0;padding:28px 36px;border-bottom:1px solid rgba(124,58,237,.25);">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td><div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span></div>
+      <div style="font-size:10px;color:rgba(255,255,255,.3);letter-spacing:3px;text-transform:uppercase;margin-top:3px;font-family:monospace;">Payment Confirmed</div></td>
+      <td align="right"><div style="background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.3);border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;color:#10b981;font-family:monospace;">✓ PAID</div></td>
+    </tr></table>
+  </td></tr>
+
+  <tr><td style="background:#0d0b1e;padding:36px;">
+    <div style="font-size:24px;font-weight:800;color:#fff;margin-bottom:8px;letter-spacing:-0.5px;">Your audit is ready to start.</div>
+    <div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.7;margin-bottom:28px;">
+      Thanks for your purchase. Click the button below to connect your HubSpot portal and start your <strong style="color:rgba(255,255,255,.85);">${planKey === 'pro-audit' ? 'FixOps Full Audit ($699)' : 'FixOps Diagnostic ($399)'}</strong>. The full scan runs in under 15 minutes.
+    </div>
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
+    <tr><td align="center">
+      <a href="${auditStartUrl}" style="display:inline-block;padding:15px 40px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">Connect HubSpot &amp; Start Audit →</a>
+    </td></tr>
+    </table>
+
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:12px;overflow:hidden;margin-bottom:20px;">
+    <tr><td style="padding:14px 20px;border-bottom:1px solid rgba(255,255,255,.06);">
+      <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:2px;text-transform:uppercase;font-family:monospace;">What happens next</div>
+    </td></tr>
+    <tr><td style="padding:16px 20px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr><td style="padding:6px 0;"><table cellpadding="0" cellspacing="0"><tr>
+          <td style="width:24px;height:24px;background:rgba(124,58,237,.2);border-radius:50%;text-align:center;font-size:10px;font-weight:800;color:#a78bfa;vertical-align:middle;">1</td>
+          <td style="padding-left:12px;font-size:13px;color:rgba(255,255,255,.7);">Click the button above to connect your HubSpot portal (read-only, takes 30 seconds)</td>
+        </tr></table></td></tr>
+        <tr><td style="padding:6px 0;"><table cellpadding="0" cellspacing="0"><tr>
+          <td style="width:24px;height:24px;background:rgba(124,58,237,.2);border-radius:50%;text-align:center;font-size:10px;font-weight:800;color:#a78bfa;vertical-align:middle;">2</td>
+          <td style="padding-left:12px;font-size:13px;color:rgba(255,255,255,.7);">FixOps runs 210 checks across your entire portal — contacts, deals, workflows, pipeline, billing, users</td>
+        </tr></table></td></tr>
+        <tr><td style="padding:6px 0;"><table cellpadding="0" cellspacing="0"><tr>
+          <td style="width:24px;height:24px;background:rgba(124,58,237,.2);border-radius:50%;text-align:center;font-size:10px;font-weight:800;color:#a78bfa;vertical-align:middle;">3</td>
+          <td style="padding-left:12px;font-size:13px;color:rgba(255,255,255,.7);">Full results with dollar impact, fix guides, and a 30-min strategy call ready in under 15 minutes</td>
+        </tr></table></td></tr>
+      </table>
+    </td></tr>
+    </table>
+
+    <div style="font-size:12px;color:rgba(255,255,255,.25);text-align:center;">This link expires in 7 days. Questions? Reply to this email or reach us at <a href="mailto:matthew@fixops.io" style="color:rgba(124,58,237,.6);text-decoration:none;">matthew@fixops.io</a></div>
+
+  </td></tr>
+  <tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 16px 16px;padding:18px 36px;text-align:center;">
+    <div style="font-size:11px;color:rgba(255,255,255,.2);">
+      <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.5);text-decoration:none;">fixops.io</a> · Secured by Stripe · Read-only HubSpot access
+    </div>
+  </td></tr>
+
+</table></td></tr></table>
+</body></html>`
         }).catch(e => console.error('Audit start email:', e.message));
 
         // Notify Matthew
@@ -4301,145 +4356,134 @@ app.get('/audit/certificate', async (req, res) => {
     if (!data) return res.status(404).send('<p>Audit not found</p>');
 
     const company  = data.portalInfo?.company || 'Your Portal';
-    const ovr      = data.summary?.overallScore || 0;
-    const grade    = ovr>=85?'Excellent':ovr>=72?'Good':ovr>=55?'Needs Attention':'Critical';
-    const date     = new Date(data.portalInfo?.auditDate || Date.now())
-                       .toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-    const criticals = data.summary?.criticalCount || 0;
-    const warnings  = data.summary?.warningCount  || 0;
-    const waste     = data.summary?.monthlyWaste  || 0;
-    const checks    = data.summary?.checksRun     || 210;
+    const score    = data.summary?.overallScore || 0;
+    const crits    = data.summary?.criticalCount || 0;
+    const waste    = data.summary?.monthlyWaste || 0;
+    const plan     = data.plan || data.summary?.plan || 'free';
+    const date     = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
 
-    const gradeColor = ovr>=80 ? '#059669' : ovr>=60 ? '#d97706' : '#dc2626';
-    const gradeBg    = ovr>=80 ? '#f0fdf4' : ovr>=60 ? '#fffbeb' : '#fef2f2';
-    const gradeBorder= ovr>=80 ? '#6ee7b7' : ovr>=60 ? '#fcd34d' : '#fca5a5';
+    const scoreColor = score >= 85 ? '#10b981' : score >= 70 ? '#f59e0b' : score >= 55 ? '#f97316' : '#f43f5e';
+    const grade      = score >= 85 ? 'Excellent' : score >= 70 ? 'Good' : score >= 55 ? 'Needs Work' : 'Critical';
+    const scoreAngle = Math.round((score / 100) * 251.2); // circumference of r=40 circle
 
-    // Score arc SVG — circular progress
-    const radius = 54, circumference = 2 * Math.PI * radius;
-    const progress = circumference - (ovr / 100) * circumference;
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="600" height="340" viewBox="0 0 600 340" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0c0920;stop-opacity:1"/>
+      <stop offset="50%" style="stop-color:#0e0b28;stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:#0a1220;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="scoreGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:${scoreColor};stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:${scoreColor}aa;stop-opacity:1"/>
+    </linearGradient>
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:rgba(124,58,237,0.25);stop-opacity:1"/>
+      <stop offset="100%" style="stop-color:rgba(16,185,129,0.1);stop-opacity:1"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="roundRect">
+      <rect width="600" height="340" rx="16" ry="16"/>
+    </clipPath>
+  </defs>
 
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta property="og:title" content="${company} — HubSpot Health Score: ${ovr}/100">
-<meta property="og:description" content="${grade} · ${criticals} critical issues · ${checks}-point audit by FixOps.io">
-<meta property="og:image" content="https://fixops.io/og-cert.png">
-<title>${company} — FixOps Health Certificate</title>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
-<style>
-  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
-  body{font-family:'DM Sans',sans-serif;background:#f8f9fc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px;}
-  .cert{background:#fff;border-radius:24px;box-shadow:0 4px 40px rgba(0,0,0,.08),0 1px 8px rgba(0,0,0,.04);max-width:540px;width:100%;overflow:hidden;}
-  .cert-header{background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);padding:32px;text-align:center;position:relative;overflow:hidden;}
-  .cert-header::before{content:'';position:absolute;top:-60px;right:-60px;width:250px;height:250px;background:radial-gradient(circle,rgba(124,58,237,.3),transparent 70%);}
-  .logo{font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#fff;margin-bottom:6px;opacity:.85;}
-  .logo span{color:#a78bfa;}
-  .cert-subtitle{font-size:10px;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.4);margin-bottom:24px;font-family:monospace;}
-  .company-name{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;color:#fff;letter-spacing:-.5px;line-height:1.2;}
-  .cert-date{font-size:11px;color:rgba(255,255,255,.45);margin-top:6px;}
+  <!-- Background -->
+  <rect width="600" height="340" rx="16" ry="16" fill="url(#bg)"/>
 
-  .cert-score{padding:32px 32px 24px;text-align:center;border-bottom:1px solid #f0f0f5;}
-  .score-ring-wrap{position:relative;display:inline-block;margin-bottom:16px;}
-  .score-text{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;}
-  .score-num{font-family:'Syne',sans-serif;font-size:36px;font-weight:800;line-height:1;color:${gradeColor};}
-  .score-denom{font-size:11px;color:#9ca3af;margin-top:2px;}
-  .grade-badge{display:inline-block;padding:5px 16px;border-radius:20px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;letter-spacing:.5px;background:${gradeBg};color:${gradeColor};border:1px solid ${gradeBorder};margin-bottom:8px;}
-  .cert-checks{font-size:11px;color:#9ca3af;font-family:monospace;letter-spacing:.5px;}
+  <!-- Border -->
+  <rect width="598" height="338" x="1" y="1" rx="15" ry="15" fill="none" stroke="rgba(124,58,237,0.35)" stroke-width="1"/>
 
-  .cert-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-bottom:1px solid #f0f0f5;}
-  .stat-box{padding:16px 12px;text-align:center;border-right:1px solid #f0f0f5;}
-  .stat-box:last-child{border-right:none;}
-  .stat-val{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;margin-bottom:3px;}
-  .stat-lbl{font-size:9px;text-transform:uppercase;letter-spacing:1.5px;color:#9ca3af;}
+  <!-- Top accent line -->
+  <rect width="600" height="3" rx="2" fill="url(#scoreGrad)"/>
 
-  .cert-footer{padding:20px 32px;display:flex;align-items:center;justify-content:space-between;gap:16px;}
-  .cert-seal{font-size:10px;color:#9ca3af;line-height:1.5;}
-  .cert-seal strong{color:#6d28d9;display:block;margin-bottom:2px;}
-  .cert-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
-  .btn{padding:8px 16px;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;text-decoration:none;font-family:'DM Sans',sans-serif;border:none;transition:all .15s;}
-  .btn-share{background:#7c3aed;color:#fff;}
-  .btn-share:hover{background:#6d28d9;}
-  .btn-view{background:#f3f4f6;color:#374151;}
-  .btn-view:hover{background:#e5e7eb;}
-  @media print{.cert-actions{display:none;}}
-  @media(max-width:480px){.cert-stats{grid-template-columns:1fr 1fr;}.stat-box:nth-child(2){border-right:none;}}
-</style>
-</head>
-<body>
-<div class="cert">
-  <div class="cert-header">
-    <div class="logo">⚡ Fix<span>Ops</span>.io</div>
-    <div class="cert-subtitle">HubSpot Health Certificate</div>
-    <div class="company-name">${company}</div>
-    <div class="cert-date">Audited ${date}</div>
-  </div>
+  <!-- Grid pattern overlay -->
+  <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+    <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(255,255,255,0.02)" stroke-width="0.5"/>
+  </pattern>
+  <rect width="600" height="340" fill="url(#grid)" rx="16" clip-path="url(#roundRect)"/>
 
-  <div class="cert-score">
-    <div class="score-ring-wrap">
-      <svg width="130" height="130" viewBox="0 0 130 130">
-        <circle cx="65" cy="65" r="${radius}" fill="none" stroke="#f3f4f6" stroke-width="8"/>
-        <circle cx="65" cy="65" r="${radius}" fill="none" stroke="${gradeColor}" stroke-width="8"
-          stroke-dasharray="${circumference.toFixed(1)}" stroke-dashoffset="${progress.toFixed(1)}"
-          stroke-linecap="round" transform="rotate(-90 65 65)"
-          style="transition:stroke-dashoffset 1.2s ease"/>
-      </svg>
-      <div class="score-text">
-        <div class="score-num">${ovr}</div>
-        <div class="score-denom">/100</div>
-      </div>
-    </div>
-    <div><span class="grade-badge">${grade}</span></div>
-    <div class="cert-checks">${checks}-Point Audit · FixOps.io</div>
-  </div>
+  <!-- Left panel — score circle -->
+  <rect x="0" y="0" width="200" height="340" fill="rgba(124,58,237,0.06)" rx="16" ry="16"/>
+  <rect x="196" y="0" width="4" height="340" fill="rgba(124,58,237,0.1)"/>
 
-  <div class="cert-stats">
-    <div class="stat-box">
-      <div class="stat-val" style="color:#dc2626">${criticals}</div>
-      <div class="stat-lbl">Critical</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-val" style="color:#d97706">${warnings}</div>
-      <div class="stat-lbl">Warnings</div>
-    </div>
-    <div class="stat-box">
-      <div class="stat-val" style="color:#7c3aed">$${Math.round(waste).toLocaleString()}</div>
-      <div class="stat-lbl">Est. Monthly Waste</div>
-    </div>
-  </div>
+  <!-- Score ring background -->
+  <circle cx="100" cy="148" r="54" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8"/>
+  <!-- Score ring progress -->
+  <circle cx="100" cy="148" r="54" fill="none" stroke="${scoreColor}" stroke-width="8"
+    stroke-dasharray="${scoreAngle} 251.2" stroke-dashoffset="62.8"
+    stroke-linecap="round" filter="url(#glow)" transform="rotate(-90 100 148)"/>
 
-  <div class="cert-footer">
-    <div class="cert-seal">
-      <strong>Verified by FixOps.io</strong>
-      Automated 210-point portal health audit.<br>
-      Results reflect data at time of audit.
-    </div>
-    <div class="cert-actions">
-      <button class="btn btn-share" onclick="shareLinkedIn()">Share on LinkedIn</button>
-      <a class="btn btn-view" href="/results.html?id=${id}">View Full Report</a>
-    </div>
-  </div>
-</div>
+  <!-- Score number -->
+  <text x="100" y="142" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="38" font-weight="900" fill="${scoreColor}" filter="url(#glow)">${score}</text>
+  <text x="100" y="162" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,monospace" font-size="11" fill="rgba(255,255,255,0.3)" letter-spacing="1">OUT OF 100</text>
 
-<script>
-function shareLinkedIn() {
-  var text = '${company} just scored ${ovr}/100 on a ${checks}-point HubSpot health audit by FixOps.io. Grade: ${grade}. ' +
-    '${criticals} critical issues found and a clear fix plan to resolve them. ' +
-    'Get your free HubSpot audit at fixops.io';
-  var url = 'https://www.linkedin.com/shareArticle?mini=true&url=' +
-    encodeURIComponent('https://fixops.io') + '&summary=' + encodeURIComponent(text);
-  window.open(url, '_blank', 'width=600,height=500');
-}
-</script>
-</body>
-</html>`;
+  <!-- Grade badge -->
+  <rect x="64" y="210" width="72" height="22" rx="11" fill="${scoreColor}22" stroke="${scoreColor}44" stroke-width="1"/>
+  <text x="100" y="225" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="11" font-weight="700" fill="${scoreColor}">${grade}</text>
 
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.send(html);
+  <!-- FixOps branding in left panel -->
+  <text x="100" y="280" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="15" font-weight="900" fill="rgba(255,255,255,0.9)" letter-spacing="-0.5">⚡ FixOps</text>
+  <text x="100" y="296" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.2)" letter-spacing="2">INTELLIGENCE</text>
+
+  <!-- Right panel content -->
+  <!-- Header area -->
+  <rect x="212" y="20" width="372" height="50" rx="8" fill="url(#headerGrad)" stroke="rgba(124,58,237,0.2)" stroke-width="1"/>
+  <text x="232" y="40" font-family="monospace" font-size="9" fill="rgba(167,139,250,0.7)" letter-spacing="2">HUBSPOT PORTAL HEALTH CERTIFICATE</text>
+  <text x="232" y="58" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="10" fill="rgba(255,255,255,0.3)">${date}</text>
+
+  <!-- Company name -->
+  <text x="232" y="108" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="22" font-weight="800" fill="rgba(255,255,255,0.95)" letter-spacing="-0.5">${company.length > 28 ? company.substring(0,28)+'…' : company}</text>
+  <text x="232" y="128" font-family="monospace" font-size="10" fill="rgba(255,255,255,0.3)" letter-spacing="1">PORTAL INTELLIGENCE REPORT</text>
+
+  <!-- Divider -->
+  <line x1="232" y1="144" x2="568" y2="144" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+
+  <!-- Stats row -->
+  <!-- Critical issues -->
+  <rect x="232" y="156" width="100" height="64" rx="8" fill="rgba(244,63,94,0.08)" stroke="rgba(244,63,94,0.2)" stroke-width="1"/>
+  <text x="282" y="184" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="26" font-weight="900" fill="${crits===0?'#10b981':'#f43f5e'}">${crits}</text>
+  <text x="282" y="200" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.3)" letter-spacing="0.5">CRITICAL</text>
+  <text x="282" y="212" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.3)" letter-spacing="0.5">ISSUES</text>
+
+  <!-- Monthly waste -->
+  <rect x="344" y="156" width="100" height="64" rx="8" fill="rgba(244,63,94,0.06)" stroke="rgba(244,63,94,0.15)" stroke-width="1"/>
+  <text x="394" y="180" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="18" font-weight="900" fill="rgba(255,255,255,0.7)">$${Number(waste).toLocaleString()}</text>
+  <text x="394" y="196" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.3)" letter-spacing="0.5">MONTHLY</text>
+  <text x="394" y="208" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.3)" letter-spacing="0.5">REVENUE LEAK</text>
+
+  <!-- Plan badge -->
+  <rect x="456" y="156" width="100" height="64" rx="8" fill="rgba(167,139,250,0.08)" stroke="rgba(167,139,250,0.2)" stroke-width="1"/>
+  <text x="506" y="184" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="12" font-weight="800" fill="#a78bfa">${(plan==='pro'?'Sentinel':plan==='command'?'Command':plan==='pulse'?'Monitor':plan.toUpperCase())}</text>
+  <text x="506" y="200" text-anchor="middle" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.3)" letter-spacing="0.5">PLAN</text>
+
+  <!-- Divider -->
+  <line x1="232" y1="236" x2="568" y2="236" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
+
+  <!-- 210-point audit badge -->
+  <text x="232" y="260" font-family="monospace" font-size="9" fill="rgba(255,255,255,0.25)" letter-spacing="1">✓ 210-POINT AUTOMATED AUDIT  ·  fixops.io</text>
+
+  <!-- Bottom features -->
+  <text x="232" y="290" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="10" fill="rgba(255,255,255,0.35)">Contacts · Deals · Workflows · Pipeline · Billing · Users · Properties</text>
+  <text x="232" y="310" font-family="monospace" font-size="8" fill="rgba(255,255,255,0.15)" letter-spacing="1">AUTOMATED WEEKLY MONITORING BY FIXOPS INTELLIGENCE PLATFORM</text>
+
+  <!-- Seal/watermark -->
+  <circle cx="552" cy="290" r="28" fill="rgba(124,58,237,0.1)" stroke="rgba(124,58,237,0.3)" stroke-width="1.5"/>
+  <text x="552" y="285" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="16" fill="rgba(124,58,237,0.8)">⚡</text>
+  <text x="552" y="300" text-anchor="middle" font-family="monospace" font-size="7" fill="rgba(124,58,237,0.5)" letter-spacing="1">VERIFIED</text>
+
+</svg>`;
+
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(svg);
+
   } catch(e) {
-    res.status(500).send('<p>Error: ' + e.message + '</p>');
+    console.error('Certificate error:', e.message);
+    res.status(500).send('<p>Certificate generation failed</p>');
   }
 });
 
@@ -4659,42 +4703,67 @@ cron.schedule('0 * * * *', async () => {
       const isOnetime = ['deep','pro-audit'].includes(row.plan);
       const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#f43f5e';
 
-      const html = `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
-<div style="max-width:520px;margin:0 auto;background:#0d0d12;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.08);">
-  <div style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
-    <div style="font-size:20px;font-weight:800;color:#fff;">⚡ FixOps</div>
-  </div>
-  <div style="padding:28px 32px;">
-    <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:8px;">
-      Your HubSpot scored ${score}/100. Here's what happens next.
-    </div>
-    <div style="font-size:13px;color:rgba(255,255,255,.6);line-height:1.7;margin-bottom:20px;">
-      Yesterday we scanned <strong style="color:#fff;">${company}</strong> and found 
-      <strong style="color:#f43f5e;">${crits} critical issues</strong> 
-      costing an estimated <strong style="color:#f43f5e;">$\${waste.toLocaleString()}/mo</strong>.
-      ${isOnetime 
-        ? "You have your full audit report. The question is: what happens in 30 days when new issues appear? One-time audits only show you today's snapshot."
-        : "Your free scan was capped at 1,000 contacts. Most portals have their worst issues sitting in the records we couldn't reach."}
+      const html = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Your HubSpot audit results</title></head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:32px 16px;">
+<tr><td align="center">
+<table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+  <tr><td style="background:linear-gradient(135deg,#0d0b1e,#120e2a);border-radius:16px 16px 0 0;padding:28px 36px;border-bottom:1px solid rgba(124,58,237,.25);">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td><div style="font-size:22px;font-weight:900;color:#fff;letter-spacing:-0.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span></div>
+      <div style="font-size:10px;color:rgba(255,255,255,.3);letter-spacing:3px;text-transform:uppercase;margin-top:3px;font-family:monospace;">Your audit from yesterday</div></td>
+      <td align="right"><div style="background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.25);border-radius:6px;padding:5px 12px;font-size:11px;font-weight:700;color:#f43f5e;font-family:monospace;">${score}/100</div></td>
+    </tr></table>
+  </td></tr>
+
+  <tr><td style="background:#0d0b1e;padding:36px;">
+    <div style="font-size:22px;font-weight:800;color:#fff;margin-bottom:8px;letter-spacing:-0.5px;">Those ${crits} issues won&#39;t fix themselves.</div>
+    <div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.7;margin-bottom:24px;">
+      Yesterday we scanned <strong style="color:rgba(255,255,255,.85);">${company}</strong> and found <strong style="color:#f43f5e;">${crits} critical issues</strong> costing an estimated <strong style="color:#f43f5e;">$${waste.toLocaleString()}/mo</strong>. ${isOnetime ? "You have your full report — but what happens in 30 days when new issues appear?" : "Your free scan was capped at 1,000 contacts. Your worst issues are almost certainly in the records we couldn&#39;t reach."}
     </div>
 
-    <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:10px;padding:18px 20px;margin-bottom:20px;">
-      <div style="font-size:10px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;margin-bottom:8px;">⚡ Limited Offer — Expires in 48 Hours</div>
-      <div style="font-size:15px;font-weight:800;color:#fff;margin-bottom:6px;">Try Sentinel for $199 your first month</div>
-      <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.6;margin-bottom:14px;">
-        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, audit history.
-        Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout.
-      </div>
-      <a href="${SENTINEL_DISC}" style="display:inline-block;padding:10px 22px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $199 First Month →</a>
+    <!-- Score bar -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:20px 24px;margin-bottom:24px;">
+    <tr>
+      <td width="50%" style="padding:0 16px 0 0;border-right:1px solid rgba(255,255,255,.06);">
+        <div style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Portal Score</div>
+        <div style="font-size:36px;font-weight:900;color:${score >= 70 ? '#f59e0b' : '#f43f5e'};letter-spacing:-2px;">${score}<span style="font-size:16px;color:rgba(255,255,255,.3);font-weight:400;">/100</span></div>
+      </td>
+      <td width="50%" style="padding:0 0 0 16px;">
+        <div style="font-size:10px;color:rgba(255,255,255,.3);font-family:monospace;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">Monthly Leak</div>
+        <div style="font-size:36px;font-weight:900;color:#f43f5e;letter-spacing:-2px;">$${waste.toLocaleString()}<span style="font-size:14px;color:rgba(255,255,255,.3);font-weight:400;">/mo</span></div>
+      </td>
+    </tr>
+    </table>
+
+    <!-- Discount offer -->
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(16,185,129,.07);border:1px solid rgba(16,185,129,.2);border-radius:12px;overflow:hidden;margin-bottom:20px;">
+    <tr><td style="padding:20px 24px;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ 48-Hour Offer</div>
+      <div style="font-size:17px;font-weight:800;color:#fff;margin-bottom:6px;">First month of Sentinel for $199</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.5);line-height:1.6;margin-bottom:16px;">Normally $549/mo. Daily scans, all 38 intelligence views, AI Deal Coach, RevOps AI Coach, billing optimizer. Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies.</div>
+      <table cellpadding="0" cellspacing="0"><tr>
+        <td style="padding-right:10px;"><a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:11px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:13px;">Claim $199 First Month →</a></td>
+        <td><a href="https://buy.stripe.com/28E5kDfeicrg6HGcxD8Ra06?prefilled_promo_code=TRYMONITOR" style="display:inline-block;padding:11px 20px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);text-decoration:none;border-radius:8px;font-weight:600;font-size:12px;">Monitor — $99 first month</a></td>
+      </tr></table>
+    </td></tr>
+    </table>
+
+    <div style="font-size:12px;color:rgba(255,255,255,.2);text-align:center;line-height:1.7;">
+      Cancel anytime · No contracts · <a href="mailto:matthew@fixops.io" style="color:rgba(124,58,237,.5);text-decoration:none;">Questions? Email us</a>
     </div>
 
-    <div style="font-size:12px;color:rgba(255,255,255,.35);line-height:1.7;">
-      Or try <a href="${MONITOR_DISC}" style="color:#a78bfa;">Monitor for $99 your first month</a> — weekly scans, dollar impact on every issue, fix guides. Then $299/mo. Cancel anytime.
+  </td></tr>
+  <tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 16px 16px;padding:14px 36px;text-align:center;">
+    <div style="font-size:11px;color:rgba(255,255,255,.15);">
+      <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.4);text-decoration:none;">fixops.io</a> · <a href="mailto:matthew@fixops.io" style="color:rgba(124,58,237,.4);text-decoration:none;">matthew@fixops.io</a>
     </div>
-  </div>
-  <div style="padding:16px 32px;border-top:1px solid rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.2);">
-    FixOps.io · <a href="mailto:matthew@fixops.io" style="color:rgba(255,255,255,.2);">matthew@fixops.io</a>
-  </div>
-</div></body></html>`;
+  </td></tr>
+
+</table></td></tr></table>
+</body></html>`;
 
       await resend.emails.send({
         from: 'Matt at FixOps <matthew@fixops.io>',
