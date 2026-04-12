@@ -1976,8 +1976,8 @@ app.post('/ai/autodoc', async (req, res) => {
     if (email) {
       const custRes = await db.query('SELECT plan FROM customers WHERE email = $1', [email]);
       const plan = custRes.rows[0]?.plan || 'free';
-      if (!['pro','command','pro-audit'].includes(plan)) {
-        return res.status(403).json({ error: 'AutoDoc requires Pro or Agency plan' });
+      if (!['pro','command','command_unlimited','agency_scale','agency_unlimited','pro-audit'].includes(plan)) {
+        return res.status(403).json({ error: 'AutoDoc requires Sentinel or Command plan' });
       }
     }
 
@@ -3524,7 +3524,7 @@ app.post('/webhook', async (req, res) => {
         await resend.emails.send({
           from: 'FixOps <reports@fixops.io>',
           to: email,
-          subject: `✅ Payment confirmed — start your ${planKey === 'pro-audit' ? 'Pro' : 'Deep'} Audit`,
+          subject: `✅ Payment confirmed — start your ${planKey === 'pro-audit' ? 'FixOps Full Audit' : 'FixOps Diagnostic'}`,
           html: `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Start Your Audit</title></head>
 <body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
