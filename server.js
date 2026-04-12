@@ -1098,6 +1098,23 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
 
 </table>
 </td></tr>
+
+<!-- ── First-Month Discount Offer ── -->
+<tr><td style="padding:0 24px 32px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:12px;overflow:hidden;">
+    <tr><td style="padding:20px 24px;">
+      <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ Exclusive Offer — FixOps Customers</div>
+      <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $99</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:14px;">
+        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
+        Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout. Cancel anytime.
+      </div>
+      <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $99 First Month →</a>
+      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $549/mo · cancel anytime · no contract</div>
+    </td></tr>
+  </table>
+</td></tr>
+
 </table>
 </body></html>`;
 
