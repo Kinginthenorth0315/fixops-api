@@ -83,6 +83,9 @@ async function initDb() {
       updated_at      TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Add hubspot_portal_id column to customers if it doesn't exist
+  await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS hubspot_portal_id VARCHAR(50)`).catch(()=>{});
+
   await db.query(`
     CREATE TABLE IF NOT EXISTS audit_history (
       id              SERIAL PRIMARY KEY,
@@ -101,6 +104,9 @@ async function initDb() {
       created_at      TIMESTAMP DEFAULT NOW()
     )
   `);
+  // Migrate existing installs — add hubspot_portal_id to audit_history
+  await db.query(`ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS hubspot_portal_id VARCHAR(50)`).catch(()=>{});
+
   // Migrate existing installs — add new columns if not present
   const newCols = ['critical_count INT DEFAULT 0','warning_count INT DEFAULT 0','info_count INT DEFAULT 0','monthly_waste INT DEFAULT 0','records_scanned INT DEFAULT 0','scores JSONB','issue_titles JSONB','portal_stats JSONB'];
   for (const col of newCols) {
@@ -1067,7 +1073,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   ${plan === 'pulse' ? `
   <tr><td style="background:#120f30;padding:20px 32px;border-bottom:1px solid rgba(255,255,255,.06);">
     <div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.25);border-radius:10px;padding:16px 20px;">
-      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $549/mo</div>
+      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $199/mo</div>
       <div style="font-size:13px;color:rgba(255,255,255,.7);margin-bottom:12px;">Get 15 intelligence views, score trends, ROI tracking, revenue health, contact engagement analysis, and the full snapshot dashboard for your team.</div>
       <a href="${FRONTEND_URL}/#pricing" style="display:inline-block;padding:10px 22px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12px;">See Pro Features →</a>
     </div>
@@ -1106,11 +1112,11 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
       <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ Exclusive Offer — FixOps Customers</div>
       <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $99</div>
       <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:14px;">
-        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
+        Normally $199/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
         Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout. Cancel anytime.
       </div>
       <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $99 First Month →</a>
-      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $549/mo · cancel anytime · no contract</div>
+      <div style="font-size:10px;color:rgba(255,255,255,.25);margin-top:8px;font-family:monospace;">then $199/mo · cancel anytime · no contract</div>
     </td></tr>
   </table>
 </td></tr>
@@ -1428,15 +1434,16 @@ app.post('/auth/refresh', async (req, res) => {
         ).catch(()=>({rows:[]}));
 
         await db.query(
-          `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats, hubspot_portal_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
           [cust.id, auditId, cust.plan,
            result.summary?.overallScore||0, result.summary?.criticalCount||0,
            result.summary?.warningCount||0, result.summary?.infoCount||0,
            result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
            JSON.stringify(result.scores||{}),
            JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
-           JSON.stringify(result.portalInfo?.portalStats||{})]
+           JSON.stringify(result.portalInfo?.portalStats||{}),
+         String(result.portalInfo?.portalId||'')]
         ).catch(e => console.error('History insert:', e.message));
 
         // Send email for monthly plans
@@ -2478,8 +2485,8 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $299/mo — 5 audits
-  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $549/mo — 15 audits
+  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 99   },  // $99/mo — 5 audits
+  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 199  },  // $199/mo — 15 audits
   agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $999/mo — 40 audits
   agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,999/mo — unlimited
 };
@@ -3491,15 +3498,24 @@ app.get('/auth/callback', async (req, res) => {
           // Save to audit history
           const custRes = await db.query('SELECT id FROM customers WHERE email = $1', [auditMeta.email]).catch(() => ({ rows: [] }));
           if (custRes.rows[0]) {
+            // Save hubspot_portal_id to customer record (links portal across email changes)
+            const hsPortalId = String(result.portalInfo?.portalId || '');
+            if (hsPortalId) {
+              await db.query(
+                'UPDATE customers SET hubspot_portal_id = $1, company = COALESCE(NULLIF($2,\'\'), company), updated_at = NOW() WHERE id = $3',
+                [hsPortalId, result.portalInfo?.company || '', custRes.rows[0].id]
+              ).catch(()=>{});
+            }
             await db.query(
-              `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+              `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats, hubspot_portal_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
               [custRes.rows[0].id, auditIdCopy, auditMeta.plan,
                result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.warningCount||0, result.summary?.infoCount||0,
                result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
                JSON.stringify(result.scores||{}),
                JSON.stringify((result.issues||[]).map(i=>({title:i.title,severity:i.severity,dimension:i.dimension,impact:i.impact}))),
-               JSON.stringify(result.portalInfo?.portalStats||{})]
+               JSON.stringify(result.portalInfo?.portalStats||{}),
+               String(result.portalInfo?.portalId||'')]
             ).catch(() => {});
           }
         }
@@ -4188,10 +4204,21 @@ app.get('/snapshot/:id', async (req, res) => {
 // ── Customer history ──────────────────────────────────────────────────────────
 app.get('/customer/history', async (req, res) => {
   try {
-    const { email } = req.query;
-    if (!email) return res.status(400).json({ error: 'email required' });
-    const custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
-    if (!custRes.rows[0]) return res.json({ customer: null, history: [] });
+    const { email, portal_id } = req.query;
+    if (!email && !portal_id) return res.status(400).json({ error: 'email or portal_id required' });
+    
+    let custRes;
+    if (portal_id) {
+      // Prefer portal_id lookup — finds the right record even if email changed
+      custRes = await db.query(
+        'SELECT * FROM customers WHERE hubspot_portal_id = $1 ORDER BY updated_at DESC LIMIT 1',
+        [portal_id]
+      );
+    }
+    if (!custRes?.rows[0] && email) {
+      custRes = await db.query('SELECT * FROM customers WHERE email = $1', [email]);
+    }
+    if (!custRes?.rows[0]) return res.json({ customer: null, history: [] });
     const hist = await db.query(
       'SELECT * FROM audit_history WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 20',
       [custRes.rows[0].id]
@@ -4236,8 +4263,8 @@ const triggerRescan = async (customer) => {
 
       // Save this week's result to history
       await db.query(
-        `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        `INSERT INTO audit_history (customer_id, audit_id, plan, score, critical_count, warning_count, info_count, monthly_waste, records_scanned, scores, issue_titles, portal_stats, hubspot_portal_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [customer.id, auditId, customer.plan,
          result.summary?.overallScore||0, result.summary?.criticalCount||0, result.summary?.warningCount||0, result.summary?.infoCount||0,
          result.summary?.monthlyWaste||0, result.summary?.recordsScanned||0,
