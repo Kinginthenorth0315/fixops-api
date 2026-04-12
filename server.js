@@ -106,6 +106,21 @@ async function initDb() {
   `);
   // Migrate existing installs — add hubspot_portal_id to audit_history
   await db.query(`ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS hubspot_portal_id VARCHAR(50)`).catch(()=>{});
+  // Add ai_coach add-on column to customers
+  await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_coach_enabled BOOLEAN DEFAULT FALSE`).catch(()=>{});
+  await db.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_coach_since TIMESTAMP`).catch(()=>{});
+  // Add change_log table for Change Intelligence
+  await db.query(`CREATE TABLE IF NOT EXISTS portal_change_log (
+    id SERIAL PRIMARY KEY,
+    customer_id INT REFERENCES customers(id),
+    hubspot_portal_id VARCHAR(50),
+    audit_id VARCHAR(24),
+    scan_date TIMESTAMP DEFAULT NOW(),
+    prev_audit_id VARCHAR(24),
+    changes JSONB,
+    score_delta INT,
+    created_at TIMESTAMP DEFAULT NOW()
+  )`).catch(()=>{});
 
   // Migrate existing installs — add new columns if not present
   const newCols = ['critical_count INT DEFAULT 0','warning_count INT DEFAULT 0','info_count INT DEFAULT 0','monthly_waste INT DEFAULT 0','records_scanned INT DEFAULT 0','scores JSONB','issue_titles JSONB','portal_stats JSONB'];
@@ -1735,6 +1750,258 @@ Respond in this exact JSON format (no markdown, no backticks, no extra text):
 
 // ── AutoDoc — AI Workflow Documentation Generator ─────────────────────────────
 // Pro/Agency: reads workflows from audit data and generates plain-English docs
+// ── AI Deal Coach — analyzes stalled/at-risk deals with specific next steps ──
+app.post('/ai/deal-coach', async (req, res) => {
+  try {
+    const { auditId, email, dealId } = req.body;
+    if (!auditId) return res.status(400).json({ error: 'auditId required' });
+
+    const custRes = await db.query('SELECT plan FROM customers WHERE email = $1', [email || '']).catch(() => ({ rows: [] }));
+    const plan = custRes.rows[0]?.plan || 'free';
+    if (!['pro','command','command_unlimited','agency_scale','agency_unlimited'].includes(plan)) {
+      return res.status(403).json({ error: 'Deal Coach requires Sentinel or Command plan' });
+    }
+
+    const result = await getResult(auditId);
+    if (!result) return res.status(404).json({ error: 'Audit not found' });
+
+    const ps      = result.portalInfo?.portalStats || {};
+    const ri      = ps.revenueIntel || {};
+    const deals   = ps.dealList || [];
+    const company = result.portalInfo?.company || 'Unknown';
+    const repData = ps.repIntelEngine || {};
+
+    const targetDeals = dealId
+      ? deals.filter(d => String(d.id) === String(dealId)).slice(0, 1)
+      : deals.filter(d => (d.daysStalled > 14) || (d.riskScore < 40) || !d.amount).slice(0, 8);
+
+    if (!targetDeals.length) {
+      return res.json({ coaching: [], message: 'No stalled or at-risk deals found. Great pipeline hygiene!' });
+    }
+
+    const dealLines = targetDeals.map(function(d, i) {
+      return [
+        'DEAL '+(i+1)+': "'+(d.dealname || 'Unnamed')+'"',
+        '  Stage: '+(d.stage || 'Unknown')+' | Amount: '+(d.amount ? '$'+Number(d.amount).toLocaleString() : 'NO AMOUNT SET'),
+        '  Days in stage: '+(d.daysInStage || 0)+' | Days stalled: '+(d.daysStalled || 0),
+        '  Owner: '+(d.ownerName || 'Unassigned')+' | Close date: '+(d.closeDate || 'Not set'),
+        '  Last activity: '+(d.daysSinceActivity || '?')+' days ago | Risk score: '+(d.riskScore || 'N/A')+'/100',
+        '  Last contact: '+(d.lastContactName || 'Unknown')+' | Last activity type: '+(d.lastActivityType || 'none'),
+      ].join('\n');
+    });
+    const dealContext = dealLines.join('\n\n');
+
+    const winRate  = ri.winRate || 0;
+    const avgDeal  = Number(ri.avgDealSize || 0).toLocaleString();
+    const avgDays  = ri.avgDaysToClose || 0;
+    const openPipe = Number(ri.openPipelineValue || 0).toLocaleString();
+    const totalReps = repData.totalReps || 0;
+
+    const prompt = 'You are an expert B2B sales coach and HubSpot RevOps consultant analyzing stalled deals for ' + company + '.\n\n' +
+      'PORTAL CONTEXT:\n' +
+      '- Win rate: ' + winRate + '%\n' +
+      '- Avg deal size: $' + avgDeal + '\n' +
+      '- Avg days to close: ' + avgDays + '\n' +
+      '- Open pipeline: $' + openPipe + '\n' +
+      '- Active reps: ' + totalReps + '\n\n' +
+      'DEALS NEEDING COACHING:\n' + dealContext + '\n\n' +
+      'For each deal provide specific actionable coaching. Be concrete — name exact tactics, specific message angles, what the rep should do TODAY.\n' +
+      'Format as JSON array: [{ dealName, stage, stalledReason, immediateAction, script, redFlag, confidence }]\n' +
+      'confidence = HIGH/MEDIUM/LOW. Return ONLY valid JSON, no markdown.';
+
+    const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      timeout: 30000
+    });
+
+    let coaching = [];
+    try {
+      const text = aiRes.data?.content?.[0]?.text?.trim() || '[]';
+      coaching = JSON.parse(text.replace(/```json|```/g, '').trim());
+    } catch(e) {
+      coaching = [{ dealName: 'Analysis', immediateAction: aiRes.data?.content?.[0]?.text || 'Parse error', confidence: 'LOW' }];
+    }
+
+    res.json({ coaching, dealsAnalyzed: targetDeals.length, company });
+  } catch(e) {
+    console.error('[DealCoach]', e.message?.substring(0, 80));
+    res.status(500).json({ error: 'Deal coach analysis failed' });
+  }
+});
+
+// ── RevOps AI Coach — full portal RevOps strategy memo ───────────────────────
+app.post('/ai/revops-coach', async (req, res) => {
+  try {
+    const { auditId, email } = req.body;
+    if (!auditId) return res.status(400).json({ error: 'auditId required' });
+
+    const custRes = await db.query('SELECT plan FROM customers WHERE email = $1', [email || '']).catch(() => ({ rows: [] }));
+    const plan = custRes.rows[0]?.plan || 'free';
+    if (!['pro','command','command_unlimited','agency_scale','agency_unlimited'].includes(plan)) {
+      return res.status(403).json({ error: 'RevOps Coach requires Sentinel or Command plan' });
+    }
+
+    const result = await getResult(auditId);
+    if (!result) return res.status(404).json({ error: 'Audit not found' });
+
+    const ps      = result.portalInfo?.portalStats || {};
+    const s       = result.summary || {};
+    const issues  = result.issues || [];
+    const ri      = ps.revenueIntel || {};
+    const rep     = ps.repIntelEngine || {};
+    const decay   = ps.contactDecayEngine || {};
+    const bil     = ps.billingTierEngine || {};
+    const lrt     = ps.leadResponseTime || {};
+    const company = result.portalInfo?.company || 'Unknown';
+
+    const criticals = issues.filter(i => i.severity === 'critical').slice(0, 10);
+    const warnings  = issues.filter(i => i.severity === 'warning').slice(0, 8);
+
+    const ctx = [
+      'COMPANY: ' + company,
+      'HEALTH SCORE: ' + (s.overallScore || 0) + '/100',
+      'CRITICAL ISSUES: ' + (s.criticalCount || 0) + ' | WARNINGS: ' + (s.warningCount || 0),
+      'MONTHLY WASTE: $' + Number(s.monthlyWaste || 0).toLocaleString(),
+      '',
+      'PIPELINE:',
+      '  Open: $' + Number(ri.openPipelineValue || 0).toLocaleString() + ' | ' + (ri.openDealsCount || 0) + ' deals',
+      '  Win rate: ' + (ri.winRate || 0) + '% | Avg deal: $' + Number(ri.avgDealSize || 0).toLocaleString(),
+      '  Stalled: ' + (ps.stalledDeals || 0) + ' | Zero-dollar: ' + (ps.zeroDollarDeals || 0),
+      '',
+      'TEAM:',
+      '  Reps: ' + (rep.totalReps || 0) + ' | Avg activities/week: ' + (rep.avgActivitiesPerRep || 0),
+      '  Lead response: ' + (lrt.avgMinutes ? Math.round(lrt.avgMinutes/60)+'hrs avg' : 'unknown'),
+      '  Ghost seats: ' + (ps.ghostSeats || 0),
+      '',
+      'DATA:',
+      '  Contact score: ' + (decay.avgDecayScore || 0) + '/100',
+      '  Dead: ' + (decay.buckets?.dead || 0) + ' | Decaying: ' + (decay.buckets?.decaying || 0),
+      '  Duplicates: ' + (ps.duplicateContactCount || 0),
+      '',
+      'AUTOMATION:',
+      '  Workflows: ' + (ps.totalWorkflows || 0) + ' | Dead: ' + (ps.deadWorkflowCount || 0),
+      '  Missing goals: ' + (ps.workflowsMissingGoals || 0),
+      '',
+      'BILLING:',
+      '  Tier: ' + (bil.currentTier?.toLocaleString() || 'unknown') + ' | Used: ' + (bil.pctOfTier || 0) + '%',
+      '  At risk: ' + (bil.atRisk ? 'YES' : 'no'),
+      '',
+      'CRITICAL ISSUES:',
+    ].concat(
+      criticals.map(i => '  - '+(i.title||'')+' ('+(i.dimension||'')+') $'+Number(i.monthlyImpact||0).toLocaleString()+'/mo')
+    ).concat([
+      '',
+      'WARNINGS:',
+    ]).concat(
+      warnings.map(i => '  - '+(i.title||''))
+    ).join('\n');
+
+    const prompt = 'You are a senior RevOps consultant and HubSpot expert. Generate a comprehensive RevOps strategy report for ' + company + '.\n\n' +
+      ctx + '\n\n' +
+      'Generate a strategic coaching report as JSON with these sections:\n' +
+      '{ executiveSummary, revenueOpportunities: [{title,action,dollarImpact,priority}], pipelineFixes: [{title,action,urgency}], ' +
+      'teamCoaching: {summary, repActions:[{issue,action}]}, dataFixes:[{title,action,impact}], ' +
+      'automationHealth:{summary,actions:[{title,action}]}, ' +
+      'roadmap:{week1:[],week2:[],week3:[],week4:[]}, ' +
+      'kpis:[{metric,current,target30d,why}] }\n' +
+      'Be specific with numbers and exact HubSpot locations. Return ONLY valid JSON.';
+
+    const aiRes = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 3000,
+      messages: [{ role: 'user', content: prompt }]
+    }, {
+      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      timeout: 45000
+    });
+
+    let report = {};
+    try {
+      const text = aiRes.data?.content?.[0]?.text?.trim() || '{}';
+      report = JSON.parse(text.replace(/```json|```/g, '').trim());
+    } catch(e) {
+      report = { executiveSummary: aiRes.data?.content?.[0]?.text || 'Analysis complete' };
+    }
+
+    res.json({ report, company, score: s.overallScore, waste: s.monthlyWaste });
+  } catch(e) {
+    console.error('[RevOpsCoach]', e.message?.substring(0, 80));
+    res.status(500).json({ error: 'RevOps coach analysis failed' });
+  }
+});
+
+// ── Contact Tier Optimization — finds billable vs non-billable contacts ───────
+app.post('/ai/contact-tier', async (req, res) => {
+  try {
+    const { auditId, email } = req.body;
+    if (!auditId) return res.status(400).json({ error: 'auditId required' });
+
+    const result = await getResult(auditId);
+    if (!result) return res.status(404).json({ error: 'Audit not found' });
+
+    const ps   = result.portalInfo?.portalStats || {};
+    const bil  = ps.billingTierEngine || {};
+    const dec  = ps.contactDecayEngine || {};
+    const comp = ps.contactCompleteness || {};
+
+    // Calculate suppression candidates
+    const totalContacts    = ps.totalContacts || 0;
+    const deadContacts     = dec.buckets?.dead || 0;
+    const bouncedEmails    = ps.highBounceEmails || 0;
+    const unsubscribed     = ps.unsubscribedContacts || 0;
+    const neverMarketed    = ps.neverMarketedContacts || 0;
+    const suppressCandidates = Math.round(deadContacts * 0.8 + bouncedEmails * 0.9 + (neverMarketed * 0.3));
+
+    // Calculate tier savings
+    const tiers = [
+      { limit: 1000,   price: 0    },
+      { limit: 5000,   price: 45   },
+      { limit: 15000,  price: 170  },
+      { limit: 50000,  price: 360  },
+      { limit: 100000, price: 640  },
+      { limit: 200000, price: 1080 },
+    ];
+    const currentTier = tiers.find(t => totalContacts <= t.limit) || tiers[tiers.length-1];
+    const projectedAfter = Math.max(0, totalContacts - suppressCandidates);
+    const projectedTier  = tiers.find(t => projectedAfter <= t.limit) || tiers[tiers.length-1];
+    const monthlySavings = Math.max(0, currentTier.price - projectedTier.price);
+
+    const optimization = {
+      totalContacts,
+      suppressCandidates,
+      projectedContactsAfter: projectedAfter,
+      currentMonthlyTierCost: currentTier.price,
+      projectedMonthlyTierCost: projectedTier.price,
+      monthlySavings,
+      annualSavings: monthlySavings * 12,
+      breakdown: {
+        deadContacts,
+        bouncedEmails,
+        unsubscribed,
+        neverMarketed,
+      },
+      steps: [
+        { step: 1, title: 'Export suppression candidates', action: 'Contacts → Filters → Last activity date is more than 12 months ago AND Email bounced OR Unsubscribed. Export to CSV for review.', impact: 'Identify exact contacts to suppress' },
+        { step: 2, title: 'Set non-marketing status', action: 'Select filtered contacts → Actions → Set as non-marketing contact. This removes them from your billable count without deleting data.', impact: `Save ~$${monthlySavings}/mo on HubSpot billing` },
+        { step: 3, title: 'Archive dead contacts', action: 'For contacts with 0 activity in 18+ months and invalid email: create a list, export, then delete or archive. Always export first.', impact: 'Clean database, faster HubSpot performance' },
+        { step: 4, title: 'Set up ongoing suppression workflow', action: 'Create a workflow: Contact bounces email → 30 day wait → Set non-marketing. Prevents future billing creep.', impact: 'Permanent fix, not a one-time cleanup' },
+      ],
+      pctSuppressable: totalContacts > 0 ? Math.round(suppressCandidates / totalContacts * 100) : 0,
+      billingRisk: bil.atRisk || false,
+      daysToNextTier: bil.daysToTier || null,
+    };
+
+    res.json(optimization);
+  } catch(e) {
+    console.error('[ContactTier]', e.message?.substring(0, 80));
+    res.status(500).json({ error: 'Contact tier analysis failed' });
+  }
+});
+
 app.post('/ai/autodoc', async (req, res) => {
   try {
     const { auditId, email } = req.body;
@@ -2485,10 +2752,14 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $299/mo — 5 audits
-  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $549/mo — 15 audits
-  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $999/mo — 40 audits
-  agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,9299/mo — unlimited
+  // Current agency tiers
+  command:           { maxPortals: 10,   name: 'FixOps Command',           price: 999,  aiCoach: false, autoDoc: 0 },
+  command_unlimited: { maxPortals: 9999, name: 'FixOps Command Unlimited',  price: 1999, aiCoach: true,  autoDoc: 5 },
+  // Legacy keys for existing customers
+  agency_starter:    { maxPortals: 5,    name: 'FixOps Monitor',            price: 299,  aiCoach: false, autoDoc: 0 },
+  agency_pro:        { maxPortals: 15,   name: 'FixOps Sentinel',           price: 549,  aiCoach: false, autoDoc: 0 },
+  agency_scale:      { maxPortals: 10,   name: 'FixOps Command',            price: 999,  aiCoach: false, autoDoc: 0 },
+  agency_unlimited:  { maxPortals: 9999, name: 'FixOps Command Unlimited',  price: 1999, aiCoach: true,  autoDoc: 5 },
 };
 
 // ── Register new agency account (admin or Stripe webhook) ─────────────────────
@@ -3064,8 +3335,15 @@ app.post('/agency/portals/add', async (req, res) => {
       'SELECT COUNT(*) FROM portals WHERE customer_id = $1 AND is_active = true',
       [cust.id]
     );
-    if (parseInt(countRes.rows[0].count) >= 25) {
-      return res.status(400).json({ error: 'Portal limit reached (25 max). Contact support to expand.' });
+    const planKey = cust.plan || 'command';
+    const agPlan = AGENCY_PLANS[planKey] || AGENCY_PLANS.command;
+    const maxPortals = agPlan.maxPortals || 10;
+    if (parseInt(countRes.rows[0].count) >= maxPortals) {
+      const isUnlimited = maxPortals >= 9999;
+      return res.status(400).json({ 
+        error: isUnlimited ? 'Something went wrong' : `Portal limit reached (${maxPortals} max on ${agPlan.name}). Upgrade to Command Unlimited for unlimited portals.`,
+        upgrade: !isUnlimited
+      });
     }
 
     // Try to get portal info to verify token works
