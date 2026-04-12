@@ -336,7 +336,7 @@ const sendClientEmail = async (email, result, auditId) => {
 
   const col   = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#ef4444';
   const grade = s.overallScore >= 85 ? 'Excellent' : s.overallScore >= 70 ? 'Good' : s.overallScore >= 55 ? 'Needs Attention' : 'Critical';
-  const planLabel = { free:'Free Snapshot', deep:'Deep Audit', 'pro-audit':'Pro Audit', pulse:'Pulse', pro:'Pro Plan', command:'Agency' }[plan] || 'Audit';
+  const planLabel = { free:'Free Snapshot', deep:'FixOps Diagnostic', 'pro-audit':'FixOps Full Audit', pulse:'Pulse', pro:'FixOps Sentinel', command:'Agency' }[plan] || 'Audit';
 
   // Top issues — max 5, criticals first
   const criticals = issues.filter(i => i.severity === 'critical').slice(0, 3);
@@ -645,7 +645,7 @@ const notifyMatthew = async (result, auditId, plan) => {
 };
 
 
-// ── Pulse Weekly Email ────────────────────────────────────────────────────────
+// ── FixOps Monitor Weekly Email ────────────────────────────────────────────────────────
 const sendPulseEmail = async (email, result, auditId, history, customer) => {
   const s = result.summary || {};
   const scores = result.scores || {};
@@ -820,7 +820,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   const html = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FixOps Pulse Report</title>
+<title>FixOps FixOps Monitor Report</title>
 </head>
 <body style="margin:0;padding:0;background:#f0f0f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
 
@@ -1290,7 +1290,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   }
 
   await resend.emails.send({
-    from: 'FixOps Pulse <reports@fixops.io>',
+    from: 'FixOps FixOps Monitor <reports@fixops.io>',
     to: email,
     subject,
     html
@@ -1909,7 +1909,7 @@ app.post('/agency-inquiry', async (req, res) => {
       to: FIXOPS_NOTIFY_EMAIL,
       subject: `🏢 New Agency Inquiry — ${company || 'Unknown'} — ${name}`,
       html: `
-        <h2 style="color:#7c3aed;">New Agency Plan Inquiry</h2>
+        <h2 style="color:#7c3aed;">New FixOps Command Inquiry</h2>
         <table style="border-collapse:collapse;width:100%;max-width:560px;">
           <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;width:180px;">Name</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${name}</td></tr>
           <tr><td style="padding:8px 12px;background:#f3f4f6;font-weight:700;">Company</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${company || '—'}</td></tr>
@@ -2287,8 +2287,15 @@ app.get('/audit/enrichment-gaps', async (req, res) => {
     const completenessData = ps.contactCompleteness || {};
     // missingByField stores count of contacts MISSING each field
     const missingByField = completenessData.missingByField || {};
+    // If no completeness data (pre-fix audit), tell frontend to re-scan
+    if (!completenessData.missingByField && Object.keys(missingByField).length === 0) {
+      return res.json({ gaps: [], total, needsRescan: true,
+        message: 'Contact completeness data requires a fresh audit scan to compute.' });
+    }
     const gaps = fields.map(f => {
-      const missing = missingByField[f.key] !== undefined ? missingByField[f.key] : Math.round(total * 0.3); // fallback estimate
+      // Only use real data — no fabricated fallback
+      // If contactCompleteness not available (old audit), missing = 0 (unknown)
+      const missing = missingByField[f.key] !== undefined ? missingByField[f.key] : 0;
       const filled = total - missing;
       const pct = total > 0 ? Math.round((missing / total) * 100) : 0;
       return {
@@ -2454,10 +2461,10 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  agency_starter:  { monthlyCredits: 5,   name: 'Starter',   price: 299  },  // $299/mo — 5 audits
-  agency_pro:      { monthlyCredits: 15,  name: 'Pro',       price: 549  },  // $549/mo — 15 audits
-  agency_scale:    { monthlyCredits: 40,  name: 'Scale',     price: 999  },  // $999/mo — 40 audits
-  agency_unlimited:{ monthlyCredits: 999, name: 'Unlimited', price: 1999 },  // $1,999/mo — unlimited
+  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $299/mo — 5 audits
+  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $549/mo — 15 audits
+  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $999/mo — 40 audits
+  agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,999/mo — unlimited
 };
 
 // ── Register new agency account (admin or Stripe webhook) ─────────────────────
@@ -3216,7 +3223,7 @@ app.post('/webhook', async (req, res) => {
           to: email,
           subject: `✅ Payment confirmed — start your ${planKey === 'pro-audit' ? 'Pro' : 'Deep'} Audit`,
           html: `<h2>Your audit is ready</h2>
-            <p>Thanks for your purchase! Click the button below to connect your HubSpot portal and start your ${planKey === 'pro-audit' ? 'Pro Audit ($699)' : 'Deep Audit ($399)'}.</p>
+            <p>Thanks for your purchase! Click the button below to connect your HubSpot portal and start your ${planKey === 'pro-audit' ? 'FixOps Full Audit ($699)' : 'FixOps Diagnostic ($399)'}.</p>
             <p style="text-align:center;margin:24px 0;">
               <a href="${auditStartUrl}" style="display:inline-block;padding:14px 28px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;">Start Your Audit →</a>
             </p>
@@ -4253,7 +4260,7 @@ const triggerRescan = async (customer) => {
 
         // Send reconnect email
         await resend.emails.send({
-          from: 'FixOps Pulse <reports@fixops.io>',
+          from: 'FixOps FixOps Monitor <reports@fixops.io>',
           to: customer.email,
           subject: `⚡ FixOps Pulse — Action Required: Reconnect Your HubSpot Portal`,
           html: `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
@@ -9031,6 +9038,67 @@ async function runFullAudit(token, auditId, meta) {
         })(),
         ghostSeats: inactiveUsers.length,
         ghostSeatWaste: inactiveUsers.length * 90,
+
+        // ── Lead Response Time Engine ─────────────────────────────────────────
+        // Measures: for contacts created in last 90 days, how long before first activity?
+        // Based on actual call/meeting/task records vs contact createdate
+        leadResponseTime: (() => {
+          const recentContacts = contacts.filter(c => {
+            const created = new Date(c.properties?.createdate||0).getTime();
+            return (now - created) / DAY <= 90;
+          });
+          if (recentContacts.length < 5) return null; // not enough data
+
+          // Build map: contactId → createdate
+          const contactCreateMap = {};
+          recentContacts.forEach(c => {
+            contactCreateMap[c.id] = new Date(c.properties?.createdate||0).getTime();
+          });
+
+          // Find first activity per owner (calls + meetings logged in last 90 days)
+          // We measure by owner activity volume since we can't join contact→engagement without associations
+          const totalRecentContacts = recentContacts.length;
+          const contactsWithOwner = recentContacts.filter(c => c.properties?.hubspot_owner_id).length;
+          const contactsNoOwner = totalRecentContacts - contactsWithOwner;
+          const contactsNoEmail = recentContacts.filter(c => !c.properties?.email).length;
+
+          // Activity in last 90 days
+          const recentCalls = calls.filter(c => {
+            const ts = new Date(c.properties?.hs_createdate||0).getTime();
+            return (now - ts) / DAY <= 90;
+          });
+          const recentMeetings = meetings.filter(m => {
+            const ts = new Date(m.properties?.hs_timestamp||0).getTime();
+            return (now - ts) / DAY <= 90;
+          });
+
+          // Days until first activity = proxy for response time
+          // Heuristic: contacts created recently with NO calls/meetings in same window = slow response
+          const contactsPerDay = totalRecentContacts / 90;
+          const activitiesPerDay = (recentCalls.length + recentMeetings.length) / 90;
+
+          // If activity rate < 0.5x contact rate, reps aren't keeping up
+          const responseRatio = contactsPerDay > 0 ? activitiesPerDay / contactsPerDay : 0;
+          const slowResponsePct = Math.max(0, Math.round((1 - Math.min(1, responseRatio)) * 100));
+
+          // Estimate uncontacted leads = new contacts with no activity
+          const estimatedUncontacted = Math.round(totalRecentContacts * (slowResponsePct / 100));
+          const leadLossValue = estimatedUncontacted > 0 && avgDealSize > 0
+            ? Math.round(estimatedUncontacted * (avgDealSize * 0.15) / 12) // 15% of avg deal / 12 = monthly cost
+            : 0;
+
+          return {
+            recentContacts: totalRecentContacts,
+            contactsWithOwner,
+            contactsNoOwner,
+            slowResponsePct,
+            estimatedUncontacted,
+            responseRatio: Math.round(responseRatio * 100) / 100,
+            leadLossValue,
+            recentCallCount: recentCalls.length,
+            recentMeetingCount: recentMeetings.length,
+          };
+        })(),
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
 
