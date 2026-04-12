@@ -1073,7 +1073,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
   ${plan === 'pulse' ? `
   <tr><td style="background:#120f30;padding:20px 32px;border-bottom:1px solid rgba(255,255,255,.06);">
     <div style="background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.25);border-radius:10px;padding:16px 20px;">
-      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $1299/mo</div>
+      <div style="font-size:10px;font-weight:800;color:#a78bfa;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;">Upgrade to Pro — $549/mo</div>
       <div style="font-size:13px;color:rgba(255,255,255,.7);margin-bottom:12px;">Get 15 intelligence views, score trends, ROI tracking, revenue health, contact engagement analysis, and the full snapshot dashboard for your team.</div>
       <a href="${FRONTEND_URL}/#pricing" style="display:inline-block;padding:10px 22px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:12px;">See Pro Features →</a>
     </div>
@@ -1112,7 +1112,7 @@ Rules: Be specific with numbers. Name exact HubSpot locations (e.g. "Contacts �
       <div style="font-size:9px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ Exclusive Offer — FixOps Customers</div>
       <div style="font-size:16px;font-weight:800;color:#ffffff;margin-bottom:6px;">First month of Sentinel monitoring for $199</div>
       <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:14px;">
-        Normally $1299/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
+        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, weekly digest, and Slack alerts.
         Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout. Cancel anytime.
       </div>
       <a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#ffffff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $199 First Month →</a>
@@ -2485,9 +2485,9 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $2299/mo — 5 audits
-  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $1299/mo — 15 audits
-  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $9299/mo — 40 audits
+  agency_starter:  { monthlyCredits: 5,   name: 'FixOps Monitor',    price: 299  },  // $299/mo — 5 audits
+  agency_pro:      { monthlyCredits: 15,  name: 'FixOps Sentinel',   price: 549  },  // $549/mo — 15 audits
+  agency_scale:    { monthlyCredits: 40,  name: 'FixOps Command',    price: 999  },  // $999/mo — 40 audits
   agency_unlimited:{ monthlyCredits: 999, name: 'FixOps Command Pro', price: 1999 },  // $1,9299/mo — unlimited
 };
 
@@ -4347,6 +4347,95 @@ const triggerRescan = async (customer) => {
     }
   });
 };
+
+// ── Free audit follow-up drip — runs every hour ──────────────────────────────
+// Sends a follow-up email to free/one-time audit users ~24hrs after their scan
+// to push them toward a monthly plan with the first-month discount
+cron.schedule('0 * * * *', async () => {
+  try {
+    const cutoffFrom = new Date(Date.now() - 25 * 60 * 60 * 1000); // 25hrs ago
+    const cutoffTo   = new Date(Date.now() - 23 * 60 * 60 * 1000); // 23hrs ago
+    
+    // Find free/one-time audits completed in the 23-25hr window that haven't been followed up
+    const res = await db.query(`
+      SELECT data->>'email' as email, data->>'company' as company,
+             data->'summary'->>'overallScore' as score,
+             data->'summary'->>'criticalCount' as criticals,
+             data->'summary'->>'monthlyWaste' as waste,
+             data->>'plan' as plan, id as audit_id
+      FROM audit_results
+      WHERE (data->>'status') = 'complete'
+        AND (data->>'plan') IN ('free','deep','pro-audit')
+        AND (data->>'followup_sent') IS NULL
+        AND created_at BETWEEN $1 AND $2
+        AND data->>'email' IS NOT NULL
+      LIMIT 50
+    `, [cutoffFrom, cutoffTo]).catch(() => ({ rows: [] }));
+
+    for (const row of res.rows) {
+      if (!row.email || !row.email.includes('@')) continue;
+      const score    = Number(row.score || 0);
+      const crits    = Number(row.criticals || 0);
+      const waste    = Number(row.waste || 0);
+      const company  = row.company || 'your portal';
+      const isOnetime = ['deep','pro-audit'].includes(row.plan);
+      const scoreColor = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#f43f5e';
+
+      const html = `<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#f0f0f5;margin:0;padding:20px;">
+<div style="max-width:520px;margin:0 auto;background:#0d0d12;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.08);">
+  <div style="background:#08061a;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
+    <div style="font-size:20px;font-weight:800;color:#fff;">⚡ FixOps</div>
+  </div>
+  <div style="padding:28px 32px;">
+    <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:8px;">
+      Your HubSpot scored ${score}/100. Here's what happens next.
+    </div>
+    <div style="font-size:13px;color:rgba(255,255,255,.6);line-height:1.7;margin-bottom:20px;">
+      Yesterday we scanned <strong style="color:#fff;">${company}</strong> and found 
+      <strong style="color:#f43f5e;">${crits} critical issues</strong> 
+      costing an estimated <strong style="color:#f43f5e;">$\${waste.toLocaleString()}/mo</strong>.
+      ${isOnetime 
+        ? "You have your full audit report. The question is: what happens in 30 days when new issues appear? One-time audits only show you today's snapshot."
+        : "Your free scan was capped at 1,000 contacts. Most portals have their worst issues sitting in the records we couldn't reach."}
+    </div>
+
+    <div style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);border-radius:10px;padding:18px 20px;margin-bottom:20px;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;margin-bottom:8px;">⚡ Limited Offer — Expires in 48 Hours</div>
+      <div style="font-size:15px;font-weight:800;color:#fff;margin-bottom:6px;">Try Sentinel for $199 your first month</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.55);line-height:1.6;margin-bottom:14px;">
+        Normally $549/mo. Daily scans, all 38 intelligence views, AI report builder, audit history.
+        Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies at checkout.
+      </div>
+      <a href="${SENTINEL_DISC}" style="display:inline-block;padding:10px 22px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Claim $199 First Month →</a>
+    </div>
+
+    <div style="font-size:12px;color:rgba(255,255,255,.35);line-height:1.7;">
+      Or try <a href="${MONITOR_DISC}" style="color:#a78bfa;">Monitor for $99 your first month</a> — weekly scans, dollar impact on every issue, fix guides. Then $299/mo. Cancel anytime.
+    </div>
+  </div>
+  <div style="padding:16px 32px;border-top:1px solid rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.2);">
+    FixOps.io · <a href="mailto:matthew@fixops.io" style="color:rgba(255,255,255,.2);">matthew@fixops.io</a>
+  </div>
+</div></body></html>`;
+
+      await resend.emails.send({
+        from: 'Matt at FixOps <matthew@fixops.io>',
+        to: row.email,
+        subject: `Your HubSpot scored ${score}/100 — what happens to those ${crits} issues now?`,
+        html
+      }).catch(() => {});
+
+      // Mark as followed up
+      await db.query(
+        `UPDATE audit_results SET data = jsonb_set(data, '{followup_sent}', '"true"') WHERE id = $1`,
+        [row.audit_id]
+      ).catch(() => {});
+    }
+    if (res.rows.length > 0) console.log(`[Drip] Sent \${res.rows.length} follow-up emails`);
+  } catch(e) {
+    console.error('[Drip] Follow-up cron error:', e.message?.substring(0, 80));
+  }
+});
 
 // ── Weekly Pulse cron — runs every Monday 9am ET ──────────────────────────────
 
