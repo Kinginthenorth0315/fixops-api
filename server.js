@@ -5286,9 +5286,10 @@ async function runFullAudit(token, auditId, meta) {
   // Workflows, forms, tasks, meetings, calls, lists, users — not available via MCP beta
   // These will return data when using a Private App token or after Public App approval
   await up(50, 'Checking engagement data…');
-  const tasksR    = await paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', smallLimit);
-  const meetingsR = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', smallLimit);
-  const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', smallLimit);
+  const activitySampleLimit = isFree ? 100 : 10000;
+  const tasksR    = await paginate('/crm/v3/objects/tasks?properties=hs_task_subject,hs_task_status,hs_timestamp,hubspot_owner_id', activitySampleLimit);
+  const meetingsR = await paginate('/crm/v3/objects/meetings?properties=hs_meeting_title,hs_meeting_outcome,hs_timestamp,hubspot_owner_id', activitySampleLimit);
+  const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', activitySampleLimit);
 
   // Workflows and forms — attempt with Public App scope, fall back gracefully
   const workflowsR = await safe(
@@ -5677,13 +5678,13 @@ async function runFullAudit(token, auditId, meta) {
   const noEmail = contacts.filter(c=>!c.properties?.email);
   if(noEmail.length>0){
     dataScore-=Math.min(22,(noEmail.length/Math.max(contacts.length,1))*70);
-    issues.push({severity:noEmail.length>contacts.length*0.1?'critical':'warning',title:`${noEmail.length} contacts (${Math.round(noEmail.length/Math.max(contacts.length,1)*100)}%) missing email — unreachable by any automation`,description:`No email = no workflows, no sequences, no marketing. These contacts entered your portal from calls, imports, or integrations without email capture. You\'re paying for them in your contact tier while getting zero value.`,detail:`Email is the foundation of everything HubSpot does. Without it a contact can receive no automated communication, never trigger a workflow, and can\'t be targeted by any campaign.`,impact:`${noEmail.length} contacts permanently excluded from all email automation`,dimension:'Data Integrity',guide:['Export contacts filtered by "Email is unknown" and identify the source (import, integration, manual entry)','Enrich missing emails using Apollo.io free tier, Clearbit, or LinkedIn Sales Navigator','Add email as required on all future forms and integration field mappings','Create a workflow: Contact created AND email unknown → task for rep to get email within 7 days']});
+    issues.push({severity:noEmail.length>contacts.length*0.1?'critical':'warning',title:`${noEmail.length} contacts (${Math.round(noEmail.length/Math.max(contacts.length,1)*100)}%) missing email — unreachable by any automation`,description:`No email = no workflows, no sequences, no marketing. These contacts entered your portal from calls, imports, or integrations without email capture. You\'re paying for them in your contact tier while getting zero value.`,detail:`Email is the foundation of everything HubSpot does. Without it a contact can receive no automated communication, never trigger a workflow, and can\'t be targeted by any campaign.`,impact:`Contacts permanently excluded from email automation · list unreachable`,dimension:'Data Integrity',guide:['Export contacts filtered by "Email is unknown" and identify the source (import, integration, manual entry)','Enrich missing emails using Apollo.io free tier, Clearbit, or LinkedIn Sales Navigator','Add email as required on all future forms and integration field mappings','Create a workflow: Contact created AND email unknown → task for rep to get email within 7 days']});
   }
 
   const noOwner = contacts.filter(c=>!c.properties?.hubspot_owner_id);
   if(noOwner.length>contacts.length*0.08){
     dataScore-=12;
-    issues.push({severity:'warning',title:`${noOwner.length} contacts have no assigned owner — fell through the cracks`,description:`Unowned contacts are invisible to your sales team. No rep is responsible, they don\'t show in any rep queue, and round-robin workflows won\'t catch them. These are leads that were lost the moment they entered HubSpot.`,detail:`The most common cause: integrations that create contacts without mapping an owner. Zapier, CSV imports, and API integrations all do this unless explicitly configured otherwise.`,impact:`${noOwner.length} leads with zero sales accountability`,dimension:'Data Integrity',guide:['Filter "Contact owner is unknown" → bulk assign to default rep as immediate fix','Build a workflow: Contact created AND owner is unknown → rotate-assign across active reps','Audit your integrations — Zapier and CSV imports are the most common source','FixOps can auto-assign all unowned contacts with round-robin logic in one click']});
+    issues.push({severity:'warning',title:`${noOwner.length} contacts have no assigned owner — fell through the cracks`,description:`Unowned contacts are invisible to your sales team. No rep is responsible, they don\'t show in any rep queue, and round-robin workflows won\'t catch them. These are leads that were lost the moment they entered HubSpot.`,detail:`The most common cause: integrations that create contacts without mapping an owner. Zapier, CSV imports, and API integrations all do this unless explicitly configured otherwise.`,impact:`Leads with zero sales accountability · no rep assigned · no follow-up`,dimension:'Data Integrity',guide:['Filter "Contact owner is unknown" → bulk assign to default rep as immediate fix','Build a workflow: Contact created AND owner is unknown → rotate-assign across active reps','Audit your integrations — Zapier and CSV imports are the most common source','FixOps can auto-assign all unowned contacts with round-robin logic in one click']});
   }
 
   const noLifecycle = contacts.filter(c=>!c.properties?.lifecyclestage);
@@ -5699,7 +5700,7 @@ async function runFullAudit(token, auditId, meta) {
   });
   if(neverContacted.length>contacts.length*0.2){
     dataScore-=7;
-    issues.push({severity:'info',title:`${neverContacted.length} contacts have never been contacted by anyone`,description:`These contacts entered your portal and have never received an email, call, or any engagement. They\'re aging in your database with zero pipeline value, and you\'re paying for them in your contact tier every month.`,detail:`Uncontacted contacts degrade your overall email deliverability by reducing your engagement rate. HubSpot\'s send reputation is calculated across your entire database — dead weight hurts active campaigns.`,impact:`${neverContacted.length} contacts generating billing cost with zero pipeline contribution`,dimension:'Data Integrity',guide:['Review the source of these contacts — old list imports, trade shows, or discontinued campaigns?','Run a one-time re-engagement campaign before writing them off completely','Contacts with no engagement after 6 months should be evaluated for archival to protect deliverability','Set a quarterly data hygiene calendar reminder to review cold contacts before they become a billing problem']});
+    issues.push({severity:'info',title:`${neverContacted.length} contacts have never been contacted by anyone`,description:`These contacts entered your portal and have never received an email, call, or any engagement. They\'re aging in your database with zero pipeline value, and you\'re paying for them in your contact tier every month.`,detail:`Uncontacted contacts degrade your overall email deliverability by reducing your engagement rate. HubSpot\'s send reputation is calculated across your entire database — dead weight hurts active campaigns.`,impact:`Contacts generating billing cost with zero pipeline contribution`,dimension:'Data Integrity',guide:['Review the source of these contacts — old list imports, trade shows, or discontinued campaigns?','Run a one-time re-engagement campaign before writing them off completely','Contacts with no engagement after 6 months should be evaluated for archival to protect deliverability','Set a quarterly data hygiene calendar reminder to review cold contacts before they become a billing problem']});
   }
 
   // ── CONTACT PROPERTY COMPLETENESS ──────────────────────────
@@ -5775,7 +5776,7 @@ async function runFullAudit(token, auditId, meta) {
       severity: 'warning',
       title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — email personalization broken`,
       description: `Contacts without a first name can't be addressed personally in emails. Research by Outreach shows personalizing subject lines with a contact's name leads to a 22% increase in open rate. Without first name, every email starts with "Hi ," or a generic fallback — immediately signaling mass automation.`,
-      impact: `${noFirstName.length} contacts receiving impersonal emails · 22% lower open rate potential`,
+      impact: `Contacts receiving impersonal outreach · open rates reduced by 15-22% vs personalized emails`,
       dimension: 'Data Integrity',
       guide: [
         'Make first name required on all HubSpot forms — this is the single most impactful form change you can make',
@@ -5814,7 +5815,7 @@ async function runFullAudit(token, auditId, meta) {
       severity: 'info',
       title: `${companiesNoDomain.length} companies missing domain name — HubSpot auto-enrichment disabled`,
       description: `Companies without a domain name can't be enriched by HubSpot Insights (free company data including industry, size, and revenue). The domain is also how HubSpot auto-deduplicates companies and auto-associates contacts — without it, you get duplicate companies and broken contact associations.`,
-      impact: `${companiesNoDomain.length} companies missing auto-enrichment · deduplication bypassed · contact association broken`,
+      impact: `Companies missing auto-enrichment · deduplication by domain broken · ABM targeting unreliable`,
       dimension: 'Data Integrity',
       guide: [
         'Companies → filter by "Company domain name is unknown" → research and add domains',
@@ -5832,7 +5833,7 @@ async function runFullAudit(token, auditId, meta) {
   const deadWf   = workflows.filter(w=>(w.enabled||w.isEnabled)&&(w.enrolledObjectsCount||w.contactsEnrolled||0)===0);
   if(deadWf.length>0){
     autoScore-=Math.min(25,deadWf.length*3);
-    issues.push({severity:deadWf.length>5?'warning':'info',title:`${deadWf.length} active workflows with zero enrollments — consuming quota for nothing`,description:`These workflows are switched on but have never enrolled anyone. They were likely built for campaigns that ended or criteria no contacts will ever meet. They clutter your automation dashboard and create false confidence that your portal is actively running automations.`,detail:`Dead workflows consume your plan\'s workflow quota, inflate the number of "active" automations in reports, and make it nearly impossible to identify what\'s actually running vs what\'s abandoned.`,impact:`${deadWf.length} dead automations of ${workflows.length} total (${Math.round(deadWf.length/Math.max(workflows.length,1)*100)}% waste rate)`,dimension:'Automation',guide:['Workflows → sort by "Enrolled" ascending — zero-enrollment workflows rise to the top','Review each: is the trigger criteria achievable? If not, archive it with a backup','Create a "Review" folder and move dead candidates there for 30 days before archiving','FixOps auto-archives dead workflows with complete JSON backup — restore any within 30 days']});
+    issues.push({severity:deadWf.length>5?'warning':'info',title:`${deadWf.length} active workflows with zero enrollments — consuming quota for nothing`,description:`These workflows are switched on but have never enrolled anyone. They were likely built for campaigns that ended or criteria no contacts will ever meet. They clutter your automation dashboard and create false confidence that your portal is actively running automations.`,detail:`Dead workflows consume your plan\'s workflow quota, inflate the number of "active" automations in reports, and make it nearly impossible to identify what\'s actually running vs what\'s abandoned.`,impact: `Dead automations consuming workflow limit · portal complexity inflated · team confused by inactive workflows`,dimension:'Automation',guide:['Workflows → sort by "Enrolled" ascending — zero-enrollment workflows rise to the top','Review each: is the trigger criteria achievable? If not, archive it with a backup','Create a "Review" folder and move dead candidates there for 30 days before archiving','FixOps auto-archives dead workflows with complete JSON backup — restore any within 30 days']});
   }
 
   const noGoalWf = workflows.filter(w=>(w.enabled||w.isEnabled)&&!w.goalCriteria&&!w.goals);
@@ -5875,7 +5876,7 @@ async function runFullAudit(token, auditId, meta) {
   });
   if(overdueTasks.length>5){
     pipelineScore-=Math.min(10,overdueTasks.length);
-    issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact:`${overdueTasks.length} missed rep commitments · pipeline going cold without manager visibility`,dimension:'Pipeline',guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
+    issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact: `Missed rep commitments · pipeline going cold · no management visibility on follow-up gaps`,dimension:'Pipeline',guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
   }
 
   // ── DEAL STAGE FUNNEL ANALYSIS ─────────────────────────────
@@ -5966,7 +5967,7 @@ async function runFullAudit(token, auditId, meta) {
       severity: 'warning',
       title: `${dealsNoContact.length} open deals have no associated contacts — these deals can't close`,
       description: `Deals without contacts have no human on the other side. They can't receive a proposal, can't be called, and won't appear in any rep's contact list. Research shows deals associated with 3+ contacts have 2× the close rate of single-contact deals. Zero-contact deals essentially don't exist.`,
-      impact: `${dealsNoContact.length} deals with no stakeholder mapped · pipeline accuracy undermined`,
+      impact: `Deals with no stakeholder mapped · pipeline accuracy understated · close rate impacted`,
       dimension: 'Pipeline',
       guide: [
         'Deals → filter "Associated contacts = 0" → assign each to the right contact',
@@ -6023,13 +6024,13 @@ async function runFullAudit(token, auditId, meta) {
   const deadForms = forms.filter(f=>(f.submissionCounts?.total||f.totalSubmissions||0)===0);
   if(deadForms.length>0){
     marketingScore-=Math.min(14,deadForms.length*2);
-    issues.push({severity:'warning',title:`${deadForms.length} forms have zero submissions — silent lead capture failures`,description:`These forms are live in HubSpot and may be embedded on live pages — but have never received a single submission. You don\'t know how many leads you\'ve missed until you actually test them.`,detail:`The most dangerous version of this problem: a form on a high-traffic landing page that\'s broken. You\'re spending money on ads driving traffic to a page that\'s silently failing to capture any leads.`,impact:`${deadForms.length} potential lead capture failures — unknown number of lost leads`,dimension:'Marketing',guide:['Test each form right now — submit it yourself, confirm the thank-you page fires and you receive the notification email','Check if the form is actually embedded on a live page with real traffic','Marketing → Lead Capture → Forms → check views vs submissions — views with zero submissions = broken form','Archive forms from discontinued campaigns to reduce confusion']});
+    issues.push({severity:'warning',title:`${deadForms.length} forms have zero submissions — silent lead capture failures`,description:`These forms are live in HubSpot and may be embedded on live pages — but have never received a single submission. You don\'t know how many leads you\'ve missed until you actually test them.`,detail:`The most dangerous version of this problem: a form on a high-traffic landing page that\'s broken. You\'re spending money on ads driving traffic to a page that\'s silently failing to capture any leads.`,impact: `Broken forms causing unknown lead loss · ad spend driving traffic to non-converting pages`,dimension:'Marketing',guide:['Test each form right now — submit it yourself, confirm the thank-you page fires and you receive the notification email','Check if the form is actually embedded on a live page with real traffic','Marketing → Lead Capture → Forms → check views vs submissions — views with zero submissions = broken form','Archive forms from discontinued campaigns to reduce confusion']});
   }
 
   const deadLists = lists.filter(l=>(l.metaData?.size||0)===0);
   if(deadLists.length>5){
     marketingScore-=8;
-    issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact:`${deadLists.length} empty lists adding portal complexity and suppression risk`,dimension:'Marketing',guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
+    issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact: `Empty lists adding portal complexity · suppression risk · automation confusion`,dimension:'Marketing',guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
   }
 
   await up(83, 'Checking configuration and security…');
@@ -6038,7 +6039,7 @@ async function runFullAudit(token, auditId, meta) {
   const superAdmins = users.filter(u=>u.superAdmin);
   if(superAdmins.length>3&&users.length>0){
     configScore-=12;
-    issues.push({severity:superAdmins.length>6?'critical':'warning',title:`${superAdmins.length} super admins — excess full-access accounts are a security risk`,description:`Super admins can delete any record, change billing, modify any setting, and install any integration with zero approval. Best practice is 2 maximum. Every extra super admin is an unmonitored security surface — and a former employee\'s compromised account gives full access to your entire CRM.`,detail:`The most common data breach vector in HubSpot portals: a super admin who left the company 6+ months ago, whose account was never deactivated, gets compromised. Immediate risk: full database access and deletion rights.`,impact:`${superAdmins.length} accounts with unrestricted portal access and deletion rights`,dimension:'Configuration',guide:['Settings → Users → filter Super Admin — does each person still need full unrestricted access?','Reduce to 2 super admins: primary admin and one backup only','Deactivate any super admin account belonging to someone who has left the company immediately','Replace super admin access with granular role-based permissions for all other users']});
+    issues.push({severity:superAdmins.length>6?'critical':'warning',title:`${superAdmins.length} super admins — excess full-access accounts are a security risk`,description:`Super admins can delete any record, change billing, modify any setting, and install any integration with zero approval. Best practice is 2 maximum. Every extra super admin is an unmonitored security surface — and a former employee\'s compromised account gives full access to your entire CRM.`,detail:`The most common data breach vector in HubSpot portals: a super admin who left the company 6+ months ago, whose account was never deactivated, gets compromised. Immediate risk: full database access and deletion rights.`,impact: `Accounts with unrestricted portal access · deletion rights · data export risk · compliance exposure`,dimension:'Configuration',guide:['Settings → Users → filter Super Admin — does each person still need full unrestricted access?','Reduce to 2 super admins: primary admin and one backup only','Deactivate any super admin account belonging to someone who has left the company immediately','Replace super admin access with granular role-based permissions for all other users']});
   }
 
   // settings/v3/users returns: { id, email, firstName, lastName, superAdmin,
@@ -6310,7 +6311,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${totalJunk} contacts have junk data in key fields (".", "N/A", "test", invalid phones)`,
       description: `Your team is entering placeholder values to bypass required fields — a classic sign of form friction or rep shortcuts. Junk data is worse than blank data: it looks complete in reports but breaks segmentation, workflows, and enrichment tools that rely on these fields being real.`,
       detail: `When phone numbers contain "." or "0000000", call tools break. When company contains "N/A", company-based workflows and ABM lists fail silently. Junk data is invisible in normal HubSpot views but destroys data quality at scale.`,
-      impact: `${totalJunk} records with fake data breaking segmentation, workflows, and enrichment`,
+      impact: `Junk records breaking segmentation, workflows, and enrichment · reports inaccurate`,
       dimension: 'Data Integrity',
       guide: [
         'Export contacts filtered by phone = "." or company = "n/a" and correct or blank the field',
@@ -6338,7 +6339,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${newDealsNoActivity.length} deals created but never touched by a rep — leads going cold`,
       description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
       detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep does not know the deal exists.`,
-      impact: `${newDealsNoActivity.length} leads assigned but never followed up — qualification rate dropping rapidly`,
+      impact: `New deals assigned but never followed up · qualification window closing · revenue at risk`,
       dimension: 'Pipeline',
       guide: [
         'Create a workflow: Deal is created → immediately create a "New deal — first contact required" task for the owner with a 2-hour due date',
@@ -6364,7 +6365,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${highBounceRisk} contacts have hard email bounces — your sender reputation is at risk`,
       description: `Hard bounced emails mean these addresses definitively do not exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
       detail: `Email deliverability is invisible until it breaks catastrophically. Industry best practice: hard bounce rate above 2% triggers spam filter escalation. Above 5% can result in your sending domain being blacklisted.`,
-      impact: `${highBounceRisk} hard bounces · sender reputation damage · emails landing in spam for entire list`,
+      impact: `Hard bounces damaging sender reputation · emails landing in spam for all future sends`,
       dimension: 'Marketing',
       guide: [
         'Immediately: HubSpot auto-suppresses hard bounces from future sends — verify this is working in Marketing → Email → Bounced',
@@ -6395,7 +6396,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${expiredQuotes.length} quotes have expired without a response — dead revenue opportunities`,
       description: `These quotes were sent to prospects but expired before they responded. No follow-up task was created, no rep was alerted. Each expired quote is a deal that likely went cold because nobody followed up when the deadline passed.`,
       detail: `Expired quotes with no follow-up are one of the clearest signs of pipeline neglect. A quote expiring should trigger an immediate rep task — this is a 5-minute workflow fix.`,
-      impact: `${expiredQuotes.length} expired quotes · unknown pipeline value lost to inaction`,
+      impact: `Expired quotes with unknown pipeline value · proposals sent with no follow-up`,
       dimension: 'Pipeline',
       guide: [
         'Create a workflow: Quote expiration date is reached AND status is not Approved → create urgent task for deal owner',
@@ -6519,7 +6520,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `Average open deal is ${avgDealAge} days old — pipeline velocity ${avgDealAge > 90 ? 'critically' : 'dangerously'} slow`,
         description: `Your ${openDeals.length} open deals average ${avgDealAge} days old. Industry benchmark is 30–45 days. ${oldDeals.length} deals are over 90 days old. Deals inactive for 21+ days close at 11% vs 67% for deals touched weekly — every extra day costs you real revenue.`,
         detail: `Pipeline velocity is the most predictive revenue health metric most HubSpot users never track. Slow velocity means deals are stuck at a specific stage, close dates are being pushed without action, or reps are hoarding pipeline. Each has a different fix — but none are fixable if you can't see the data.`,
-        impact: `${oldDeals.length} deals over 90 days old · close rate declining on each stalled deal · forecast accuracy degrading`,
+        impact: `Deals over 90 days old · close rate dropping · pipeline accuracy declining`,
         dimension: 'Pipeline',
         guide: [
           'Build a pipeline age report: filter open deals by Create Date → group by stage → oldest average age = your bottleneck stage',
@@ -6545,7 +6546,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${untouchedPct}% of contacts added in the last 90 days have never been contacted`,
         description: `${neverTouched.length} of your ${recentContacts.length.toLocaleString()} recent contacts have received zero outreach. Harvard Business Review research shows companies responding within 1 hour are 7x more likely to qualify a lead. After 24 hours, qualification rates drop 60x. These contacts entered your CRM warm — they are leaving it cold.`,
         detail: `Lead decay is exponential, not linear. The window for a warm response is measured in minutes for inbound leads. Every hour of delay compounds the drop in qualification rate. This is the highest-ROI workflow any sales team can build — a 5-minute automation that prevents a permanent revenue leak.`,
-        impact: `${neverTouched.length} recent leads never contacted · estimated ${Math.round(neverTouched.length * 0.12)} qualified opportunities permanently lost`,
+        impact: `Contacts generated no engagement — billing cost with zero pipeline contribution`,
         dimension: 'Data Integrity',
         guide: [
           'Build a lead response SLA: Contact created from form → assign to rep + create First Contact task immediately',
@@ -6646,7 +6647,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${companiesNoContacts.length} companies have no associated contacts — orphaned records`,
         description: `${Math.round(companiesNoContacts.length/companies.length*100)}% of your company records have no contacts linked. Orphaned companies bloat your database, create confusion during manual data entry, and reduce report accuracy. If no one at the company is in HubSpot, the company record has no business value.`,
-        impact: `${companiesNoContacts.length} orphaned company records · CRM clutter · duplicate risk`,
+        impact: `Orphaned company records · CRM clutter · duplicate association risk`,
         dimension: 'Data Integrity',
         guide: [
           'Companies → filter "Number of associated contacts = 0" → review and either add contacts or delete the company',
@@ -6664,7 +6665,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${companiesNoDomain.length} companies have no domain name — HubSpot cannot auto-deduplicate them`,
         description: `HubSpot uses domain name to automatically deduplicate companies and auto-associate contacts. Without a domain, HubSpot cannot match a contact's email to their company, cannot pull company data from HubSpot Insights, and will create duplicate company records over time.`,
-        impact: `${companiesNoDomain.length} companies unprotected from duplicates · auto-association disabled`,
+        impact: `Companies missing auto-enrichment · deduplication by domain broken · ABM targeting unreliable`,
         dimension: 'Data Integrity',
         guide: [
           'Export companies with no domain → manually research and add domain names',
@@ -6684,7 +6685,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — personalization impossible`,
         description: `Contacts without a first name cannot receive personalized emails, and email personalization tokens will fail or fall back to generic defaults. Research shows personalized subject lines increase open rates by 22%. Every nameless contact in your database is a missed personalization opportunity.`,
-        impact: `${noFirstName.length} contacts receiving impersonal outreach · email open rates suppressed`,
+        impact: `Contacts receiving impersonal outreach · open rates reduced by 15-22% vs personalized emails`,
         dimension: 'Data Integrity',
         guide: [
           'Add first name as required on all forms — this should be the most basic field you collect',
@@ -6820,7 +6821,7 @@ async function runFullAudit(token, auditId, meta) {
       title: 'Legacy HubSpot Score stopped updating Aug 31, 2025 — migrate to new Lead Scoring tool now',
       description: `Your portal has the old HubSpot Score property, which stopped updating on August 31, 2025. Contacts are no longer being scored, workflows that relied on score changes have gone silent, and your lead prioritization is frozen at pre-cutoff values.`,
       detail: 'HubSpot replaced score properties with the new Lead Scoring tool. The new tool supports separate Fit scores (who they are), Engagement scores (what they do), and Combined scores — all updating in real time.',
-      impact: `${fmt(contacts.length)} contacts no longer being scored · score-based workflows silent · lead prioritization broken`,
+      impact: `Contact data quality affecting segmentation, workflows, and email personalization`,
       dimension: 'Marketing',
       leadScoringEngine,
       guide: [
@@ -6839,7 +6840,7 @@ async function runFullAudit(token, auditId, meta) {
       title: 'Lead Scoring not configured — no way to prioritize which contacts to work',
       description: `You have ${fmt(contacts.length)} contacts but no lead score. HubSpot's Lead Scoring tool (Marketing Hub or Sales Hub Pro+) lets you build Engagement scores (what contacts do) and Fit scores (who they are) — separately or combined. Without it, every contact looks the same to your reps.`,
       detail: 'The new HubSpot Lead Scoring tool (2024–2025) replaced the old HubSpot Score property. It scores contacts, companies, and deals with separate Fit + Engagement dimensions, time-based criteria, and optional AI-assisted scoring.',
-      impact: `${fmt(contacts.length)} contacts unscored · reps cannot prioritize · no MQL automation · sequence targeting is generic`,
+      impact: `Contact data quality affecting segmentation, workflows, and email personalization`,
       dimension: 'Marketing',
       leadScoringEngine,
       fixItService: 'Lead Scoring Setup',
@@ -6858,7 +6859,7 @@ async function runFullAudit(token, auditId, meta) {
       severity: 'warning',
       title: `Lead Scoring configured but only ${leadScoringEngine.pctScored}% of contacts have a score — criteria too narrow`,
       description: `The Lead Scoring tool is active with ${leadScoringEngine.scoreProperties.length} score propert${leadScoringEngine.scoreProperties.length!==1?'ies':'y'}, but only ${fmt(leadScoringEngine.scoredCount)} of ${fmt(contacts.length)} contacts have a score. Criteria are likely too specific or contacts aren't engaging with the tracked activities.`,
-      impact: `${fmt(contacts.length - leadScoringEngine.scoredCount)} contacts invisible to scoring · prioritization broken`,
+      impact: `Contacts invisible to scoring — lead prioritization and MQL automation affected`,
       dimension: 'Marketing',
       leadScoringEngine,
       guide: [
@@ -6947,7 +6948,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${integrationErrors.length} integration ${integrationErrors.length===1?'issue':'issues'} detected — data may not be syncing correctly`,
       description: `Integration failures cause silent data gaps: contacts created in Salesforce don't appear in HubSpot, deals don't update, email activity stops logging. Your team makes decisions on incomplete data without knowing it. ${criticalErrors.length > 0 ? `${criticalErrors.length} critical issue${criticalErrors.length!==1?'s':''} need immediate attention.` : ''}`,
       detail: 'Integration sync errors compound over time — a break that started last week means weeks of missing data. Contacts created, deals updated, and emails sent during the outage are not reflected in HubSpot reporting.',
-      impact: `${integrationErrors.length} integration ${integrationErrors.length===1?'issue':'issues'} · data gaps growing daily · reporting accuracy compromised`,
+      impact: `Integration errors blocking sync · records missing or duplicated · data trust broken`,
       dimension: 'Automation',
       integrationErrors,
       fixItService: 'Integration Repair',
@@ -7073,7 +7074,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${oldTickets.length.toLocaleString()} open tickets older than 3 days — SLA at risk`,
         description: `${Math.round(oldTickets.length/Math.max(openTix.length,1)*100)}% of your ${openTix.length.toLocaleString()} open tickets exceed 3 days with no resolution. HubSpot State of Service data shows 67% of customers expect resolution within 3 hours. Every day past that threshold increases churn probability significantly.`,
         detail: `Benchmark: healthy Service Hub portals resolve 80%+ of tickets within 3 business days. Your current resolution lag suggests either staffing gaps, missing SLA rules, or unassigned ticket routing issues.`,
-        impact: `${oldTickets.length.toLocaleString()} customers waiting past SLA · renewal conversations starting from deficit`,
+        impact: `Customers waiting past SLA · renewal conversations starting from a deficit`,
         dimension: 'Service',
         guide: [
           'Set up SLA rules: Service Hub → Settings → SLA → configure response and resolution targets by priority',
@@ -7093,7 +7094,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${over7Tix.length.toLocaleString()} tickets open 7+ days — serious churn risk`,
         description: `${over7Tix.length.toLocaleString()} open tickets (${over7Pct}% of your open queue) have been waiting over 7 days. At this stage, customers have likely contacted you multiple times, may have escalated externally, or have already decided not to renew.`,
         detail: `Research shows that ticket resolution after 7 days correlates directly with churn — customers who wait longer than a week are 4× more likely to not renew their contract.`,
-        impact: `${over7Tix.length.toLocaleString()} tickets in severe breach · estimated churn acceleration`,
+        impact: `Tickets in severe SLA breach · churn probability elevated on each open account`,
         dimension: 'Service',
         guide: [
           'Pull all 7-day+ tickets immediately — assign directly to senior support or escalation tier',
@@ -7113,7 +7114,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${unassigned.length} unassigned open tickets — nobody is responsible`,
         description: `${unassigned.length} open ticket${unassigned.length!==1?'s':''} have no assigned owner. Unassigned tickets don't appear in anyone's queue, never get followed up on, and are invisible to rep dashboards. These customers are effectively being ignored.`,
         detail: `Unassigned tickets are one of the most reliable predictors of churn — if no one owns the problem, no one solves it. Even 1 unassigned critical ticket can result in a lost account.`,
-        impact: `${unassigned.length} customer${unassigned.length!==1?'s':''} with no assigned rep · invisible to all rep dashboards`,
+        impact: `Customers with no assigned rep · invisible to all rep dashboards · no follow-up`,
         dimension: 'Service',
         guide: [
           'Bulk-assign unassigned tickets: Service Hub → Tickets → filter by No Owner → assign to queue or rep',
@@ -7134,7 +7135,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `${highPriOld.length} HIGH PRIORITY ticket${highPriOld.length!==1?'s':''} open more than 24 hours`,
           description: `${highPriOld.length} high-priority ticket${highPriOld.length!==1?'s are':' is'} more than 24 hours old with no resolution. High priority tickets should be resolved same-day — these represent your most at-risk customers.`,
           detail: `High priority tickets that age past 24 hours signal broken escalation paths. The issue was flagged as urgent but nothing happened urgently. That disconnect destroys customer trust.`,
-          impact: `${highPriOld.length} critical account${highPriOld.length!==1?'s':''} aging past SLA · highest churn probability`,
+          impact: `Critical accounts aging past SLA · highest churn probability in your queue`,
           dimension: 'Service',
           guide: [
             'Immediate action: pull these tickets now and have a manager contact each customer personally',
@@ -7585,7 +7586,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${staleDrafts.length} marketing email drafts untouched for 90+ days — portal clutter`,
         description: 'Stale drafts represent abandoned campaigns. They clutter the email tool, confuse new team members, and make it harder to find active work.',
-        impact: `${staleDrafts.length} abandoned email drafts · portal complexity inflated`,
+        impact: `Abandoned draft emails cluttering portal · deliverability risk if accidentally sent`,
         dimension: 'Marketing',
         guide: ['Marketing Emails → filter by Draft → sort by Last Updated ascending', 'Delete or archive any draft not touched in 90+ days', 'Document active drafts with a naming convention: [Campaign Name] [Date] [Owner]']
       });
@@ -7772,7 +7773,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: unpublishedKB.length > 15 ? 'critical' : 'warning',
         title: `${unpublishedKB.length} knowledge base articles unpublished — support deflection blocked`,
         description: `You have ${totalKB} KB articles total but ${unpublishedKB.length} remain in draft. Each unpublished article is a customer question that cannot be self-served — forcing a support ticket instead. HubSpot data shows portals with complete KBs deflect 30-40% of tier-1 tickets.`,
-        impact: `${unpublishedKB.length} unpublished articles · ${Math.round(unpublishedKB.length * 3)} estimated unnecessary tickets/mo`,
+        impact: `Unpublished KB articles not visible to customers · support ticket volume stays elevated`,
         guide: [
           'Go to Content → Knowledge Base → filter by Status: Draft',
           'Prioritize articles matching your most common support ticket categories',
@@ -7790,7 +7791,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${zeroViewKB.length} knowledge base articles have zero views — content effort wasted`,
         description: `${zeroViewPct}% of your KB articles have never been viewed. These articles represent content creation time with zero support deflection value. Either they're not discoverable, cover topics customers do not search for, or are not linked from support workflows.`,
-        impact: `${zeroViewKB.length} zero-view articles · content ROI at risk`,
+        impact: `Zero-view KB articles · content ROI at risk · maintenance burden with no customer benefit`,
         guide: [
           'Add KB article links to your automated ticket acknowledgment emails',
           'Review zero-view article titles — are they written in the language customers actually use?',
@@ -7816,7 +7817,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: noLinkPct > 60 ? 'critical' : 'warning',
         title: `${ownersWithoutLinks.length} of ${ownerIds.length} reps have no meeting booking link — forcing manual scheduling`,
         description: `${noLinkPct}% of your sales team has no HubSpot meeting booking link. Every meeting they book requires back-and-forth emails instead of a single click. Studies show booking links reduce time-to-meeting by 60% and increase meeting volume by 25%.${noLinkNames.length > 0 ? ` Missing: ${noLinkNames.join(', ')}.` : ''}`,
-        impact: `${ownersWithoutLinks.length} reps manually scheduling · estimated 2-3hrs/rep/week wasted`,
+        impact: `Reps manually scheduling · 2-3hrs lost per rep per week · prospect friction increasing drop-off`,
         guide: [
           'Go to Sales → Meetings → Create meeting link for each rep without one',
           'Embed the booking link in email signatures, outreach sequences, and LinkedIn profiles',
@@ -7898,7 +7899,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: lowFillProps.length > 25 ? 'warning' : 'info',
         title: `${lowFillProps.length} custom contact properties have <5% fill rate — CRM bloat`,
         description: `These ${lowFillProps.length} properties exist in your contact schema but are virtually empty across your ${contacts.length.toLocaleString()} contacts. They clutter your views, slow your forms, confuse your team, and make HubSpot reporting harder. Properties like these accumulate from integrations, old campaigns, and ad-hoc field creation.`,
-        impact: `${lowFillProps.length} bloat properties · views cluttered · reporting accuracy reduced`,
+        impact: `Bloat properties cluttering views · reporting accuracy reduced`,
         guide: [
           'Go to Settings → Properties → Contacts → sort by "# of contacts with data" ascending',
           'Archive any property with <5% fill that has no active workflow, form, or report dependency',
@@ -7915,7 +7916,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'info',
         title: `${undocumentedCount} custom properties have no description — onboarding and documentation gap`,
         description: `${undocumentedCount} of your custom contact properties have no description. When a new team member sees "hs_custom_field_47" in a view, they have no idea what it means or when to use it. This is a hidden knowledge management problem that compounds over time.`,
-        impact: `${undocumentedCount} undocumented properties · onboarding friction · data entry errors`,
+        impact: `Undocumented properties · onboarding friction · duplicate properties created over time`,
         guide: [
           'Settings → Properties → filter Custom Properties → sort by "Description" blank',
           'Add a one-line description to each: what it means, who fills it in, when it gets populated',
@@ -7970,7 +7971,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: unrespondedConvs.length > 10 ? 'critical' : 'warning',
         title: `${unrespondedConvs.length} conversations open 24+ hours with no response`,
         description: `${unrespondedConvs.length} customer conversations in your HubSpot inbox have been waiting more than 24 hours without a reply. Industry benchmark: 73% of customers expect a response within 24 hours. Each unresponded conversation is a customer whose trust is actively eroding.`,
-        impact: `${unrespondedConvs.length} customers waiting · churn risk elevated · trust damaged`,
+        impact: `Customers waiting on unanswered conversations · churn risk elevated · trust damaged`,
         guide: [
           'Go to Conversations → Inbox → filter by "Open" → sort by "Oldest" first',
           'Assign a daily inbox review rotation — no conversation should go 24hrs without acknowledgment',
@@ -8086,7 +8087,7 @@ async function runFullAudit(token, auditId, meta) {
           severity: 'info',
           title: `${unusedProps.length} custom contact properties have zero data — portal bloat costing team efficiency`,
           description: `${unusedProps.length} custom properties exist on your contact records but contain data for zero contacts. These empty properties clutter your property list, make it harder for reps to find what they need, and often lead to duplicate properties being created. In portals that have grown organically, this is the #1 cause of "we can't find anything in HubSpot" complaints.`,
-          impact: `${unusedProps.length} unused properties · portal complexity inflated · reps creating duplicates`,
+          impact: `Unused properties inflating portal complexity · reps creating duplicates`,
           dimension: 'Data Integrity',
           guide: [
             'Settings → Properties → filter by "Contact" → sort by "Number of records with data" ascending',
@@ -8129,7 +8130,7 @@ async function runFullAudit(token, auditId, meta) {
           severity: brokenForms.length > 2 ? 'critical' : 'warning',
           title: `${brokenForms.length} form${brokenForms.length!==1?'s':''} with <1% conversion rate — lead capture silently failing`,
           description: `${brokenForms.length} high-traffic forms are receiving significant views but almost zero submissions. A form with 500 views and 2 submissions (0.4% conversion) either has a technical problem, asks too many friction-heavy fields, or is embedded on a page where visitors aren't ready to convert. Industry benchmark for a well-optimized HubSpot form is 15-25% conversion rate.`,
-          impact: `${brokenForms.length} broken forms · unknown number of lost leads · ad spend driving to broken pages`,
+          impact: `Broken forms causing unknown lead loss · ad spend driving traffic to non-converting pages`,
           dimension: 'Marketing',
           guide: [
             'Test each affected form yourself right now — submit it and verify you receive the confirmation email',
@@ -8232,7 +8233,7 @@ async function runFullAudit(token, auditId, meta) {
         severity: 'warning',
         title: `${highTicketCompanies} customer${highTicketCompanies!==1?'s have':' has'} 5+ open tickets — churn risk elevated`,
         description: `High ticket volume from individual customers is the clearest leading indicator of churn in B2B SaaS. A customer submitting 5+ support tickets signals product friction, implementation problems, or unmet expectations. By the time they mention it on a renewal call, it's often too late.`,
-        impact: `${highTicketCompanies} high-risk customers · renewal conversations starting from deficit`,
+        impact: `High-risk customers generating repeat tickets · renewal conversations starting from a deficit`,
         dimension: 'Service',
         guide: [
           'Immediately: identify which customers have the most open tickets → assign a CSM to each for a check-in call',
