@@ -68,6 +68,17 @@ async function initDb() {
     )
   `);
   await db.query(`
+    CREATE TABLE IF NOT EXISTS nps_responses (
+      id         SERIAL PRIMARY KEY,
+      audit_id   TEXT UNIQUE,
+      email      TEXT,
+      score      INT,
+      text       TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `).catch(() => {});
+  await db.query('ALTER TABLE customers ADD COLUMN IF NOT EXISTS feedback_sent_at TIMESTAMP').catch(() => {});
+  await db.query(`
     CREATE TABLE IF NOT EXISTS customers (
       id              SERIAL PRIMARY KEY,
       email           VARCHAR(255) UNIQUE NOT NULL,
