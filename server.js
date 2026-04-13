@@ -2133,7 +2133,7 @@ app.post('/lead/capture', async (req, res) => {
     await resend.emails.send({
       from: 'FixOps Leads <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
-      subject: `🗓 Calendly Lead — ${company || email} — ${plan || 'unknown plan'}`,
+      subject: `${source === 'salesforce-early-access' ? '🔵 Salesforce Beta' : '🗓 Lead'} — ${company || email} — ${plan || source || 'unknown'}`,
       html: `
         <h2 style="margin-bottom:4px;">New Paid Plan Lead</h2>
         <p style="color:#888;font-size:13px;margin-bottom:20px;">They entered their details and clicked "Book Your Setup Call"</p>
