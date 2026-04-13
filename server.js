@@ -3473,6 +3473,64 @@ app.delete('/customer/data', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Feedback / NPS landing page endpoint ────────────────────────────────────
+app.post('/feedback', async (req, res) => {
+  const { score, text, auditId } = req.body || {};
+  const npsScore = parseInt(score);
+  if (!isNaN(npsScore) && auditId) {
+    await db.query(
+      `INSERT INTO nps_responses (audit_id, score, text, created_at)
+       VALUES ($1, $2, $3, NOW()) ON CONFLICT (audit_id) DO UPDATE SET score=$2, text=$3`,
+      [auditId, npsScore, text || '']
+    ).catch(() => {});
+    const label = npsScore>=9?'Promoter':'Passive';
+    await resend.emails.send({
+      from: 'FixOps NPS <reports@fixops.io>',
+      to: 'matthew@fixops.io',
+      subject: `NPS ${npsScore}/10 from results page`,
+      html: `<p>Score: ${npsScore} (${label})<br>Audit: ${auditId}<br>Text: ${text||'(none)'}</p>`
+    }).catch(() => {});
+  }
+  res.json({ ok: true });
+});
+
+app.get('/feedback', async (req, res) => {
+  const { score, id, email } = req.query;
+  const npsScore = parseInt(score);
+
+  // Store NPS response
+  if (!isNaN(npsScore) && id) {
+    await db.query(
+      `INSERT INTO nps_responses (audit_id, email, score, created_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (audit_id) DO UPDATE SET score = $3, created_at = NOW()`,
+      [id, email || '', npsScore]
+    ).catch(() => {});
+
+    // Alert Matt
+    const label = npsScore >= 9 ? 'Promoter 🟢' : npsScore >= 7 ? 'Passive 🟡' : 'Detractor 🔴';
+    await resend.emails.send({
+      from: 'FixOps NPS <reports@fixops.io>',
+      to: 'matthew@fixops.io',
+      subject: `NPS ${npsScore}/10 — ${label} — ${email || 'anonymous'}`,
+      html: `<p><strong>NPS Score: ${npsScore}/10</strong> (${label})<br>Email: ${email || 'anonymous'}<br>Audit: ${id}</p>`
+    }).catch(() => {});
+  }
+
+  const msg = npsScore >= 9 ? 'Thank you! That means a lot. 🙏' :
+              npsScore >= 7 ? 'Thanks for the feedback — we\'ll keep improving.' :
+              'Thank you for being honest — we want to earn a higher score. Reply to the email to tell us what to fix.';
+
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Thank you</title></head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;">
+<div style="text-align:center;padding:40px 24px;max-width:400px;">
+  <div style="font-size:48px;margin-bottom:16px;">${npsScore >= 9 ? '🎉' : npsScore >= 7 ? '👍' : '🙏'}</div>
+  <div style="font-size:20px;font-weight:700;color:#fff;margin-bottom:8px;">Score recorded: ${npsScore}/10</div>
+  <div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.7;margin-bottom:24px;">${msg}</div>
+  <a href="${FRONTEND_URL}" style="display:inline-block;padding:11px 22px;background:#7c3aed;color:#fff;border-radius:8px;font-size:13px;font-weight:700;text-decoration:none;">Back to FixOps →</a>
+</div></body></html>`);
+});
+
 app.get('/health', async (req, res) => {
   let dbOk = false;
   try { await db.query('SELECT 1'); dbOk = true; } catch(e) {}
@@ -4781,6 +4839,105 @@ cron.schedule('0 * * * *', async () => {
     if (res.rows.length > 0) console.log(`[Drip] Sent \${res.rows.length} follow-up emails`);
   } catch(e) {
     console.error('[Drip] Follow-up cron error:', e.message?.substring(0, 80));
+  }
+});
+
+// ── Feedback / NPS email cron — 48 hours after audit ─────────────────────────
+// Fires every 2 hours; sends feedback email to audits that are ~48 hours old
+cron.schedule('0 */2 * * *', async () => {
+  try {
+    const res = await db.query(`
+      SELECT DISTINCT ON (c.email)
+        c.email, c.plan, c.company,
+        ar.id AS audit_id, ar.created_at
+      FROM customers c
+      JOIN audit_results ar ON ar.id = c.last_audit_id
+      WHERE ar.created_at BETWEEN NOW() - INTERVAL '50 hours' AND NOW() - INTERVAL '46 hours'
+        AND (c.feedback_sent_at IS NULL OR c.feedback_sent_at < NOW() - INTERVAL '30 days')
+        AND c.email IS NOT NULL AND c.email != ''
+        AND c.plan != 'free'
+      ORDER BY c.email, ar.created_at DESC
+      LIMIT 50
+    `).catch(() => ({ rows: [] }));
+
+    for (const row of res.rows) {
+      const score = Math.floor(Math.random() * 30 + 65); // placeholder until we read actual score
+      try {
+        // Mark as sent first to avoid duplicates
+        await db.query(
+          'UPDATE customers SET feedback_sent_at = NOW() WHERE email = $1',
+          [row.email]
+        ).catch(() => {});
+
+        await resend.emails.send({
+          from: 'Matt at FixOps <matthew@fixops.io>',
+          to: row.email,
+          subject: 'Quick question about your FixOps audit',
+          html: `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Quick question</title></head>
+<body style="margin:0;padding:0;background:#07070a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#07070a;padding:32px 16px;">
+<tr><td align="center">
+<table width="540" cellpadding="0" cellspacing="0" style="max-width:540px;width:100%;">
+
+  <tr><td style="background:linear-gradient(135deg,#0d0b1e,#120e2a);border-radius:16px 16px 0 0;padding:24px 32px;border-bottom:1px solid rgba(124,58,237,.2);">
+    <div style="font-size:20px;font-weight:900;color:#fff;letter-spacing:-.5px;">⚡ Fix<span style="color:#a78bfa;">Ops</span></div>
+  </td></tr>
+
+  <tr><td style="background:#0d0b1e;padding:32px 36px;">
+    <div style="font-size:20px;font-weight:800;color:#fff;margin-bottom:12px;letter-spacing:-.3px;">Quick question for you</div>
+    <div style="font-size:14px;color:rgba(255,255,255,.65);line-height:1.75;margin-bottom:24px;">
+      Hey — I'm Matt, I built FixOps. You ran an audit on ${row.company || 'your HubSpot portal'} about 48 hours ago and I wanted to personally check in.
+    </div>
+
+    <!-- NPS question -->
+    <div style="background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:20px 22px;margin-bottom:20px;">
+      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:16px;">How likely are you to recommend FixOps to a colleague or client?</div>
+      <table cellpadding="0" cellspacing="0">
+        <tr>
+          ${[0,1,2,3,4,5,6,7,8,9,10].map(n => `
+          <td style="padding:0 3px;">
+            <a href="https://fixops.io/feedback?score=${n}&id=${row.audit_id}&email=${encodeURIComponent(row.email)}"
+               style="display:block;width:34px;height:34px;border-radius:6px;background:${n<=6?'rgba(244,63,94,.12)':n<=8?'rgba(245,158,11,.12)':'rgba(16,185,129,.12)'};border:1px solid ${n<=6?'rgba(244,63,94,.2)':n<=8?'rgba(245,158,11,.2)':'rgba(16,185,129,.2)'};color:${n<=6?'#f43f5e':n<=8?'#f59e0b':'#10b981'};text-align:center;line-height:34px;font-size:13px;font-weight:700;text-decoration:none;">${n}</a>
+          </td>`).join('')}
+        </tr>
+        <tr>
+          <td colspan="7" style="padding-top:6px;font-size:10px;color:rgba(255,255,255,.25);text-align:left;">Not likely</td>
+          <td colspan="4" style="padding-top:6px;font-size:10px;color:rgba(255,255,255,.25);text-align:right;">Very likely</td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Optional text feedback -->
+    <div style="font-size:13px;color:rgba(255,255,255,.55);line-height:1.7;margin-bottom:20px;">
+      If you have a minute, I'd also love to know:<br>
+      <strong style="color:rgba(255,255,255,.8);">What's one thing FixOps should add or improve?</strong>
+      Just reply to this email — I read every response.
+    </div>
+
+    <a href="https://calendly.com/matthew-fixops/30min" target="_blank"
+       style="display:inline-block;padding:11px 22px;background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.35);color:#a78bfa;border-radius:8px;font-size:12px;font-weight:700;text-decoration:none;">
+      Or book a quick call →
+    </a>
+
+  </td></tr>
+  <tr><td style="background:rgba(255,255,255,.02);border-top:1px solid rgba(255,255,255,.05);border-radius:0 0 16px 16px;padding:14px 32px;text-align:center;">
+    <div style="font-size:10px;color:rgba(255,255,255,.2);">
+      <a href="${FRONTEND_URL}" style="color:rgba(124,58,237,.4);text-decoration:none;">fixops.io</a> ·
+      You're receiving this because you ran a FixOps audit. Reply to opt out.
+    </div>
+  </td></tr>
+
+</table></td></tr></table>
+</body></html>`
+        });
+        console.log(`[Feedback] Sent NPS email to ${row.email}`);
+      } catch(e2) {
+        console.error('[Feedback] Email error:', e2.message?.substring(0, 60));
+      }
+    }
+  } catch(e) {
+    console.error('[Feedback] Cron error:', e.message?.substring(0, 80));
   }
 });
 
