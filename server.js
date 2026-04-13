@@ -3968,8 +3968,17 @@ app.get('/auth/callback', async (req, res) => {
         await resend.emails.send({
           from: 'FixOps Alerts <reports@fixops.io>',
           to: FIXOPS_NOTIFY_EMAIL,
-          subject: `⚠️ Audit Failed — ${auditMeta.company}`,
-          html: `<p>Audit failed: ${auditMeta.email} | ${auditMeta.plan}<br>Error: ${e.message}<br>Audit ID: ${auditIdCopy}</p>`
+          subject: `⚠️ Audit Failed — ${auditMeta.company || auditMeta.email}`,
+          html: `<h2 style="color:#ef4444;">Audit Failed</h2>
+                 <table style="border-collapse:collapse;font-family:sans-serif;font-size:14px;">
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Email</td><td>${auditMeta.email}</td></tr>
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Company</td><td>${auditMeta.company || '—'}</td></tr>
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Plan</td><td>${auditMeta.plan}</td></tr>
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Audit ID</td><td>${auditIdCopy}</td></tr>
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Error</td><td style="color:#ef4444;font-weight:700;">${e.message}</td></tr>
+                   <tr><td style="padding:4px 12px 4px 0;color:#888;">Stack</td><td style="font-size:11px;color:#888;">${(e.stack||'').substring(0,300)}</td></tr>
+                 </table>
+                 <p style="margin-top:16px;"><a href="https://railway.app" style="color:#7c3aed;">View Railway logs →</a></p>`
         }).catch(() => {});
       }
     });
