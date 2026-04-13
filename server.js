@@ -5134,7 +5134,7 @@ async function runFullAudit(token, auditId, meta) {
   const hs = axios.create({ baseURL: 'https://api.hubapi.com', headers: { Authorization: `Bearer ${token}` }, timeout: 30000 }); // 30s per request
   // Add .post shorthand matching .get pattern (used for CRM search endpoints)
   hs.post = (url, body) => axios.post('https://api.hubapi.com' + url, body, { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 });
-  const safe = async (fn, fb) => { try { return await fn(); } catch(e) { if(e.response?.status !== 403) console.log('API skip:', e.message?.substring(0,50)); return fb; } };
+  const safe = async (fn, fb) => { try { return await fn(); } catch(e) { const s = e.response?.status; if(s !== 403 && s !== 404 && s !== 400) console.log('API skip:', e.message?.substring(0,50)); return fb; } };
 
   // Smart sampling fetch — scales to any portal size
   // Paginated fetch — reads up to 10,000 records per object
@@ -5187,7 +5187,7 @@ async function runFullAudit(token, auditId, meta) {
           await sleep(wait);
           continue; // retry same page
         }
-        if (e.response?.status !== 403) console.log('Paginate skip:', url.split('?')[0].split('/').pop(), '-', e.message?.substring(0,60));
+        if (e.response?.status !== 403 && e.response?.status !== 400 && e.response?.status !== 404) console.log('Paginate skip:', url.split('?')[0].split('/').pop(), '-', e.message?.substring(0,60));
         break;
       }
     }
@@ -5244,7 +5244,7 @@ async function runFullAudit(token, auditId, meta) {
     ticketLimit
   );
 
-  await up(38, `Loaded ${contactsR.data.results.length.toLocaleString()} contacts · ${dealsR.data.results.length.toLocaleString()} deals · ${companiesR.data.results.length.toLocaleString()} companies…`);
+  await up(38, `Loaded ${(contactsR.data?.results?.length||0).toLocaleString()} contacts · ${(dealsR.data?.results?.length||0).toLocaleString()} deals · ${(companiesR.data?.results?.length||0).toLocaleString()} companies…`);
 
   // ── PRIORITY 2: Commerce objects — available via MCP ─────────────────────────
   await up(40, 'Reading products and line items…');
@@ -6593,30 +6593,6 @@ async function runFullAudit(token, auditId, meta) {
           ]
         });
       }
-    }
-  }
-
-  // ── DEALS WITHOUT ASSOCIATED CONTACTS ─────────────────────────────────────
-  if (deals.length > 10) {
-    const dealsNoContact = deals.filter(d => {
-      const n = parseInt(d.properties?.num_associated_contacts || d.properties?.hs_num_contacts_with_buying_roles || 0);
-      return n === 0;
-    });
-    if (dealsNoContact.length > deals.length * 0.20) {
-      pipelineScore -= Math.min(15, Math.round(dealsNoContact.length / deals.length * 25));
-      issues.push({
-        severity: dealsNoContact.length > deals.length * 0.40 ? 'critical' : 'warning',
-        title: `${dealsNoContact.length} deals have no associated contact — these deals cannot close`,
-        description: `${Math.round(dealsNoContact.length/deals.length*100)}% of your deals have zero contacts linked. Every deal needs at least one associated contact — without one there's no buyer, no relationship, and no way to track communication history. Pipeline accuracy and forecast reliability both suffer.`,
-        impact: `${dealsNoContact.length} contactless deals · forecast skewed · close rate reporting inaccurate`,
-        dimension: 'Pipeline',
-        guide: [
-          'Deals → filter "Number of associated contacts = 0" → bulk review and associate contacts',
-          'Make contact association required when creating a deal in Settings → Properties → Required Fields',
-          'Workflow: Deal created AND associated contacts = 0 → notify owner to add contact within 24 hours',
-          'Set HubSpot to auto-associate contacts from the same company to their deals'
-        ]
-      });
     }
   }
 
@@ -9056,7 +9032,7 @@ async function runFullAudit(token, auditId, meta) {
   // Source: B2B win-back rates average 15-25% (Forrester 2023). Using 20% is conservative and defensible.
   const expiredQList = quotes.filter(q => String(q.properties?.hs_quote_status||'').toLowerCase() === 'expired');
   const wasteExpiredQ = expiredQList.length > 0
-    ? Math.round(expiredQList.length * Math.max(avgDealSize, 500) * 0.20 / 12)
+    ? Math.round(expiredQList.length * Math.max(revenueIntel?.avgDealSize || 0, 500) * 0.20 / 12)
     : 0;
 
   const monthlyWaste = Math.round(
@@ -9827,8 +9803,9 @@ async function runFullAudit(token, auditId, meta) {
 
           // Estimate uncontacted leads = new contacts with no activity
           const estimatedUncontacted = Math.round(totalRecentContacts * (slowResponsePct / 100));
-          const leadLossValue = estimatedUncontacted > 0 && avgDealSize > 0
-            ? Math.round(estimatedUncontacted * (avgDealSize * 0.15) / 12) // 15% of avg deal / 12 = monthly cost
+          const riAvgDeal = (revenueIntel && revenueIntel.avgDealSize) ? revenueIntel.avgDealSize : 0;
+          const leadLossValue = estimatedUncontacted > 0 && riAvgDeal > 0
+            ? Math.round(estimatedUncontacted * (riAvgDeal * 0.15) / 12) // 15% of avg deal / 12 = monthly cost
             : 0;
 
           return {
