@@ -5189,6 +5189,53 @@ async function runFullAudit(token, auditId, meta) {
   const primaryScoreProp = newLeadScoreProps[0] || legacyScoreProp || null;
   // For backward compat with engine below
   const leadScoreProperty = primaryScoreProp;
+  // ── Additional data points — deal/company properties, forecast, CMS ────────
+  await up(56, 'Reading property definitions and CMS data…');
+
+  // Deal + company properties (data quality, unused field detection)
+  const allDealPropsR = await safe(
+    () => hs.get('/crm/v3/properties/deals?limit=500&archived=false'),
+    {data:{results:[]}}
+  );
+  const allCompanyPropsR = await safe(
+    () => hs.get('/crm/v3/properties/companies?limit=500&archived=false'),
+    {data:{results:[]}}
+  );
+  const contactPropGroupsR = await safe(
+    () => hs.get('/crm/v3/properties/contacts/groups'),
+    {data:{results:[]}}
+  );
+
+  // Sales forecast data
+  const forecastR = await safe(
+    () => hs.get('/sales/v3/forecasts?limit=50'),
+    {data:{results:[]}}
+  );
+
+  // Email templates (stale template detection)
+  const emailTemplatesR = await safe(
+    () => hs.get('/marketing/v3/templates?limit=100&includeArchived=false'),
+    {data:{results:[]}}
+  );
+
+  // Landing pages (CMS health — draft/unpublished pages)
+  const landingPagesR = await safe(
+    () => hs.get('/cms/v3/pages/landing-pages?limit=100&properties=name,state,updatedAt,createdAt,publishedAt'),
+    {data:{results:[]}}
+  );
+
+  // Association types (custom relationship health)
+  const associationTypesR = await safe(
+    () => hs.get('/crm/v4/associations/contacts/companies/labels'),
+    {data:{results:[]}}
+  );
+
+  // HubSpot native data quality scores
+  const dqContactSampleR = await safe(
+    () => hs.get('/crm/v3/objects/contacts?limit=100&properties=hs_data_quality_status&archived=false'),
+    {data:{results:[]}}
+  );
+
   // Domain/email authentication (SPF, DKIM, DMARC)
   const domainsR = await safe(
     () => hs.get('/cms/v3/domains?limit=100'),
@@ -5286,48 +5333,6 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
 
-  // ── NEW API CALLS (v6.0) ────────────────────────────────────────────────
-  // Deal properties — for custom/unused deal prop audit
-  const dealPropsR = await safe(
-    () => hs.get('/crm/v3/properties/deals?limit=500&archived=false'),
-    {data:{results:[]}}
-  );
-  // Company properties — for custom/unused company prop audit
-  const companyPropsR = await safe(
-    () => hs.get('/crm/v3/properties/companies?limit=500&archived=false'),
-    {data:{results:[]}}
-  );
-  // Contact property groups — for org/naming convention audit
-  const contactPropGroupsR = await safe(
-    () => hs.get('/crm/v3/properties/contacts/groups'),
-    {data:{results:[]}}
-  );
-  // Sales forecast — for accuracy vs pipeline analysis
-  const salesForecastR = await safe(
-    () => hs.get('/sales/v3/forecasts?limit=50'),
-    {data:{results:[]}}
-  );
-  // Email templates — for stale template detection
-  const emailTemplatesR = await safe(
-    () => hs.get('/marketing/v3/templates?limit=100'),
-    {data:{results:[]}}
-  );
-  // Landing pages — for draft/unpublished page audit
-  const landingPagesR = await safe(
-    () => hs.get('/cms/v3/pages/landing-pages?limit=100&sort=-updatedAt'),
-    {data:{results:[]}}
-  );
-  // Association types between contacts and companies
-  const assocTypesR = await safe(
-    () => hs.get('/crm/v3/associations/contacts/companies/types'),
-    {data:{results:[]}}
-  );
-  // Contact data quality via hs_data_quality_status property
-  const dataQualityContactsR = await safe(
-    () => hs.get('/crm/v3/objects/contacts?limit=100&properties=hs_data_quality_status,hs_email_bounce,email'),
-    {data:{results:[]}}
-  );
-
   // ── Unwrap all results — enforce hard limits for free plan ──────────────────
   const contacts      = (contactsR.data?.results||[]).slice(0, contactLimit);
   const companies     = (companiesR.data?.results||[]).slice(0, companyLimit);
@@ -5369,15 +5374,6 @@ async function runFullAudit(token, auditId, meta) {
   const carts           = cartsR.data?.results||[];
   const communications  = communicationsR.data?.results||[];
   const marketingEvents  = marketingEventsR.data?.results||[];
-  // New v6.0 data arrays
-  const dealProps         = dealPropsR.data?.results||[];
-  const companyProps      = companyPropsR.data?.results||[];
-  const contactPropGroups = contactPropGroupsR.data?.results||[];
-  const salesForecasts    = salesForecastR.data?.results||[];
-  const emailTemplates    = emailTemplatesR.data?.results||[];
-  const landingPages      = landingPagesR.data?.results||[];
-  const assocTypes        = assocTypesR.data?.results||[];
-  const dqContacts        = dataQualityContactsR.data?.results||[];
   const marketingEmails  = marketingEmailsR.data?.results||[];
   // Merge stats into emails by ID for open/click/bounce rate analysis
   const emailStatsMap = {};
@@ -5861,7 +5857,7 @@ async function runFullAudit(token, auditId, meta) {
   const undocProps = (cProps||[]).filter(p=>!p.hubspotDefined&&!p.description);
   if(undocProps.length>10){
     configScore-=8;
-    issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration',guide:['Document every custom property with a clear description in Settings → Properties','Include: what the field means, who fills it, what values are expected, and which workflows use it','FixOps AutoDoc ($99/mo add-on) automatically generates plain-English documentation for every workflow and property in your portal','Sort properties by Created Date (newest first) to find recently added undocumented fields — these are the highest priority','Group properties into clearly named groups by team or use case to reduce discovery friction']});
+    issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration',guide:['Settings → Properties → filter Custom → add description to each: what does it track, where is it populated, who uses it?','Identify unused properties (0 records updated) and archive them','FixOps AutoDoc automatically documents every custom property and exports a full Property Bible PDF']});
   }
 
   await up(90, 'Checking reporting quality…');
@@ -8859,53 +8855,6 @@ async function runFullAudit(token, auditId, meta) {
     lineItems.length + quotes.length + products.length +
     orders.length + invoices.length + subscriptions.length;
 
-  // ── NEW COMPUTED FIELDS (v6.0) ─────────────────────────────────────────
-  const BUILTIN_DEAL_PROPS = new Set([
-    'dealname','amount','closedate','dealstage','pipeline','hubspot_owner_id',
-    'hs_priority','hs_deal_stage_probability','dealtype','description',
-    'hs_next_step','num_associated_contacts','hs_projected_amount',
-    'hs_closed_amount','hs_createdate','hs_lastmodifieddate',
-    'hs_analytics_source','hs_analytics_source_data_1','hs_analytics_source_data_2',
-  ]);
-  const BUILTIN_COMPANY_PROPS = new Set([
-    'name','domain','website','phone','industry','numberofemployees','annualrevenue',
-    'city','state','country','zip','address','description','hubspot_owner_id',
-    'lifecyclestage','hs_lead_status','type','num_contacted_notes','notes_last_contacted',
-    'hs_createdate','hs_lastmodifieddate','hs_analytics_source',
-  ]);
-
-  const dealPropsCustom  = dealProps.filter(p => !p.hubspotDefined && !BUILTIN_DEAL_PROPS.has(p.name)).length;
-  const dealPropsTotal   = dealProps.length;
-  // "Unused" = custom deal props that have no description and aren't in any deal (heuristic: no description = orphaned)
-  const dealPropsUnused  = dealProps.filter(p => !p.hubspotDefined && !p.description && !BUILTIN_DEAL_PROPS.has(p.name)).length;
-
-  const companyPropsCustom = companyProps.filter(p => !p.hubspotDefined && !BUILTIN_COMPANY_PROPS.has(p.name)).length;
-  const companyPropsTotal  = companyProps.length;
-
-  // Landing pages: draft = state is DRAFT or AUTOMATED
-  const landingPagesDraft    = landingPages.filter(p => String(p.state||'').toUpperCase() === 'DRAFT').length;
-  const landingPagesTotal    = landingPages.length;
-  const landingPagesPublished = landingPages.filter(p => String(p.state||'').toUpperCase() === 'PUBLISHED').length;
-
-  // Email templates: stale = updatedAt older than 180 days
-  const sixMonthsAgo = Date.now() - 180 * DAY;
-  const emailTemplatesStale = emailTemplates.filter(t => {
-    const upd = new Date(t.updatedAt || t.updated || 0).getTime();
-    return upd > 0 && upd < sixMonthsAgo;
-  }).length;
-
-  // Native HubSpot data quality score (hs_data_quality_status)
-  // Possible values: GOOD, BAD, null — count % with BAD status
-  const dqWithStatus   = dqContacts.filter(c => c.properties?.hs_data_quality_status);
-  const dqBad          = dqWithStatus.filter(c => String(c.properties.hs_data_quality_status).toUpperCase() === 'BAD').length;
-  const nativeDataQuality = dqWithStatus.length > 0
-    ? Math.round((1 - dqBad / dqWithStatus.length) * 100)
-    : null;  // null = endpoint not available / no data
-
-  const contactPropGroupCount = contactPropGroups.length;
-  const assocTypeCount        = assocTypes.length;
-  const forecastCount         = salesForecasts.length;
-
   const finalResult = {
     status:'complete', auditId,
     portalInfo:{
@@ -9680,22 +9629,6 @@ async function runFullAudit(token, auditId, meta) {
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
 
-      // ── v6.0 new computed fields ───────────────────────────────────────
-      dealPropsCustom,
-      dealPropsUnused,
-      dealPropsTotal,
-      companyPropsCustom,
-      companyPropsTotal,
-      landingPagesDraft,
-      landingPagesTotal,
-      landingPagesPublished,
-      emailTemplatesStale,
-      emailTemplatesTotal: emailTemplates.length,
-      nativeDataQuality,
-      contactPropGroupCount,
-      assocTypeCount,
-      forecastCount,
-
       // ── Intelligence Engines (moved inside portalStats so ps.engineName works) ──
       revenueIntel,
       contactDecayEngine,
@@ -9709,6 +9642,26 @@ async function runFullAudit(token, auditId, meta) {
       workflowDependencyEngine,
       setupHealthEngine,
       hubUtilizationEngine,
+
+      // ── New data points from extended API calls ──────────────────────
+      dealPropsTotal:     (allDealPropsR?.data?.results||[]).filter(p=>!p.hidden).length,
+      dealPropsCustom:    (allDealPropsR?.data?.results||[]).filter(p=>!p.hidden && p.createdUserId).length,
+      dealPropsUnused: (() => {
+        const dpNames = new Set((allDealPropsR?.data?.results||[]).filter(p=>!p.hidden && p.createdUserId).map(p=>p.name));
+        if (!dpNames.size) return 0;
+        const used = new Set();
+        deals.forEach(d => { Object.entries(d.properties||{}).forEach(([k,v]) => { if (v && dpNames.has(k)) used.add(k); }); });
+        return dpNames.size - used.size;
+      })(),
+      companyPropsTotal:  (allCompanyPropsR?.data?.results||[]).filter(p=>!p.hidden).length,
+      companyPropsCustom: (allCompanyPropsR?.data?.results||[]).filter(p=>!p.hidden && p.createdUserId).length,
+      contactPropGroups:  (contactPropGroupsR?.data?.results||[]).length,
+      landingPagesTotal:  (landingPagesR?.data?.results||[]).length,
+      landingPagesDraft:  (landingPagesR?.data?.results||[]).filter(p=>p.state==='DRAFT'||p.state==='PUBLISHED_OR_SCHEDULED').length,
+      emailTemplatesTotal:(emailTemplatesR?.data?.results||[]).length,
+      forecastEnabled:    (forecastR?.data?.results||[]).length > 0,
+      customAssocTypes:   (associationTypesR?.data?.results||[]).filter(r=>r.typeId>100).length,
+      nativeDataQuality:  (dqContactSampleR?.data?.results||[]).filter(c=>c.properties?.hs_data_quality_status==='BAD').length,
 
     },
       isLimited: !isPaid,
