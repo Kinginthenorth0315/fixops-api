@@ -2739,6 +2739,45 @@ const AGENCY_PLANS = {
 };
 
 // ── Register new agency account (admin or Stripe webhook) ─────────────────────
+// ── Admin: generate audit token for beta testers ────────────────────────────
+// POST /admin/generate-token  { adminKey, email, company, plan, days }
+// Returns { token, link } — use to give testers free full audits
+app.post('/admin/generate-token', async (req, res) => {
+  try {
+    const { adminKey, email, company, plan = 'pro-audit', days = 14 } = req.body;
+    if (!adminKey || adminKey !== process.env.FIXOPS_ADMIN_KEY) {
+      return res.status(403).json({ error: 'Admin key required' });
+    }
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    const token = crypto.randomBytes(24).toString('hex'); // 48 char hex
+    const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+
+    await db.query(
+      `INSERT INTO audit_tokens (token, email, plan, company, expires_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (token) DO NOTHING`,
+      [token, email.toLowerCase().trim(), plan, company || '', expiresAt]
+    );
+
+    const link = `${FRONTEND_URL}/confirm.html?auditToken=${token}`;
+
+    // Notify Matthew
+    await resend.emails.send({
+      from: 'FixOps <reports@fixops.io>',
+      to: FIXOPS_NOTIFY_EMAIL,
+      subject: `🎟 Beta token created — ${email} — ${plan}`,
+      html: `<p>Token created for <strong>${email}</strong> (${company || 'unknown company'})</p>
+             <p>Plan: <strong>${plan}</strong> · Expires: ${expiresAt.toDateString()}</p>
+             <p><a href="${link}">${link}</a></p>`
+    }).catch(() => {});
+
+    res.json({ ok: true, token, link, plan, expires: expiresAt, email });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/agency/register', async (req, res) => {
   try {
     const { email, agencyName, plan, stripeCustomer, subscriptionId, adminKey } = req.body;
@@ -5642,6 +5681,7 @@ async function runFullAudit(token, auditId, meta) {
   }
 
   // ── CONTACT PROPERTY COMPLETENESS ──────────────────────────
+  let contactCompletenessData = { score: 0, missingByField: {}, total: 0 }; // default
   if (contacts.length > 50) {
     // Score each contact on 5 key fields: email, phone, company, lifecyclestage, owner
     const KEY_PROPS = ['email','phone','company','lifecyclestage','hubspot_owner_id'];
@@ -5702,7 +5742,7 @@ async function runFullAudit(token, auditId, meta) {
     }
 
     // contactCompleteness stored below in portalStats directly
-    const contactCompletenessData = { score: completenessScore, missingByField, total: contacts.length };
+    contactCompletenessData = { score: completenessScore, missingByField, total: contacts.length };
   }
 
   // ── CONTACT FIRST NAME CHECK (Portal IQ benchmark) ────────────
