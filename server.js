@@ -8352,12 +8352,25 @@ async function runFullAudit(token, auditId, meta) {
         }, 0) / wonWithDates.length)
       : 0;
 
-    // Average deal size (closed won only — open deals are unreliable)
-    const avgDealSize = closedWonDeals.length > 0
-      ? Math.round(closedWonDeals.reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0) / closedWonDeals.length)
-      : openDeals.length > 0
-        ? Math.round(openDeals.filter(d=>parseFloat(d.properties?.amount||0)>0).reduce((sum,d)=>sum+parseFloat(d.properties?.amount||0),0) / Math.max(openDeals.filter(d=>parseFloat(d.properties?.amount||0)>0).length, 1))
-        : 0;
+    // Median deal size (closed won) — more reliable than mean which is skewed by outliers
+    // Capped at $100k for waste/opportunity-cost calculations — larger deals need manual analysis
+    const dealAmounts = closedWonDeals
+      .map(d => parseFloat(d.properties?.amount||0))
+      .filter(a => a > 0)
+      .sort((a,b) => a - b);
+    const medianDealSize = dealAmounts.length > 0
+      ? dealAmounts[Math.floor(dealAmounts.length / 2)]
+      : 0;
+    // For waste calcs cap at $100k — avoids enterprise outliers inflating numbers
+    const avgDealSize = Math.min(medianDealSize || 0, 100000) ||
+      // Fallback: median of open deals if no closed won data
+      (() => {
+        const openAmts = openDeals
+          .map(d => parseFloat(d.properties?.amount||0))
+          .filter(a => a > 0 && a < 1000000)
+          .sort((a,b) => a - b);
+        return openAmts.length > 0 ? Math.min(openAmts[Math.floor(openAmts.length/2)], 100000) : 0;
+      })();
 
     // Pipeline velocity = (# deals × avg deal size × win rate) / avg sales cycle days
     const openWithValue = openDeals.filter(d => parseFloat(d.properties?.amount||0) > 0);
@@ -9202,7 +9215,7 @@ async function runFullAudit(token, auditId, meta) {
   //    Only count if deals have actual $ amounts — avoids inflating on $0-amount deals
   const stalledWithValue = stalled.filter(d => parseFloat(d.properties?.amount||0) > 0);
   const stalledRealVal   = stalledWithValue.reduce((s,d) => s + parseFloat(d.properties?.amount||0), 0);
-  const wasteStalledDeals = stalledRealVal > 0 ? Math.round(stalledRealVal * 0.02) : 0;
+  const wasteStalledDeals = stalledRealVal > 0 ? Math.min(Math.round(stalledRealVal * 0.02), 50000) : 0;
 
   // 3. Dead workflows → rep time + missed automation ($22/dead wf/mo)
   const wasteDeadWorkflows = Math.round(deadWf.length * 22);
@@ -9223,13 +9236,16 @@ async function runFullAudit(token, auditId, meta) {
   // Source: B2B win-back rates average 15-25% (Forrester 2023). Using 20% is conservative and defensible.
   const expiredQList = quotes.filter(q => String(q.properties?.hs_quote_status||'').toLowerCase() === 'expired');
   const wasteExpiredQ = expiredQList.length > 0
-    ? Math.round(expiredQList.length * Math.max(revenueIntel?.avgDealSize || 0, 500) * 0.20 / 12)
+    ? Math.min(Math.round(expiredQList.length * Math.max(Math.min(revenueIntel?.avgDealSize || 0, 25000), 500) * 0.20 / 12), 25000)
     : 0;
 
-  const monthlyWaste = Math.round(
+  const monthlyWasteRaw = Math.round(
     wasteDupes + wasteStalledDeals + wasteDeadWorkflows +
     wasteGhostSeats + wasteNoEmail + wasteOverdueInv + wasteExpiredQ
   );
+  // Global sanity cap: $150k/mo max — any higher requires manual verification
+  // This prevents outlier deal sizes or pipelines from producing absurd figures
+  const monthlyWaste = Math.min(monthlyWasteRaw, 150000);
   // Store breakdown for revenue leaks page
   const wasteBreakdown = { wasteDupes, wasteStalledDeals, wasteDeadWorkflows, wasteGhostSeats, wasteNoEmail, wasteOverdueInv, wasteExpiredQ, isCappedScan };
 
@@ -9997,8 +10013,9 @@ async function runFullAudit(token, auditId, meta) {
           // Estimate uncontacted leads = new contacts with no activity
           const estimatedUncontacted = Math.round(totalRecentContacts * (slowResponsePct / 100));
           const riAvgDeal = (revenueIntel && revenueIntel.avgDealSize) ? revenueIntel.avgDealSize : 0;
-          const leadLossValue = estimatedUncontacted > 0 && riAvgDeal > 0
-            ? Math.round(estimatedUncontacted * (riAvgDeal * 0.15) / 12) // 15% of avg deal / 12 = monthly cost
+          const riAvgDealCapped = Math.min(riAvgDeal, 25000);
+          const leadLossValue = estimatedUncontacted > 0 && riAvgDealCapped > 0
+            ? Math.min(Math.round(estimatedUncontacted * (riAvgDealCapped * 0.15) / 12), 50000)
             : 0;
 
           return {
