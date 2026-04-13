@@ -5142,14 +5142,15 @@ async function runFullAudit(token, auditId, meta) {
   // Beyond this, diminishing returns — 100 duplicates from 10k is same signal as from 100k
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-  const paginate = async (url, maxRecords) => {
+  const paginate = async (url, maxRecords, hardCap) => {
     const results = [];
     let after = null;   // cursor-based (most CRM endpoints)
     let offset = null;  // offset-based (lists endpoint)
     const limit = 100;
     let pages = 0;
     maxRecords = maxRecords || 999999;
-    const maxPages = Math.min(500, Math.ceil(maxRecords / 100));
+    // No arbitrary page cap for paid plans — paginate until exhausted or maxRecords
+    const maxPages = hardCap ? Math.min(hardCap, Math.ceil(maxRecords / 100)) : Math.ceil(maxRecords / 100);
 
     while (pages < maxPages && results.length < maxRecords) {
       try {
@@ -5239,9 +5240,20 @@ async function runFullAudit(token, auditId, meta) {
   );
 
   await up(34, 'Reading tickets…');
+  // Get true total count first, then sample for stats
+  const ticketsTrueTotal = await (async () => {
+    try {
+      const r = await hs.post('/crm/v3/objects/tickets/search', {
+        data: { limit: 1, properties: ['hs_object_id'], filterGroups: [] }
+      });
+      return r.data?.total || null;
+    } catch(e) { return null; }
+  })();
+  // Sample up to 10k tickets for accurate stats (sufficient for percentages on any size portal)
+  const ticketSampleLimit = isFree ? 500 : 10000;
   const ticketsR = await paginate(
     '/crm/v3/objects/tickets?properties=subject,hs_pipeline_stage,createdate,hubspot_owner_id,hs_lastmodifieddate,hs_ticket_priority,hs_pipeline,time_to_close,hs_ticket_category,hs_time_in_stage_1,hs_time_in_stage_2,hs_time_in_stage_3,hs_time_in_stage_4',
-    ticketLimit
+    ticketSampleLimit
   );
 
   await up(38, `Loaded ${(contactsR.data?.results?.length||0).toLocaleString()} contacts · ${(dealsR.data?.results?.length||0).toLocaleString()} deals · ${(companiesR.data?.results?.length||0).toLocaleString()} companies…`);
@@ -5611,9 +5623,10 @@ async function runFullAudit(token, auditId, meta) {
   const lineItems     = lineItemsR.data?.results||[];
   const quotes        = quotesR.data?.results||[];
   const products      = productsR.data?.results||[];
-  const orders        = ordersR.data?.results||[];
-  const invoices      = invoicesR.data?.results||[];
-  const subscriptions = subscriptionsR.data?.results||[];
+  const orders           = ordersR.data?.results||[];
+  const invoices         = invoicesR.data?.results||[];
+  const subscriptions    = subscriptionsR.data?.results||[];
+
 
   console.log(`[${auditId}] ✅ Fetch complete:
     contacts=${contacts.length} | companies=${companies.length} | deals=${deals.length} | tickets=${tickets.length}
@@ -7008,34 +7021,211 @@ async function runFullAudit(token, auditId, meta) {
 
   }
 
-  // 5. TICKET SLA — 67% of customers expect resolution within 3 hours (HubSpot State of Service)
-  if (tickets.length > 10) {
-    const oldTickets = tickets.filter(t => {
-      const created = new Date(t.properties?.createdate || 0).getTime();
+  // ── SERVICE HUB DEEP AUDIT ────────────────────────────────────────────────
+  // TICKET SLA — Uses sample of up to 10k tickets for accurate % analysis
+  if (tickets.length > 0) {
+
+    // ── Helper: is ticket open? ───────────────────────────────────────────
+    const isOpenTicket = t => {
       const stage = String(t.properties?.hs_pipeline_stage || '').toLowerCase();
-      const isOpen = !['closed', 'resolved', '4', 'closed_won'].includes(stage);
-      return isOpen && (now - created) / DAY > 3;
+      return !t.properties?.time_to_close && !['closed','resolved','4','closed_won','complete','completed'].includes(stage);
+    };
+    const openTix     = tickets.filter(isOpenTicket);
+    const closedTix   = tickets.filter(t => !isOpenTicket(t));
+    const oldTickets  = openTix.filter(t => (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 3);
+    const over7Tix    = openTix.filter(t => (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 7);
+    const unassigned  = openTix.filter(t => !t.properties?.hubspot_owner_id);
+    const highPriOpen = openTix.filter(t => String(t.properties?.hs_ticket_priority||'').toUpperCase() === 'HIGH');
+    const noRecentUpd = openTix.filter(t => {
+      const mod = new Date(t.properties?.hs_lastmodifieddate||0).getTime();
+      return (now - mod) / DAY > 5;
     });
-    if (oldTickets.length > tickets.length * 0.2) {
-      serviceScore -= Math.min(30, Math.round(oldTickets.length / tickets.length * 50));
+
+    // Ticket category breakdown
+    const catMap = {};
+    tickets.forEach(t => {
+      const cat = t.properties?.hs_ticket_category || 'Uncategorized';
+      catMap[cat] = (catMap[cat] || 0) + 1;
+    });
+    const topCategories = Object.entries(catMap).sort((a,b)=>b[1]-a[1]).slice(0,3);
+    const uncategorized = catMap['Uncategorized'] || catMap[''] || 0;
+    const uncatPct = tickets.length > 0 ? Math.round(uncategorized / tickets.length * 100) : 0;
+
+    // Rep load balance — who owns the most open tickets?
+    const repLoadMap = {};
+    openTix.forEach(t => {
+      const oid = t.properties?.hubspot_owner_id || 'unassigned';
+      repLoadMap[oid] = (repLoadMap[oid] || 0) + 1;
+    });
+    const repLoads = Object.entries(repLoadMap).filter(([k]) => k !== 'unassigned').sort((a,b)=>b[1]-a[1]);
+    const maxLoad = repLoads.length > 0 ? repLoads[0][1] : 0;
+    const avgLoad = repLoads.length > 0 ? Math.round(openTix.filter(t=>t.properties?.hubspot_owner_id).length / repLoads.length) : 0;
+    const overloadedReps = repLoads.filter(([,load]) => avgLoad > 0 && load > avgLoad * 2.5).length;
+
+    // Resolution rate (from sample)
+    const resolutionRate = tickets.length > 0 ? Math.round(closedTix.length / tickets.length * 100) : 0;
+
+    // ── Issue 1: Old open tickets ────────────────────────────────────────
+    if (oldTickets.length > 0 && oldTickets.length > openTix.length * 0.2) {
+      serviceScore -= Math.min(30, Math.round(oldTickets.length / Math.max(openTix.length, 1) * 50));
       issues.push({
-        severity: oldTickets.length > tickets.length * 0.4 ? 'critical' : 'warning',
-        title: `${oldTickets.length} support tickets open more than 3 days — customer trust at risk`,
-        description: `HubSpot's State of Customer Service research shows 67% of customers expect resolution within 3 hours, and 32% within the same day. ${oldTickets.length} of your ${tickets.length} tickets exceed 3 days open. Each unresolved ticket is a customer whose trust is actively declining — and whose renewal is at risk.`,
-        detail: `Ticket age directly correlates with churn probability. A ticket open 3 days has 2x the churn risk of a same-day resolution. A ticket open 7+ days increases churn probability by 340% according to HubSpot's customer success research. This is a revenue retention problem disguised as a support problem.`,
-        impact: `Customer churn risk elevated · NPS declining · ${oldTickets.length} customers waiting too long · renewal conversations starting from deficit`,
+        severity: oldTickets.length > openTix.length * 0.4 ? 'critical' : 'warning',
+        title: `${oldTickets.length.toLocaleString()} open tickets older than 3 days — SLA at risk`,
+        description: `${Math.round(oldTickets.length/Math.max(openTix.length,1)*100)}% of your ${openTix.length.toLocaleString()} open tickets exceed 3 days with no resolution. HubSpot State of Service data shows 67% of customers expect resolution within 3 hours. Every day past that threshold increases churn probability significantly.`,
+        detail: `Benchmark: healthy Service Hub portals resolve 80%+ of tickets within 3 business days. Your current resolution lag suggests either staffing gaps, missing SLA rules, or unassigned ticket routing issues.`,
+        impact: `${oldTickets.length.toLocaleString()} customers waiting past SLA · renewal conversations starting from deficit`,
         dimension: 'Service',
         guide: [
-          'Set ticket SLA rules: Service Hub → Settings → SLA → define response and resolution targets by priority tier',
-          'Escalation workflow: Ticket open > 24 hours with no reply → notify manager + reassign to available rep',
-          'Create priority tiers: Critical (2hr SLA), High (4hr), Normal (24hr), Low (72hr) — not all tickets are equal',
-          'FixOps builds the full ticket SLA system with escalation workflows, manager dashboards, and customer health scoring'
-        ],
-        dimension: 'Service'
+          'Set up SLA rules: Service Hub → Settings → SLA → configure response and resolution targets by priority',
+          'Create escalation workflows: tickets over 48 hours without update → notify manager + reassign',
+          'Build a daily "ticket age" dashboard — sort by oldest open first, review in morning standup',
+          'FixOps builds ticket SLA automation including priority routing, escalation, and manager alerts'
+        ]
       });
     }
-  }
 
+    // ── Issue 2: 7-day breach ────────────────────────────────────────────
+    if (over7Tix.length > 0) {
+      const over7Pct = Math.round(over7Tix.length / Math.max(openTix.length,1) * 100);
+      serviceScore -= Math.min(20, over7Tix.length);
+      issues.push({
+        severity: over7Pct > 20 ? 'critical' : 'warning',
+        title: `${over7Tix.length.toLocaleString()} tickets open 7+ days — serious churn risk`,
+        description: `${over7Tix.length.toLocaleString()} open tickets (${over7Pct}% of your open queue) have been waiting over 7 days. At this stage, customers have likely contacted you multiple times, may have escalated externally, or have already decided not to renew.`,
+        detail: `Research shows that ticket resolution after 7 days correlates directly with churn — customers who wait longer than a week are 4× more likely to not renew their contract.`,
+        impact: `${over7Tix.length.toLocaleString()} tickets in severe breach · estimated churn acceleration`,
+        dimension: 'Service',
+        guide: [
+          'Pull all 7-day+ tickets immediately — assign directly to senior support or escalation tier',
+          'Send a personal outreach email to each customer acknowledging the delay',
+          'Build a "rescue workflow": ticket age > 7 days → assign to senior rep + notify CS manager + set high priority',
+          'FixOps can build the full rescue workflow and SLA automation stack in one engagement'
+        ]
+      });
+    }
+
+    // ── Issue 3: Unassigned open tickets ────────────────────────────────
+    if (unassigned.length > 0) {
+      const unassignedPct = Math.round(unassigned.length / Math.max(openTix.length,1) * 100);
+      serviceScore -= Math.min(25, unassigned.length * 2);
+      issues.push({
+        severity: unassigned.length > 5 || unassignedPct > 15 ? 'critical' : 'warning',
+        title: `${unassigned.length} unassigned open tickets — nobody is responsible`,
+        description: `${unassigned.length} open ticket${unassigned.length!==1?'s':''} have no assigned owner. Unassigned tickets don't appear in anyone's queue, never get followed up on, and are invisible to rep dashboards. These customers are effectively being ignored.`,
+        detail: `Unassigned tickets are one of the most reliable predictors of churn — if no one owns the problem, no one solves it. Even 1 unassigned critical ticket can result in a lost account.`,
+        impact: `${unassigned.length} customer${unassigned.length!==1?'s':''} with no assigned rep · invisible to all rep dashboards`,
+        dimension: 'Service',
+        guide: [
+          'Bulk-assign unassigned tickets: Service Hub → Tickets → filter by No Owner → assign to queue or rep',
+          'Create a workflow: Ticket created with no owner → round-robin assign to available support reps',
+          'Set tickets to require an owner on creation in Settings → Tickets → Required Properties',
+          'FixOps builds automated ticket routing including round-robin, availability-based, and skill-based assignment'
+        ]
+      });
+    }
+
+    // ── Issue 4: High priority tickets aging ────────────────────────────
+    if (highPriOpen.length > 0) {
+      const highPriOld = highPriOpen.filter(t => (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 1);
+      if (highPriOld.length > 0) {
+        serviceScore -= Math.min(20, highPriOld.length * 3);
+        issues.push({
+          severity: 'critical',
+          title: `${highPriOld.length} HIGH PRIORITY ticket${highPriOld.length!==1?'s':''} open more than 24 hours`,
+          description: `${highPriOld.length} high-priority ticket${highPriOld.length!==1?'s are':' is'} more than 24 hours old with no resolution. High priority tickets should be resolved same-day — these represent your most at-risk customers.`,
+          detail: `High priority tickets that age past 24 hours signal broken escalation paths. The issue was flagged as urgent but nothing happened urgently. That disconnect destroys customer trust.`,
+          impact: `${highPriOld.length} critical account${highPriOld.length!==1?'s':''} aging past SLA · highest churn probability`,
+          dimension: 'Service',
+          guide: [
+            'Immediate action: pull these tickets now and have a manager contact each customer personally',
+            'Build a high-priority escalation workflow: High priority + age > 4 hours → Slack alert + auto-assign to senior rep',
+            'Create a "Hot Tickets" view sorted by priority + age for daily CS standup',
+            'FixOps builds the full high-priority escalation system with Slack integration'
+          ]
+        });
+      }
+    }
+
+    // ── Issue 5: Rep load imbalance ──────────────────────────────────────
+    if (overloadedReps > 0 && repLoads.length > 1) {
+      serviceScore -= Math.min(10, overloadedReps * 3);
+      issues.push({
+        severity: 'warning',
+        title: `Uneven ticket distribution — ${overloadedReps} rep${overloadedReps!==1?'s':''} carrying 2.5× average load`,
+        description: `Ticket distribution is imbalanced across your service team. ${overloadedReps} rep${overloadedReps!==1?'s are':' is'} handling significantly more than the team average of ${avgLoad} open tickets. Overloaded reps produce slower responses, lower quality, and higher burnout risk.`,
+        detail: `The top-loaded rep has ${maxLoad} open tickets vs team average of ${avgLoad}. Without workload balancing, SLA breaches happen on the overloaded rep's tickets first — and customers don't know or care that it's a capacity problem.`,
+        impact: `Uneven load → SLA misses on overloaded reps · burnout risk · inconsistent customer experience`,
+        dimension: 'Service',
+        guide: [
+          'Set up round-robin or capacity-based ticket assignment in Service Hub → Settings → Routing',
+          'Create a team workload report: open tickets per rep, average age per rep, priority breakdown per rep',
+          'Add capacity limits: when a rep exceeds X tickets, route new tickets to others',
+          'FixOps builds load-balancing workflows with real-time capacity tracking and manager dashboards'
+        ]
+      });
+    }
+
+    // ── Issue 6: Uncategorized tickets ──────────────────────────────────
+    if (uncatPct > 40 && tickets.length > 20) {
+      serviceScore -= 8;
+      issues.push({
+        severity: 'info',
+        title: `${uncatPct}% of tickets have no category — reporting is blind`,
+        description: `${uncategorized.toLocaleString()} of your ${tickets.length.toLocaleString()} tickets have no category assigned. Without categories, you cannot identify your most common support issues, cannot automate routing by type, and cannot measure improvement over time.`,
+        detail: `Top 3 categories found in your data: ${topCategories.map(([cat,n]) => cat+' ('+n+')').join(', ')}. Standardizing categories enables product-level issue tracking and proactive churn prevention.`,
+        impact: `${uncatPct}% uncategorized · no routing automation possible · product feedback loop broken`,
+        dimension: 'Service',
+        guide: [
+          'Define 6-10 standard ticket categories that match your most common support types',
+          'Make category a required field on ticket creation: Settings → Tickets → Required Properties',
+          'Bulk-update existing tickets: filter by No Category → export → update → reimport',
+          'Build workflows that auto-route tickets by category to specialized reps or queues'
+        ]
+      });
+    }
+
+    // ── Issue 7: No SLA rules if portal is service-heavy ────────────────
+    // Detect if the portal has no SLA configured but has significant ticket volume
+    const avgTicketAgeDays = openTix.length > 0
+      ? openTix.reduce((s,t) => s + (now - new Date(t.properties?.createdate||0).getTime()) / DAY, 0) / openTix.length
+      : 0;
+
+    if (avgTicketAgeDays > 5 && openTix.length > 10) {
+      serviceScore -= 10;
+      issues.push({
+        severity: 'warning',
+        title: `Average open ticket age is ${Math.round(avgTicketAgeDays)} days — no SLA enforcement detected`,
+        description: `Your open tickets have been sitting an average of ${Math.round(avgTicketAgeDays)} days without resolution. This pattern suggests SLA rules are either not configured or not being enforced. Without SLA enforcement, there is no automatic escalation and no accountability.`,
+        detail: `Industry benchmark: SaaS companies at $1–10M ARR typically target 4-hour first response and 24-hour resolution for standard tickets. Service-heavy portals without SLA automation see 40% higher churn on accounts with aging tickets.`,
+        impact: `${Math.round(avgTicketAgeDays)}-day avg age · churn correlated with resolution time · team flying blind`,
+        dimension: 'Service',
+        guide: [
+          'Set up SLA policies: Service Hub → Settings → SLA → create policies for each priority level',
+          'Configure SLA breach notifications: when SLA is missed → notify rep + manager automatically',
+          'Add SLA status to ticket views so reps can see at-risk tickets at a glance',
+          'FixOps builds the full SLA configuration including policies, escalations, and management reporting'
+        ]
+      });
+    }
+
+    // Store service intel for reporting views
+    meta.serviceIntel = {
+      openTickets: openTix.length,
+      closedTickets: closedTix.length,
+      resolutionRate,
+      oldTickets: oldTickets.length,
+      over7Days: over7Tix.length,
+      unassigned: unassigned.length,
+      highPriorityOpen: highPriOpen.length,
+      avgAgeDays: Math.round(avgTicketAgeDays * 10) / 10,
+      topCategories,
+      repCount: repLoads.length,
+      avgLoad,
+      maxLoad,
+      overloadedReps,
+      noActivityTickets: noRecentUpd.length,
+    };
+  }
 
   // ── SUBSCRIPTION HEALTH ────────────────────────────────────────
   const mrrTotal = subscriptions.length > 0
@@ -7232,7 +7422,7 @@ async function runFullAudit(token, auditId, meta) {
     // Filter by email state - HubSpot returns PUBLISHED, SENT, SCHEDULED, DRAFT, ARCHIVED
     const sentEmails = marketingEmails.filter(e => {
       const state = String(e.state || e.currentState || e.hs_email_status || '').toUpperCase();
-      return ['PUBLISHED','SENT'].includes(state);
+      return ['PUBLISHED','SENT','AUTOMATED','AB_MASTER','LOSER_VERSION','RESOLVED_SCHEDULED'].includes(state);
     });
 
     if (sentEmails.length > 0) {
@@ -9139,7 +9329,7 @@ async function runFullAudit(token, auditId, meta) {
         }).length,
         cancelledSubscriptions: subscriptions.filter(sub=>
           ['cancelled','canceled'].includes(String(sub.properties?.hs_status||'').toLowerCase())).length,
-
+        
         // ── Quote intelligence ────────────────────────────────────
         openQuotes: quotes.filter(q=>
           ['draft','approval_not_needed','pending_approval'].includes(
@@ -9266,19 +9456,19 @@ async function runFullAudit(token, auditId, meta) {
         emailHealthSummary: (() => {
           const sent = marketingEmails.filter(e => {
             const state = String(e.state || e.currentState || '').toUpperCase();
-            return ['PUBLISHED','SENT'].includes(state);
+            return ['PUBLISHED','SENT','AUTOMATED','AB_MASTER','LOSER_VERSION','RESOLVED_SCHEDULED'].includes(state);
           });
           if (!sent.length) return null;
           let tSent=0,tOpen=0,tClick=0,tBounce=0,tUnsub=0,tSpam=0;
           sent.forEach(e => {
             const s = e.stats || e.counters || {};
-            const n = s.sent || s.delivered || 0;
+            const n = s.sent || s.delivered || s.numSent || 0;
             tSent   += n;
-            tOpen   += s.open || s.opened || s.opens || 0;
-            tClick  += s.click || s.clicks || s.uniqueClicks || 0;
-            tBounce += s.bounce || s.bounced || s.hardBounced || 0;
-            tUnsub  += s.unsubscribed || s.unsubscribe || s.optOut || 0;
-            tSpam   += s.spamreport || s.spam || s.spamReport || 0;
+            tOpen   += s.open || s.opened || s.opens || s.numOpened || s.numUniqueOpens || 0;
+            tClick  += s.click || s.clicks || s.uniqueClicks || s.numClicked || s.numUniqueClicks || 0;
+            tBounce += s.bounce || s.bounced || s.hardBounced || s.softBounced || s.numBounced || s.numHardBounced || 0;
+            tUnsub  += s.unsubscribed || s.unsubscribe || s.optOut || s.numUnsubscribed || 0;
+            tSpam   += s.spamreport || s.spam || s.spamReport || s.numSpam || s.numSpamReports || 0;
           });
           return {
             totalSent:    tSent,
@@ -9297,8 +9487,8 @@ async function runFullAudit(token, auditId, meta) {
         avgClickRate:      null,
         avgBounceRate:     null,
         avgUnsubRate:      null,
-        highBounceEmails:  marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||0; const b=s.bounce||s.bounced||s.hardBounced||0; return n>100&&b/n>0.05; }).length,
-        lowOpenEmails:     marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||0; const o=s.open||s.opened||s.opens||0; return n>500&&o/n*100<15; }).length,
+        highBounceEmails:  marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||s.numSent||s.numDelivered||0; const b=s.bounce||s.bounced||s.hardBounced||s.softBounced||s.numBounced||s.numHardBounced||0; return n>100&&b/n>0.05; }).length,
+        lowOpenEmails:     marketingEmails.filter(e => { const s=e.stats||e.counters||{}; const n=s.sent||s.delivered||s.numSent||s.numDelivered||0; const o=s.open||s.opened||s.opens||s.numOpened||s.numUniqueOpens||0; return n>500&&o/n*100<15; }).length,
         staleDraftEmails:  marketingEmails.filter(e => { const isDraft=['DRAFT'].includes(String(e.state||e.currentState||'').toUpperCase()); const u=e.updatedAt||e.updated; return isDraft&&u&&(now-new Date(u).getTime())/DAY>90; }).length,
 
         // ── Sequences & Campaigns ─────────────────────────────────────────
@@ -9349,27 +9539,29 @@ async function runFullAudit(token, auditId, meta) {
         // time_to_close being set is the most reliable closed signal.
         openTickets: tickets.filter(t => {
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
-          const closedStages = ['4','closed','resolved','closedwon','closed_won'];
-          return !hasClosed && !closedStages.includes(stage);
+          // Only use time_to_close as definitive closed signal
+          // hs_time_in_stage_4 can be set for tickets that passed through stage 4 but moved back
+          const isClosed = !!t.properties?.time_to_close;
+          const closedStages = ['4','closed','resolved','closedwon','closed_won','complete','completed'];
+          return !isClosed && !closedStages.includes(stage);
         }).length,
         ticketsOver3Days: tickets.filter(t => {
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const hasClosed = !!t.properties?.time_to_close;
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 3;
         }).length,
         ticketsOver7Days: tickets.filter(t => {
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const hasClosed = !!t.properties?.time_to_close;
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 7;
         }).length,
         ticketsUnassigned: tickets.filter(t => {
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const hasClosed = !!t.properties?.time_to_close;
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const isOpen = !hasClosed && !closedStages.includes(stage);
           return isOpen && !t.properties?.hubspot_owner_id;
@@ -9378,7 +9570,7 @@ async function runFullAudit(token, auditId, meta) {
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const open = tickets.filter(t => {
             const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-            const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+            const hasClosed = !!t.properties?.time_to_close;
             return !hasClosed && !closedStages.includes(stage);
           });
           if (!open.length) return 0;
@@ -9387,7 +9579,7 @@ async function runFullAudit(token, auditId, meta) {
         })(),
         ticketHighPriorityOpen: tickets.filter(t => {
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
-          const hasClosed = t.properties?.time_to_close || t.properties?.hs_time_in_stage_4;
+          const hasClosed = !!t.properties?.time_to_close;
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
           const p = String(t.properties?.hs_ticket_priority||'').toLowerCase();
           return !hasClosed && !closedStages.includes(stage) && p === 'high';
