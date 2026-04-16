@@ -324,19 +324,39 @@ setInterval(() => {
 const getPlanConfig = (plan) => {
   const p = plan || 'free';
   const isFree = p === 'free';
+  // Plan tiers:
+  // free         = Free (overview only, 1k contacts)
+  // deep/diagnostic = Diagnostic $299 one-time (full scan, 15 views)
+  // pro-audit/full  = Full Audit $499 one-time (all 48 views, AI)
+  // pulse/monitor   = Monitor $199/mo (weekly rescans, 15 views)
+  // pro/sentinel    = Sentinel $399/mo (daily, all 48 views, AI, white-label)
+  // command         = Command (agency/enterprise)
+  const isMonitor  = ['pulse','monitor'].includes(p);
+  const isSentinel = ['pro','sentinel'].includes(p);
+  const isCommand  = p === 'command';
+  const isFullAuditTier = ['pro-audit','full','full-audit'].includes(p);
+  const isDiagnostic    = ['deep','deep-audit','diagnostic'].includes(p);
   return {
     plan: p,
     isFree,
     isPaid: !isFree,
+    isDiagnostic,
+    isFullAuditTier,
+    isMonitor,
+    isSentinel,
+    isCommand,
+    hasAI:      isFullAuditTier || isSentinel || isCommand,
+    hasAllViews: isFullAuditTier || isSentinel || isCommand,
+    hasMonitoring: isMonitor || isSentinel || isCommand,
     contactLimit:  isFree ? 1000   : 999999,
     dealLimit:     isFree ? 1000   : 999999,
     ticketLimit:   isFree ? 500    : 999999,
     companyLimit:  isFree ? 500    : 999999,
     smallLimit:    isFree ? 100    : 999999,
-    storageDays:   p === 'pro-audit' ? 365 : (!isFree ? 90 : 7),
-    runExtended:   ['pro-audit','pro','command'].includes(p),
-    isOneTime:     ['deep','deep-audit','pro-audit'].includes(p),
-    callLength:    p === 'pro-audit' ? '60' : '30',
+    storageDays:   (isFullAuditTier || isDiagnostic) ? 365 : (!isFree ? 90 : 7),
+    runExtended:   isFullAuditTier || isSentinel || isCommand,
+    isOneTime:     isDiagnostic || isFullAuditTier,
+    callLength:    isFullAuditTier ? '60' : '30',
   };
 };
 
@@ -664,11 +684,11 @@ const notifyMatthew = async (result, auditId, plan) => {
     await resend.emails.send({
       from: 'FixOps Alerts <reports@fixops.io>',
       to: FIXOPS_NOTIFY_EMAIL,
-      subject: `📞 ACTION REQUIRED: Schedule ${callLen} call — ${pi.company} paid ${plan === 'pro-audit' ? '$699' : '$399'}`,
+      subject: `📞 ACTION REQUIRED: Schedule ${callLen} call — ${pi.company} paid ${plan === 'pro-audit' ? '$499' : '$299'}`,
       html: `<h2>Paid audit complete — schedule their strategy call now</h2>
         <p><strong>Company:</strong> ${pi.company}</p>
         <p><strong>Email:</strong> ${pi.email}</p>
-        <p><strong>Plan:</strong> ${plan} (${plan === 'pro-audit' ? '$699 — 60-min call' : '$399 — 30-min call'})</p>
+        <p><strong>Plan:</strong> ${plan} (${plan === 'pro-audit' ? '$499 — 60-min call' : '$299 — 30-min call'})</p>
         <p><strong>Score:</strong> ${s.overallScore}/100 · ${s.criticalCount} critical issues</p>
         <p>Reply to <a href="mailto:${pi.email}">${pi.email}</a> to schedule their ${callLen} strategy call and send their written action plan.</p>
         <p><a href="${FRONTEND_URL}/results.html?id=${auditId}">View their full audit results</a></p>`
@@ -3651,7 +3671,7 @@ app.post('/webhook', async (req, res) => {
   <tr><td style="background:#0d0b1e;padding:36px;">
     <div style="font-size:24px;font-weight:800;color:#fff;margin-bottom:8px;letter-spacing:-0.5px;">Your audit is ready to start.</div>
     <div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.7;margin-bottom:28px;">
-      Thanks for your purchase. Click the button below to connect your HubSpot portal and start your <strong style="color:rgba(255,255,255,.85);">${planKey === 'pro-audit' ? 'FixOps Full Audit ($699)' : 'FixOps Diagnostic ($399)'}</strong>. The full scan runs in under 15 minutes.
+      Thanks for your purchase. Click the button below to connect your HubSpot portal and start your <strong style="color:rgba(255,255,255,.85);">${planKey === 'pro-audit' ? 'FixOps Full Audit ($499)' : 'FixOps Diagnostic ($299)'}</strong>. The full scan runs in under 15 minutes.
     </div>
 
     <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
@@ -3759,7 +3779,7 @@ const buildAuthUrl = (req, res, params) => {
 
     // ── Security: paid plans must have a valid DB token ───────────────────────
     // Prevents URL manipulation: e.g. ?plan=deep without payment
-    const PAID_PLANS = ['deep','deep-audit','pro-audit'];
+    const PAID_PLANS = ['deep','deep-audit','diagnostic','pro-audit','full','full-audit','pulse','monitor','pro','sentinel','command'];
     if (PAID_PLANS.includes(plan) && !auditToken) {
       console.warn(`[Security] Blocked unauthenticated paid plan request: plan=${plan} email=${email}`);
       return res.status(403).json({ error: 'A valid payment token is required to start a paid audit. Please use the link from your confirmation email.' });
@@ -4392,6 +4412,32 @@ ${waste > 500 ? `<div class="waste-callout">
   </div>
 </div>` : ''}
 
+<!-- Executive Summary (one-page CEO view) -->
+<div style="background:#f8f9fc;border:2px solid #e8ecf3;border-radius:12px;padding:28px 32px;margin-bottom:32px;page-break-inside:avoid;">
+  <div style="font-size:9pt;font-weight:700;color:#6b7280;letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;">EXECUTIVE SUMMARY</div>
+  <div style="font-size:18pt;font-weight:900;color:#1a1a2e;line-height:1.3;margin-bottom:16px;">
+    ${company} scored <span style="color:${gradeColor};">${ovr}/100</span> — ${grade}
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+    <div>
+      <div style="font-size:9pt;color:#6b7280;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">What We Found</div>
+      <div style="font-size:11pt;color:#374151;line-height:1.7;">
+        ${criticals.length} critical issue${criticals.length!==1?'s':''} and ${warnings.length} warning${warnings.length!==1?'s':''} across ${Object.keys(scores).filter(k=>scores[k]!==null).length} audit dimensions.
+        ${waste > 0 ? 'Estimated ' + fmtMoney(waste) + '/mo in confirmed waste and recoverable revenue.' : ''}
+      </div>
+    </div>
+    <div>
+      <div style="font-size:9pt;color:#6b7280;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">First Action</div>
+      <div style="font-size:11pt;color:#374151;line-height:1.7;">
+        ${criticals.length > 0 ? criticals[0].title : warnings.length > 0 ? warnings[0].title : 'Review observations below'}
+      </div>
+    </div>
+  </div>
+  <div style="background:#fff;border:1px solid #e8ecf3;border-radius:8px;padding:14px 16px;font-size:10pt;color:#4b5563;line-height:1.6;">
+    <strong>What this means:</strong> A score of ${ovr}/100 ${ovr >= 80 ? 'indicates a well-configured portal with minor gaps to address.' : ovr >= 60 ? 'indicates a functional portal with meaningful gaps that are affecting team performance and data quality.' : 'indicates significant configuration and data quality issues that are likely costing revenue and creating daily friction for your team.'}
+  </div>
+</div>
+
 <!-- Portal snapshot -->
 <h2>Portal Snapshot</h2>
 <div class="stats-grid">
@@ -4430,10 +4476,102 @@ ${waste > 500 ? `<div class="waste-callout">
 <h2>Hub Health Breakdown</h2>
 <div class="dims-list">${dimRows}</div>
 
+<!-- Fix Priority Matrix -->
+<div style="page-break-inside:avoid;margin-bottom:32px;">
+  <h2>Fix Priority Matrix</h2>
+  <div style="font-size:10pt;color:#6b7280;margin-bottom:16px;line-height:1.6;">Issues plotted by impact and effort. Start top-left — high impact, low effort.</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+
+    <div style="background:#fef2f2;border:2px solid #fecaca;border-radius:10px;padding:16px;">
+      <div style="font-size:8pt;font-weight:700;color:#dc2626;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">🔴 DO THIS WEEK — High Impact, Low Effort</div>
+      ${criticals.filter(i=>!i.guide||i.guide.length<=4).slice(0,3).map(i=>'<div style="font-size:10pt;color:#1a1a2e;padding:6px 0;border-bottom:1px solid #fecaca;">→ '+i.title+'</div>').join('')||'<div style="font-size:10pt;color:#6b7280;">No critical quick wins detected</div>'}
+    </div>
+
+    <div style="background:#fffbeb;border:2px solid #fde68a;border-radius:10px;padding:16px;">
+      <div style="font-size:8pt;font-weight:700;color:#d97706;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">🟡 THIS MONTH — High Impact, Higher Effort</div>
+      ${warnings.slice(0,3).map(i=>'<div style="font-size:10pt;color:#1a1a2e;padding:6px 0;border-bottom:1px solid #fde68a;">→ '+i.title+'</div>').join('')||'<div style="font-size:10pt;color:#6b7280;">No high-effort warnings detected</div>'}
+    </div>
+
+    <div style="background:#eff6ff;border:2px solid #bfdbfe;border-radius:10px;padding:16px;">
+      <div style="font-size:8pt;font-weight:700;color:#2563eb;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">🔵 NEXT QUARTER — Lower Impact, Quick Fixes</div>
+      ${infoIssues.slice(0,3).map(i=>'<div style="font-size:10pt;color:#1a1a2e;padding:6px 0;border-bottom:1px solid #bfdbfe;">→ '+i.title+'</div>').join('')||'<div style="font-size:10pt;color:#6b7280;">No quick observation fixes</div>'}
+    </div>
+
+    <div style="background:#f0fdf4;border:2px solid #bbf7d0;border-radius:10px;padding:16px;">
+      <div style="font-size:8pt;font-weight:700;color:#16a34a;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:10px;">✅ ONGOING — Process & Monitoring</div>
+      <div style="font-size:10pt;color:#1a1a2e;padding:6px 0;border-bottom:1px solid #bbf7d0;">→ Run monthly FixOps rescans to catch new issues</div>
+      <div style="font-size:10pt;color:#1a1a2e;padding:6px 0;border-bottom:1px solid #bbf7d0;">→ Review ghost seats and inactive workflows quarterly</div>
+      <div style="font-size:10pt;color:#1a1a2e;padding:6px 0;">→ Score target: 80+ within 90 days</div>
+    </div>
+
+  </div>
+</div>
+
 <!-- Issues -->
 <div class="page-break"></div>
 <h2>All Findings (${sorted.length} Issues)</h2>
 ${critSection}${warnSection}${infoSection}
+
+<!-- FixOps Services Page -->
+<div class="page-break"></div>
+<div style="background:linear-gradient(135deg,#0f0c29,#302b63);color:#fff;padding:36px 40px;border-radius:12px;margin-bottom:32px;">
+  <div style="font-size:9pt;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:rgba(255,255,255,.5);margin-bottom:12px;">FIXOPS SERVICES</div>
+  <div style="font-size:20pt;font-weight:900;margin-bottom:8px;letter-spacing:-.3px;">We fix what this report found.</div>
+  <div style="font-size:11pt;color:rgba(255,255,255,.6);line-height:1.7;max-width:580px;">Every issue in this report can be fixed by our team at a flat rate. No hourly billing, no retainers, no open-ended engagements. You approve the scope before we start.</div>
+</div>
+
+<table style="width:100%;border-collapse:collapse;margin-bottom:32px;font-size:10pt;">
+  <thead>
+    <tr style="background:#f8f9fc;border-bottom:2px solid #e8ecf3;">
+      <th style="text-align:left;padding:10px 14px;color:#374151;font-weight:700;">Engagement</th>
+      <th style="text-align:left;padding:10px 14px;color:#374151;font-weight:700;">What We Do</th>
+      <th style="text-align:right;padding:10px 14px;color:#374151;font-weight:700;">Typical Range</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr style="border-bottom:1px solid #f3f4f6;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">CRM Data Cleanup</td>
+      <td style="padding:10px 14px;color:#6b7280;">Deduplicate contacts, fix lifecycle stages, repair associations, standardize properties</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$800–$2,500</td>
+    </tr>
+    <tr style="border-bottom:1px solid #f3f4f6;background:#fafafa;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">Workflow Rebuild</td>
+      <td style="padding:10px 14px;color:#6b7280;">Fix erroring workflows, consolidate dead automation, build new workflows with goals</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$500–$1,500</td>
+    </tr>
+    <tr style="border-bottom:1px solid #f3f4f6;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">Pipeline Configuration</td>
+      <td style="padding:10px 14px;color:#6b7280;">Multi-pipeline setup, required fields, close date enforcement, deal scoring</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$600–$1,800</td>
+    </tr>
+    <tr style="border-bottom:1px solid #f3f4f6;background:#fafafa;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">Email Deliverability</td>
+      <td style="padding:10px 14px;color:#6b7280;">SPF/DKIM/DMARC setup, list cleaning, bounce removal, subscription health</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$400–$1,000</td>
+    </tr>
+    <tr style="border-bottom:1px solid #f3f4f6;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">Service Hub SLA Setup</td>
+      <td style="padding:10px 14px;color:#6b7280;">SLA rules, ticket routing, escalation workflows, rep load balancing, dashboards</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$1,000–$3,000</td>
+    </tr>
+    <tr style="background:#fafafa;">
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:600;">Full Portal Fix</td>
+      <td style="padding:10px 14px;color:#6b7280;">Everything above — scoped from this report, prioritized, executed in 30-day sprint</td>
+      <td style="padding:10px 14px;color:#1a1a2e;font-weight:700;text-align:right;">$2,500–$8,000</td>
+    </tr>
+  </tbody>
+</table>
+
+<div style="background:#f8f9fc;border:1px solid #e8ecf3;border-radius:10px;padding:20px 24px;display:flex;justify-content:space-between;align-items:center;gap:20px;">
+  <div>
+    <div style="font-size:13pt;font-weight:800;color:#1a1a2e;margin-bottom:4px;">Book a 30-minute scoping call</div>
+    <div style="font-size:11pt;color:#6b7280;">We review this report with you, scope the work, and send a flat-rate proposal within 24 hours.</div>
+  </div>
+  <div style="text-align:center;flex-shrink:0;">
+    <div style="font-size:11pt;font-weight:700;color:#7c3aed;">calendly.com/matthew-fixops</div>
+    <div style="font-size:9pt;color:#9ca3af;margin-top:2px;">matthew@fixops.io</div>
+  </div>
+</div>
 
 <!-- Footer -->
 <div class="footer">
@@ -4860,7 +4998,7 @@ cron.schedule('0 * * * *', async () => {
     <tr><td style="padding:20px 24px;">
       <div style="font-size:10px;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:#10b981;font-family:monospace;margin-bottom:8px;">⚡ 48-Hour Offer</div>
       <div style="font-size:17px;font-weight:800;color:#fff;margin-bottom:6px;">First month of Sentinel for $199</div>
-      <div style="font-size:12px;color:rgba(255,255,255,.5);line-height:1.6;margin-bottom:16px;">Normally $549/mo. Daily scans, all 38 intelligence views, AI Deal Coach, RevOps AI Coach, billing optimizer. Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies.</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.5);line-height:1.6;margin-bottom:16px;">Normally $399/mo. Daily scans, all 38 intelligence views, AI Deal Coach, RevOps AI Coach, billing optimizer. Code <strong style="color:#10b981;font-family:monospace;">FIRST99</strong> auto-applies.</div>
       <table cellpadding="0" cellspacing="0"><tr>
         <td style="padding-right:10px;"><a href="https://buy.stripe.com/28E4gz2rw1MC7LKeFL8Ra08?prefilled_promo_code=FIRST99" style="display:inline-block;padding:11px 24px;background:linear-gradient(135deg,#10b981,#059669);color:#fff;text-decoration:none;border-radius:8px;font-weight:700;font-size:13px;">Claim $199 First Month →</a></td>
         <td><a href="https://buy.stripe.com/28E5kDfeicrg6HGcxD8Ra06?prefilled_promo_code=TRYMONITOR" style="display:inline-block;padding:11px 20px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);text-decoration:none;border-radius:8px;font-weight:600;font-size:12px;">Monitor — $99 first month</a></td>
@@ -5627,6 +5765,55 @@ async function runFullAudit(token, auditId, meta) {
   const orders           = ordersR.data?.results||[];
   const invoices         = invoicesR.data?.results||[];
   const subscriptions    = subscriptionsR.data?.results||[];
+
+  // ── PRIORITY 5: Security, email auth, integrations ──────────────────────────
+  // These are fast single-request calls — run in parallel
+  const [
+    emailDomainsExtR,
+    securityLogR,
+    integrationSettingsR,
+    teamMembersR,
+    propertiesByGroupR,
+  ] = await Promise.all([
+    // Email domain authentication status (SPF/DKIM/DMARC)
+    safe(() => hs.get('/email/public/v1/configuration/api/v1/public/smtp/tokens'), {data:{objects:[]}}),
+    // Security activity log — recent security events
+    safe(() => hs.get('/account-info/v3/activity-log?limit=50'), {data:{results:[]}}),
+    // Connected integrations
+    safe(() => hs.get('/integrations/v1/limit/daily'), {data:{currentUsage:0,usageLimit:0}}),
+    // Team membership detail
+    safe(() => hs.get('/settings/v3/users/teams?includeMembers=true'), {data:{results:[]}}),
+    // Contact property groups (for property hygiene)
+    safe(() => hs.get('/crm/v3/properties/contacts?archived=false'), {data:{results:[]}}),
+  ]);
+
+  // Sequence enrollment stats
+  const sequenceStatsR = await safe(
+    () => hs.get('/automation/v4/sequences?limit=100&include=stats'),
+    {data:{results:[]}}
+  );
+
+  // Campaign revenue attribution (requires marketing.campaigns.revenue.read)
+  const campaignRevenueR = await safe(
+    () => hs.get('/marketing/v3/campaigns?limit=50&properties=name,startDate,endDate,budget,revenue'),
+    {data:{results:[]}}
+  );
+
+  // User email integration status (who has Gmail/Outlook connected)
+  const userIntegrationsR = await safe(
+    () => hs.get('/settings/v3/users?limit=100&properties=email,firstName,lastName,lastActive'),
+    {data:{results:[]}}
+  );
+
+
+
+  // ── Extract Priority 5 results ───────────────────────────────────────────
+  const securityEvents    = securityLogR.data?.results||[];
+  const campaignRevenue   = campaignRevenueR.data?.results||[];
+  const seqStats          = sequenceStatsR.data?.results||[];
+  const extUsers          = userIntegrationsR.data?.results||[];
+  // Note: allContactProps already extracted from allContactPropsR above
+
 
 
   console.log(`[${auditId}] ✅ Fetch complete:
@@ -7871,6 +8058,274 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+
+  // ── SPF / DKIM / DMARC EMAIL AUTHENTICATION ──────────────────────────────
+  // Check if the portal's sending domain has email authentication configured.
+  // Missing auth = deliverability problems, spoofing risk, spam folder landing.
+  // emailDomains already extracted above
+  const connectedDomains = domainsR?.data?.results || emailDomains || [];
+
+  // Detect if domain auth is configured by checking domains endpoint
+  const sendingDomains = connectedDomains.filter(d =>
+    d.domain && !d.domain.includes('hubspot.com') && !d.domain.includes('.hs-sites.com')
+  );
+
+  if (sendingDomains.length > 0) {
+    const noSpfDomains  = sendingDomains.filter(d => !d.isSpfValid && !d.spfValid);
+    const noDkimDomains = sendingDomains.filter(d => !d.isDkimValid && !d.dkimValid);
+
+    if (noSpfDomains.length > 0 || noDkimDomains.length > 0) {
+      configScore -= 15;
+      const issues_list = [];
+      if (noSpfDomains.length > 0) issues_list.push(`SPF missing on ${noSpfDomains.map(d=>d.domain).slice(0,2).join(', ')}`);
+      if (noDkimDomains.length > 0) issues_list.push(`DKIM missing on ${noDkimDomains.map(d=>d.domain).slice(0,2).join(', ')}`);
+      issues.push({
+        severity: 'critical',
+        title: `Email authentication incomplete — ${issues_list.join(' · ')}`,
+        description: `Email authentication (SPF, DKIM, DMARC) tells receiving mail servers your emails are legitimate. Without it, emails land in spam, get blocked, and your sender reputation degrades over time. This affects every marketing email, every sales sequence, and every notification you send.`,
+        detail: `SPF authorizes HubSpot to send on your domain's behalf. DKIM cryptographically signs each email. DMARC tells receiving servers what to do when either check fails. Missing any of these is an immediate deliverability risk.`,
+        impact: `Email deliverability at risk — campaigns may be landing in spam across your entire list`,
+        dimension: 'Configuration',
+        guide: [
+          'Settings → Website → Domains & URLs → click your domain → check authentication status',
+          'Add the HubSpot SPF record to your DNS: include:_spf.hubspot.com in your TXT record',
+          'Enable DKIM signing in HubSpot: Settings → Marketing → Email → Authentication → Configure',
+          'FixOps configures full email authentication (SPF + DKIM + DMARC) with your DNS provider'
+        ]
+      });
+    }
+  }
+
+  // ── EMAIL INTEGRATION PER USER ────────────────────────────────────────────
+  // How many reps have connected Gmail/Outlook? Without it zero activity auto-logs.
+    // allUsers already declared above
+  const salesReps = allUsers.filter(u => !u.roleIds?.includes('admin'));
+  const usersWithEmailInt = extUsers.filter(u =>
+    u.properties?.email_integration_connected === 'true' ||
+    u.emailIntegrationConnected === true
+  );
+  const repsWithoutEmailInt = Math.max(0, allUsers.length - usersWithEmailInt.length - 1); // -1 for admin
+
+  if (repsWithoutEmailInt > allUsers.length * 0.4 && allUsers.length > 2) {
+    teamScore -= 12;
+    issues.push({
+      severity: repsWithoutEmailInt > allUsers.length * 0.7 ? 'warning' : 'info',
+      title: `${repsWithoutEmailInt} users haven't connected their email — activity logging is manual`,
+      description: `Without Gmail or Outlook connected, reps must manually log every email, call, and meeting. Most don't. That means your CRM timeline is incomplete, rep activity reports are inaccurate, and managers have no real visibility into what's happening.`,
+      detail: `HubSpot's email integration auto-logs sent and received emails, links them to contacts and deals, and populates the contact timeline without any rep action. Without it, you're flying blind on rep activity.`,
+      impact: `Activity reporting incomplete · rep coaching impossible · deal progression invisible`,
+      dimension: 'Sales',
+      guide: [
+        'Each rep: Settings → General → Email → Connect your inbox (Google or Outlook)',
+        'Managers: create a workflow that alerts you when a rep hasn\'t logged any activity in 7 days',
+        'Set email integration as a required step in your HubSpot onboarding checklist',
+        'FixOps audits rep email integration status and sends automated nudges to disconnected reps'
+      ]
+    });
+  }
+
+  // ── SEQUENCE PERFORMANCE ANALYSIS ────────────────────────────────────────
+  // Which sequences are working, which are dead weight
+  const activeSeqs = sequences.filter(s => s.enabled !== false);
+  const seqsWithStats = seqStats.filter(s => s.stats || s.metrics);
+  const lowReplySeqs = seqsWithStats.filter(s => {
+    const stats = s.stats || s.metrics || {};
+    const enrolled = stats.enrolled || stats.totalEnrolled || 0;
+    const replied  = stats.replied  || stats.totalReplied  || 0;
+    return enrolled > 50 && replied / Math.max(enrolled, 1) < 0.03; // < 3% reply rate
+  });
+
+  if (lowReplySeqs.length > 0) {
+    marketingScore -= Math.min(10, lowReplySeqs.length * 2);
+    issues.push({
+      severity: lowReplySeqs.length > 3 ? 'warning' : 'info',
+      title: `${lowReplySeqs.length} sequence${lowReplySeqs.length!==1?'s':''} below 3% reply rate — copy or targeting is broken`,
+      description: `${lowReplySeqs.length} of your active sequences have reply rates under 3% with 50+ enrollments. Industry benchmark is 8-12% for well-targeted sequences. Low reply rates mean your messaging, targeting, or send timing needs a rewrite — continuing to enroll contacts is burning your domain reputation.`,
+      detail: `Low reply rate sequences are often the result of: wrong ICP targeting, generic copy with no personalization, sending too many steps too quickly, or contacting people who aren't in a buying moment. Each matters equally.`,
+      impact: `Contacts being burned through poorly performing sequences · domain reputation at risk`,
+      dimension: 'Marketing',
+      guide: [
+        'Sequences → review each low-performer → check enrollment source (are you targeting the right people?)',
+        'A/B test subject lines — a 2-word subject often outperforms a sentence',
+        'Check step timing — sequences with < 3 days between steps have 40% lower reply rates',
+        'FixOps rewrites underperforming sequences with ICP-specific messaging and step timing optimization'
+      ]
+    });
+  }
+
+  // ── WORKFLOW COLLISION DETECTION ─────────────────────────────────────────
+  // Find workflows that enroll from the same trigger AND set the same property
+  // These create race conditions — last-write wins and the winner is unpredictable
+  const activeWfList = workflows.filter(w => w.enabled);
+  const collisions = [];
+
+  if (activeWfList.length > 5) {
+    const triggerMap = {}; // trigger_key → [workflow names]
+    activeWfList.forEach(wf => {
+      const triggers = wf.triggers || [];
+      triggers.forEach(t => {
+        const key = JSON.stringify({ type: t.type, filterBranch: t.filterBranch?.cloneGroup });
+        if (!triggerMap[key]) triggerMap[key] = [];
+        triggerMap[key].push(wf.name);
+      });
+    });
+
+    const sharedTriggers = Object.entries(triggerMap).filter(([,names]) => names.length > 1);
+    if (sharedTriggers.length > 0) {
+      const maxCollide = Math.max(...sharedTriggers.map(([,n]) => n.length));
+      configScore -= Math.min(12, sharedTriggers.length * 3);
+      issues.push({
+        severity: sharedTriggers.length > 3 ? 'warning' : 'info',
+        title: `${sharedTriggers.length} workflow${sharedTriggers.length!==1?'s share':' shares'} enrollment triggers — race condition risk`,
+        description: `${sharedTriggers.length} pairs of active workflows enroll from the same trigger condition. When two workflows run simultaneously on the same contact or deal, the order they execute is not guaranteed. If they both write to the same property, the result is unpredictable — you can't know which value will stick.`,
+        detail: `Workflow collisions are one of the hardest CRM bugs to diagnose because they're intermittent. Records look correct most of the time but fail in specific timing windows. They compound as your workflow count grows.`,
+        impact: `Unpredictable data writes · intermittent automation failures · hard-to-reproduce bugs`,
+        dimension: 'Automation',
+        guide: [
+          'Automation → map all workflows sharing triggers → identify which set the same properties',
+          'Consolidate colliding workflows into a single workflow with branching logic instead',
+          'Add delay steps to force execution order when sequential processing is needed',
+          'FixOps maps your full workflow dependency tree and resolves collision conflicts'
+        ]
+      });
+    }
+  }
+
+  // ── DARK FUNNEL DETECTION ─────────────────────────────────────────────────
+  // Contacts created in last 90 days with no source attribution
+  const recentContacts = contacts.filter(c => {
+    const created = new Date(c.properties?.createdate || 0).getTime();
+    return (now - created) / DAY < 90;
+  });
+  const noSourceContacts = recentContacts.filter(c =>
+    !c.properties?.hs_analytics_source &&
+    !c.properties?.hs_analytics_source_data_1
+  );
+  const darkFunnelPct = recentContacts.length > 0
+    ? Math.round(noSourceContacts.length / recentContacts.length * 100)
+    : 0;
+
+  if (darkFunnelPct > 20 && recentContacts.length > 20) {
+    marketingScore -= Math.min(12, Math.round(darkFunnelPct / 5));
+    issues.push({
+      severity: darkFunnelPct > 50 ? 'critical' : 'warning',
+      title: `${darkFunnelPct}% of new contacts have no source — your funnel is partly invisible`,
+      description: `${noSourceContacts.length} of your ${recentContacts.length} contacts created in the last 90 days have no analytics source recorded. You're acquiring leads you can't trace back to a campaign, channel, or ad. Every budget decision you make about marketing spend is based on incomplete data.`,
+      detail: `Missing source attribution usually means: HubSpot tracking code not on all pages, direct traffic not being captured, offline form submissions not tagged, or manual contact creation without source property. Each has a different fix.`,
+      impact: `Marketing ROI unmeasurable · budget allocation decisions based on incomplete data`,
+      dimension: 'Marketing',
+      guide: [
+        'Settings → Tracking Code → verify the HubSpot tracking code is installed on all site pages',
+        'For offline sources: create a contact property "Original Source Override" and populate it on import',
+        'For manual contacts: require Original Source when creating contacts in Settings → Properties',
+        'FixOps audits every source of contact creation and ensures attribution is captured for each'
+      ]
+    });
+  }
+
+  // ── REP ACCOUNTABILITY GAPS ───────────────────────────────────────────────
+  // Open deals with past close dates that have zero tasks scheduled
+  const pastDueNoTask = openDeals.filter(d => {
+    const cd = d.properties?.closedate;
+    const isPastDue = cd && new Date(cd).getTime() < now;
+    const hasNoTask = !d.properties?.num_notes || parseInt(d.properties?.num_notes || 0) === 0;
+    return isPastDue && hasNoTask;
+  });
+
+  if (pastDueNoTask.length > 0) {
+    pipelineScore -= Math.min(15, pastDueNoTask.length * 2);
+    issues.push({
+      severity: pastDueNoTask.length > 5 ? 'critical' : 'warning',
+      title: `${pastDueNoTask.length} overdue deal${pastDueNoTask.length!==1?'s':''} with zero tasks — nobody is following up`,
+      description: `${pastDueNoTask.length} open deals have passed their close date with no tasks scheduled and no recent notes. These aren't just stalled — they're actively being ignored. In competitive sales, deals with no follow-up action within 72 hours of going overdue are 60% less likely to close.`,
+      detail: `This pattern indicates either: reps aren't using tasks for deal management, close dates are set as placeholder dates and not maintained, or deals have been mentally written off but not marked lost. All three are pipeline accuracy problems.`,
+      impact: `${pastDueNoTask.length} deals going cold · forecast inflation · coaching opportunity missed`,
+      dimension: 'Pipeline',
+      guide: [
+        'Pull these deals: Deals → filter "Close date is before today" + "Number of notes = 0"',
+        'For each: either create a follow-up task, update the close date, or mark as Closed Lost with reason',
+        'Create a workflow: deal close date passes → no task exists → notify owner + create a "Follow up" task automatically',
+        'FixOps builds the overdue deal automation and sets up weekly pipeline accuracy reports for managers'
+      ]
+    });
+  }
+
+  // ── CONTACT TIER INFLATION ────────────────────────────────────────────────
+  // Contacts in billable tier with no engagement in 12+ months
+  const twelveMonthsAgo = now - (365 * DAY);
+  const ghostContacts = contacts.filter(c => {
+    const lastEngage = c.properties?.notes_last_updated ||
+                       c.properties?.hs_last_sales_activity_timestamp;
+    const hasEmail = !!c.properties?.email;
+    const created = new Date(c.properties?.createdate || 0).getTime();
+    const isOld = created < twelveMonthsAgo;
+    const noRecentActivity = !lastEngage || new Date(lastEngage).getTime() < twelveMonthsAgo;
+    return hasEmail && isOld && noRecentActivity;
+  });
+
+  const ghostPct = contacts.length > 0 ? Math.round(ghostContacts.length / contacts.length * 100) : 0;
+
+  if (ghostContacts.length > 500 && ghostPct > 15) {
+    dataScore -= Math.min(10, Math.round(ghostPct / 5));
+    issues.push({
+      severity: ghostPct > 40 ? 'warning' : 'info',
+      title: `${ghostContacts.length.toLocaleString()} contacts (${ghostPct}%) with no activity in 12+ months — billing tier inflation`,
+      description: `${ghostContacts.length.toLocaleString()} contacts have had zero engagement — no emails sent, no sales activity, no notes — for over a year. They're counted in your HubSpot billing tier but contributing nothing to pipeline or revenue. Archiving them could drop your contact tier and reduce your monthly bill.`,
+      detail: `HubSpot bills on marketing contacts — contacts eligible to receive marketing emails. Contacts with no engagement in 12+ months are candidates for re-engagement campaigns or archiving. A clean list also improves deliverability scores for all remaining contacts.`,
+      impact: `Potential contact tier reduction · deliverability improvement · cleaner reporting`,
+      dimension: 'Data Integrity',
+      guide: [
+        'Run a re-engagement campaign first: "We miss you" email to all 12-month inactive contacts',
+        'Anyone who doesn\'t open within 30 days: mark as non-marketing contact or archive',
+        'Set up a quarterly contact hygiene workflow to automatically flag inactive contacts',
+        'FixOps builds the full contact lifecycle hygiene system including archive workflows'
+      ]
+    });
+  }
+
+  // ── FEATURE UTILIZATION vs WHAT THEY PAY FOR ─────────────────────────────
+  // Are they paying for features they've never used?
+  const featureChecks = [];
+  if (workflows.length === 0 && (users.length > 3)) {
+    featureChecks.push('Workflows (included in your plan) — zero created');
+  }
+  if (sequences.length === 0 && users.length > 2) {
+    featureChecks.push('Sequences — zero sequences created, sales team doing manual outreach');
+  }
+  if ((forms.length === 0) && users.length > 1) {
+    featureChecks.push('Forms — no forms connected, leads not captured in HubSpot');
+  }
+  const hasProducts = products.length > 0;
+  const hasQuotes = quotes.length > 0;
+  if (!hasProducts && deals.length > 20) {
+    featureChecks.push('Products catalog — empty, all deals manually valued');
+  }
+  if (!hasQuotes && deals.length > 10) {
+    featureChecks.push('Quotes — never used, proposals likely sent outside HubSpot');
+  }
+  if (kbArticles.length === 0 && tickets.length > 100) {
+    featureChecks.push('Knowledge Base — no articles, every question becomes a ticket');
+  }
+
+  if (featureChecks.length >= 2) {
+    configScore -= Math.min(15, featureChecks.length * 3);
+    issues.push({
+      severity: featureChecks.length >= 4 ? 'warning' : 'info',
+      title: `${featureChecks.length} HubSpot features in your plan are completely unused`,
+      description: `Based on your portal data, ${featureChecks.length} features included in your HubSpot subscription have zero usage. You're paying for capabilities your team either hasn't been set up on or doesn't know exist. Each unused feature represents both a cost and a competitive gap.`,
+      detail: `Unused features: ${featureChecks.join('; ')}.`,
+      impact: `HubSpot subscription ROI below potential · team missing productivity tools they already pay for`,
+      dimension: 'Configuration',
+      guide: [
+        'Audit each unused feature — is it a training gap, a setup gap, or genuinely not needed?',
+        'Prioritize: Workflows first (highest ROI), then Sequences, then KB articles',
+        'For each feature: create one example, train the team, measure adoption over 30 days',
+        'FixOps sets up and trains teams on underutilized HubSpot features as a standalone engagement'
+      ]
+    });
+  }
+
+
 // ── PROPERTY HYGIENE DEEP SCAN ─────────────────────────────
   if (contactProps.length > 10) {
     // Properties with low fill rates (cluttering views/reports)
@@ -8849,7 +9304,7 @@ async function runFullAudit(token, auditId, meta) {
     features.push({ hub: 'CRM', name: 'Tasks & Activities', using: tasks.length > 10, value: tasks.length > 0 ? fmt(tasks.length) + ' tasks logged' : 'Not used', tip: tasks.length === 0 ? 'Reps should log tasks in HubSpot to track follow-ups' : null });
 
     // Sales Hub
-    const activeSeqs = sequences.filter(s => String(s.status||'').toUpperCase()==='ACTIVE');
+      // activeSeqs already declared above
     const seqsWithEnrollments = sequences.filter(s => parseInt(s.enrollmentCount||s.hs_num_enrolled||0) > 0);
     features.push({ hub: 'Sales', name: 'Sequences', using: seqsWithEnrollments.length > 0, value: seqsWithEnrollments.length > 0 ? seqsWithEnrollments.length + ' sequences with enrollments' : sequences.length > 0 ? sequences.length + ' sequences, 0 enrollments' : 'Not configured', tip: sequences.length > 0 && seqsWithEnrollments.length === 0 ? 'Sequences exist but nobody enrolled — reps are not using them for outreach' : sequences.length === 0 ? 'Create sequences for repeatable sales outreach' : null });
     features.push({ hub: 'Sales', name: 'Meeting Links', using: meetingLinks.length > 0, value: meetingLinks.length > 0 ? meetingLinks.length + ' meeting links' : 'None configured', tip: meetingLinks.length === 0 ? 'Create meeting scheduling pages so prospects can self-book' : null });
@@ -9941,6 +10396,17 @@ async function runFullAudit(token, auditId, meta) {
 
         // ── Settings users ────────────────────────────────────────────────
         superAdmins: settingsUsers.filter(u => u.superAdmin === true || u.roleIds?.includes('superAdmin')).length,
+        repsWithoutEmailInt: repsWithoutEmailInt || 0,
+        ghostContactCount: ghostContacts?.length || 0,
+        ghostContactPct: ghostPct || 0,
+        darkFunnelPct: darkFunnelPct || 0,
+        darkFunnelCount: noSourceContacts?.length || 0,
+        workflowCollisions: typeof sharedTriggers !== 'undefined' ? sharedTriggers.length : 0,
+        unusedFeatureCount: featureChecks?.length || 0,
+        unusedFeatures: featureChecks || [],
+        seqLowReplyCount: lowReplySeqs?.length || 0,
+        repAccountabilityGaps: pastDueNoTask?.length || 0,
+        securityEventCount: securityEvents?.length || 0,
 
         // ── Rep scorecard (last 7 days) + Quota attainment ─────────────────
         repScorecard: (() => {
