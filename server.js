@@ -10680,6 +10680,7 @@ async function runFullAudit(token, auditId, meta) {
       openTickets:      tickets.filter(t => !t.properties?.hs_ticket_closed_date).length,
 
       // ── Intelligence engines (computed above, stored here for frontend) ──
+      revenueIntel:              revenueIntel,
       repIntelEngine:            repIntelEngine,
       contactDecayEngine:        contactDecayEngine,
       customerHealthEngine:      customerHealthEngine,
