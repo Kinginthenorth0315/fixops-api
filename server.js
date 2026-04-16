@@ -33,11 +33,13 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
 // Stripe plan → internal plan key mapping
 const STRIPE_PRICE_MAP = {
-  [process.env.STRIPE_PRICE_PULSE    || 'price_pulse']:     'pulse',
-  [process.env.STRIPE_PRICE_PRO      || 'price_pro']:       'pro',
-  [process.env.STRIPE_PRICE_COMMAND  || 'price_command']:   'command',
-  [process.env.STRIPE_PRICE_DEEP     || 'price_deep']:      'deep',
-  [process.env.STRIPE_PRICE_PROAUDIT || 'price_proaudit']:  'pro-audit',
+  // Map Stripe price IDs → internal plan keys
+  // Each env var set in Railway from Stripe product price IDs
+  [process.env.STRIPE_PRICE_DIAGNOSTIC || 'price_diagnostic']: 'diagnostic',
+  [process.env.STRIPE_PRICE_FULL        || 'price_full']:       'full',
+  [process.env.STRIPE_PRICE_MONITOR     || 'price_monitor']:    'monitor',
+  [process.env.STRIPE_PRICE_SENTINEL    || 'price_sentinel']:   'sentinel',
+  [process.env.STRIPE_PRICE_COMMAND     || 'price_command']:    'command',
 };
 
 // ── Server-side formatting helpers (used in audit engines + email templates) ──
@@ -388,7 +390,7 @@ const sendClientEmail = async (email, result, auditId) => {
 
   const col   = s.overallScore >= 80 ? '#10b981' : s.overallScore >= 60 ? '#f59e0b' : '#ef4444';
   const grade = s.overallScore >= 85 ? 'Excellent' : s.overallScore >= 70 ? 'Good' : s.overallScore >= 55 ? 'Needs Attention' : 'Critical';
-  const planLabel = { free:'Free Snapshot', deep:'FixOps Diagnostic', 'pro-audit':'FixOps Full Audit', pulse:'Pulse', pro:'FixOps Sentinel', command:'Agency' }[plan] || 'Audit';
+  const planLabel = { free:'Free Snapshot', deep:'FixOps Diagnostic', 'pro-audit':'FixOps Full Audit', pulse:'Monitor', monitor:'Monitor', pro:'Sentinel', sentinel:'Sentinel', command:'Agency' }[plan] || 'Audit';
 
   // Top issues — max 5, criticals first
   const criticals = issues.filter(i => i.severity === 'critical').slice(0, 3);
@@ -2748,12 +2750,16 @@ const agencyAuth = async (req, res, next) => {
 
 // Credit plans — what each tier gets
 const AGENCY_PLANS = {
-  // Current agency tiers
-  command:           { maxPortals: 10,   name: 'FixOps Command',           price: 999,  aiCoach: false, autoDoc: 0 },
+  // Current tiers
+  monitor:           { maxPortals: 3,    name: 'FixOps Monitor',            price: 199,  aiCoach: false, autoDoc: 0 },
+  sentinel:          { maxPortals: 15,   name: 'FixOps Sentinel',           price: 399,  aiCoach: true,  autoDoc: 2 },
+  command:           { maxPortals: 10,   name: 'FixOps Command',            price: 999,  aiCoach: false, autoDoc: 0 },
   command_unlimited: { maxPortals: 9999, name: 'FixOps Command Unlimited',  price: 1999, aiCoach: true,  autoDoc: 5 },
-  // Legacy keys for existing customers
-  agency_starter:    { maxPortals: 5,    name: 'FixOps Monitor',            price: 299,  aiCoach: false, autoDoc: 0 },
-  agency_pro:        { maxPortals: 15,   name: 'FixOps Sentinel',           price: 549,  aiCoach: false, autoDoc: 0 },
+  // Legacy plan codes (existing customers keep their access)
+  pulse:             { maxPortals: 3,    name: 'FixOps Monitor',            price: 199,  aiCoach: false, autoDoc: 0 },
+  pro:               { maxPortals: 15,   name: 'FixOps Sentinel',           price: 399,  aiCoach: true,  autoDoc: 2 },
+  agency_starter:    { maxPortals: 5,    name: 'FixOps Monitor',            price: 199,  aiCoach: false, autoDoc: 0 },
+  agency_pro:        { maxPortals: 15,   name: 'FixOps Sentinel',           price: 399,  aiCoach: true,  autoDoc: 2 },
   agency_scale:      { maxPortals: 10,   name: 'FixOps Command',            price: 999,  aiCoach: false, autoDoc: 0 },
   agency_unlimited:  { maxPortals: 9999, name: 'FixOps Command Unlimited',  price: 1999, aiCoach: true,  autoDoc: 5 },
 };
