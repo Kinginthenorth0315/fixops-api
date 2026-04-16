@@ -10660,6 +10660,31 @@ async function runFullAudit(token, auditId, meta) {
       customAssocTypes:   (associationTypesR?.data?.results||[]).filter(r=>r.typeId>100).length,
       nativeDataQuality:  (dqContactSampleR?.data?.results||[]).filter(c=>c.properties?.hs_data_quality_status==='BAD').length,
 
+      // ── Aliases for reporting views (totalX format) ──────────────────
+      totalWorkflows:   workflows.length,
+      totalForms:       forms.length,
+      totalLists:       lists.length,
+      totalSequences:   sequences.length,
+      totalQuotes:      quotes.length,
+      totalTasks:       tasks.length,
+      totalMeetings:    meetings.length,
+      totalCalls:       calls.length,
+      totalProducts:    products.length,
+      totalEmailTemplates: (emailTemplatesR?.data?.results||[]).length,
+      openTickets:      tickets.filter(t => !t.properties?.hs_ticket_closed_date).length,
+
+      // ── Intelligence engines (computed above, stored here for frontend) ──
+      repIntelEngine:            repIntelEngine,
+      contactDecayEngine:        contactDecayEngine,
+      customerHealthEngine:      customerHealthEngine,
+      formConversionEngine:      formConversionEngine,
+      propertyUsageEngine:       propertyUsageEngine,
+      setupHealthEngine:         setupHealthEngine,
+      hubUtilizationEngine:      hubUtilizationEngine,
+      workflowDependencyEngine:  workflowDependencyEngine,
+      lifecycleVelocityEngine:   lifecycleVelocityEngine,
+      billingTierEngine:         billingTierEngine,
+
     },
       isLimited: !isPaid,
       limits: isPaid ? null : {contacts:contactLimit,deals:dealLimit,tickets:ticketLimit,companies:companyLimit},
