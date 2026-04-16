@@ -5446,6 +5446,12 @@ async function runFullAudit(token, auditId, meta) {
     {data:{results:[]}}
   );
 
+  // Playbooks (Sales Hub Pro+)
+  const playbooksR = await safe(
+    () => hs.get('/crm/v3/objects/playbooks?limit=50'),
+    {data:{results:[]}}
+  );
+
   // ── New scope data — sequences, campaigns, opt-outs, conversations, NPS ────
   const sequencesR = await safe(
     () => paginate('/automation/v4/sequences', smallLimit),
@@ -8017,6 +8023,121 @@ async function runFullAudit(token, auditId, meta) {
     }
   }
 
+  // ── PLAYBOOKS + SNIPPETS + EMAIL TEMPLATES (Portal-iQ parity) ───────────
+  // Playbooks: fetch via API — Sales Hub Pro+ feature
+  const playbooks = playbooksR.data?.results||[];
+
+  // Check email templates (already have count in portalStats, now audit quality)
+  const emailTemplates = emailTemplatesR?.data?.results || [];
+  const unusedTemplates = emailTemplates.filter(t => !t.properties?.hs_last_used_date);
+
+  if (emailTemplates.length === 0 && users.length > 2) {
+    teamScore -= 5;
+    issues.push({
+      severity: 'info',
+      title: 'No email templates created — every sales email written from scratch',
+      description: 'Your team has no shared email templates in HubSpot. Every rep writes individual emails from scratch, leading to inconsistent messaging, longer ramp time for new hires, and zero visibility into which messages perform best.',
+      detail: 'Top-performing sales teams use templates for 60-70% of their outreach, customizing the final 30% per prospect. Templates also enable A/B testing subject lines and tracking open rates by message type.',
+      impact: 'Inconsistent messaging · slower rep ramp · no message performance data',
+      dimension: 'Sales',
+      guide: [
+        'Go to Sales → Templates → Create templates for your top 5 most common email types',
+        'Build a "New Lead Introduction", "Follow Up #1", "Breakup Email", and "Demo Request" at minimum',
+        'Enable template performance tracking to see open rates per template',
+        'FixOps builds a full email template library based on your ICP and sales stage data'
+      ]
+    });
+  }
+
+  if (playbooks.length === 0 && deals.length > 20 && users.length > 2) {
+    issues.push({
+      severity: 'info',
+      title: 'No playbooks configured — reps have no guided selling process',
+      description: 'HubSpot Playbooks give reps structured call scripts, discovery frameworks, and objection handling guides right inside the CRM. With zero playbooks, every rep runs their own process — making it impossible to replicate what your top performers do.',
+      detail: 'Playbooks are available on Sales Hub Professional and above. They appear as a panel during calls and deal views, prompting reps to capture qualification data consistently.',
+      impact: 'Inconsistent discovery · best practices not captured · coaching harder',
+      dimension: 'Sales',
+      guide: [
+        'Sales → Playbooks → Create a Discovery Playbook with your MEDDIC or SPICED questions',
+        'Add an Objection Handling playbook with your top 5 objections and proven responses',
+        'Attach playbooks to specific deal stages so they appear automatically at the right moment',
+        'FixOps builds custom playbooks from your best rep call recordings and win/loss data'
+      ]
+    });
+  }
+
+  // ── NEVER LOG LIST CHECK ─────────────────────────────────────────────────
+  // If email integration is active but no never-log list is set, internal
+  // emails from your own domain may be logged to contacts accidentally
+  const emailOptOuts = domainsR?.data?.results || [];
+  const hasNeverLogList = optOutsR?.data?.subscriptionDefinitions?.length > 0;
+
+  if (users.length > 3 && !hasNeverLogList) {
+    configScore -= 5;
+    issues.push({
+      severity: 'info',
+      title: 'Never Log email list not configured — internal emails may log to CRM',
+      description: 'Without a "Never Log" list configured in HubSpot, your email integration may log internal emails (sent between team members) as contact activity. This pollutes contact timelines with irrelevant data and makes rep activity reports inaccurate.',
+      detail: 'The Never Log list tells HubSpot which email addresses to exclude from automatic CRM logging. At minimum it should include your own domain so internal emails never appear on contact records.',
+      impact: 'Internal emails logging as prospect activity · contact timelines polluted · rep activity data inaccurate',
+      dimension: 'Configuration',
+      guide: [
+        'Settings → General → Email → scroll to "Never log" → add your company domain(s)',
+        'Add any executive, legal, or finance email addresses that should never appear in the CRM',
+        'Include competitor domains if your team ever replies to competitive emails',
+        'FixOps configures Never Log lists and audits your email logging setup for accuracy'
+      ]
+    });
+  }
+
+  // ── MULTIPLE PIPELINES CHECK ─────────────────────────────────────────────
+  const pipelineCount = dealPipelines.length;
+  if (pipelineCount === 1 && deals.length > 50 && products.length === 0) {
+    issues.push({
+      severity: 'info',
+      title: 'Single deal pipeline — different products or sales motions not separated',
+      description: 'With one pipeline, every deal type — new business, renewal, upsell, partnership — follows the same stage progression. This makes it impossible to measure conversion rates accurately by deal type or optimize your process for different selling motions.',
+      detail: 'Best practice: create one pipeline per distinct sales motion. New business follows different stages than renewal. Enterprise deals move differently than SMB. Mixing them in one pipeline corrupts your win rate, average cycle time, and stage conversion data.',
+      impact: 'Mixed deal types distort win rate · pipeline forecasting inaccurate · coaching blind spot by deal type',
+      dimension: 'Pipeline',
+      guide: [
+        'Settings → Pipelines → Create separate pipelines for New Business, Renewals, and Upsells',
+        'Move existing deals to the appropriate pipeline based on deal type',
+        'Set up pipeline-specific required fields (renewal deals need current ARR, new biz needs competitor)',
+        'FixOps configures multi-pipeline setups with stage-specific required fields and automation'
+      ]
+    });
+  }
+
+  // ── HubSpot AI (Breeze) READINESS ───────────────────────────────────────
+  // Check if key AI features are set up — this is a major gap most portals have
+  const hasKB = kbArticles.length > 0;
+  const hasWorkflows = workflows.length > 0;
+  const hasSequences = sequences.length > 0;
+
+  const breezeMissing = [];
+  if (!hasKB && tickets.length > 50) breezeMissing.push('Knowledge Base articles (needed for Breeze Customer Agent)');
+  if (!hasSequences && deals.length > 20) breezeMissing.push('Sequences (needed for Breeze Prospecting Agent)');
+  if (forms.length === 0) breezeMissing.push('Forms (needed for Breeze lead capture intelligence)');
+
+  if (breezeMissing.length >= 2) {
+    configScore -= 5;
+    issues.push({
+      severity: 'info',
+      title: `HubSpot Breeze AI not ready — ${breezeMissing.length} prerequisites missing`,
+      description: `HubSpot's AI tools (Breeze) require foundational data to function. ${breezeMissing.length} key prerequisites are missing from your portal: ${breezeMissing.join('; ')}. Without these, Breeze Agents cannot answer customer questions, prospect effectively, or generate insights from your data.`,
+      detail: 'Breeze Customer Agent requires KB articles to answer questions. Breeze Prospecting Agent requires sequences and contact data. Content Agent requires forms and conversion data. Setting up these foundations also improves your portal score and team effectiveness independently of AI.',
+      impact: 'Breeze AI features unavailable · HubSpot AI investment not being used · competitive disadvantage',
+      dimension: 'Configuration',
+      guide: [
+        'Start with Knowledge Base: Service Hub → Knowledge Base → create articles for your top 10 support questions',
+        'Create at least one prospecting sequence in Sequences → New Sequence',
+        'Enable Breeze in Settings → AI → Breeze after prerequisites are in place',
+        'FixOps sets up the full Breeze AI foundation including KB, sequences, and data configuration'
+      ]
+    });
+  }
+
   // ── TEAM PERFORMANCE BENCHMARKS ──────────────────────────────
   if (teams.length > 1 && Object.keys(repScorecard).length > 0) {
     // Group reps by team and compare
@@ -10032,6 +10153,7 @@ async function runFullAudit(token, auditId, meta) {
           return isOpen && (now - new Date(t.properties?.createdate||0).getTime()) / DAY > 7;
         }).length,
         ticketsUnassigned: tickets.filter(t => {
+
           const stage = String(t.properties?.hs_pipeline_stage||'').toLowerCase();
           const hasClosed = !!t.properties?.time_to_close;
           const closedStages = ['4','closed','resolved','closedwon','closed_won'];
@@ -10432,6 +10554,11 @@ async function runFullAudit(token, auditId, meta) {
           return enhanced;
         })(),
         ghostSeats: inactiveUsers.length,
+        ticketResolutionRate: (() => { const c = tickets.filter(t=>!!t.properties?.hs_ticket_closed_date).length; return tickets.length>0?Math.round(c/tickets.length*100):0; })(),
+        ticketTopCategories: (() => { const m={}; tickets.forEach(t=>{const k=t.properties?.hs_ticket_category||'Uncategorized'; m[k]=(m[k]||0)+1;}); return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,5); })(),
+        ticketRepCount: (() => { const s=new Set(tickets.filter(t=>t.properties?.hubspot_owner_id).map(t=>t.properties.hubspot_owner_id)); return s.size; })(),
+        ticketAvgLoad: (() => { const m={}; tickets.filter(t=>!t.properties?.hs_ticket_closed_date).forEach(t=>{const o=t.properties?.hubspot_owner_id; if(o)m[o]=(m[o]||0)+1;}); const v=Object.values(m); return v.length>0?Math.round(v.reduce((s,x)=>s+x,0)/v.length):0; })(),
+        ticketMaxLoad: (() => { const m={}; tickets.filter(t=>!t.properties?.hs_ticket_closed_date).forEach(t=>{const o=t.properties?.hubspot_owner_id; if(o)m[o]=(m[o]||0)+1;}); const v=Object.values(m); return v.length>0?Math.max.apply(null,v):0; })(),
         ghostSeatWaste: inactiveUsers.length * 90,
 
         // ── Lead Response Time Engine ─────────────────────────────────────────
