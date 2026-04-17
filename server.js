@@ -3180,7 +3180,7 @@ app.get('/agency/branding/:slug', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 // Lightweight daily check — workflow errors, ghost seats, billing tier risk
-// Not a full 210-point audit — just the 5 critical health signals that change daily
+// Not a full 235-point audit — just the 5 critical health signals that change daily
 const runSentinelCheck = async (customer) => {
   try {
     const freshToken = await getValidToken(customer);
@@ -3698,7 +3698,7 @@ app.post('/webhook', async (req, res) => {
         </tr></table></td></tr>
         <tr><td style="padding:6px 0;"><table cellpadding="0" cellspacing="0"><tr>
           <td style="width:24px;height:24px;background:rgba(124,58,237,.2);border-radius:50%;text-align:center;font-size:10px;font-weight:800;color:#a78bfa;vertical-align:middle;">2</td>
-          <td style="padding-left:12px;font-size:13px;color:rgba(255,255,255,.7);">FixOps runs 210 checks across your entire portal — contacts, deals, workflows, pipeline, billing, users</td>
+          <td style="padding-left:12px;font-size:13px;color:rgba(255,255,255,.7);">FixOps runs 235 checks across your entire portal — contacts, deals, workflows, pipeline, billing, users</td>
         </tr></table></td></tr>
         <tr><td style="padding:6px 0;"><table cellpadding="0" cellspacing="0"><tr>
           <td style="width:24px;height:24px;background:rgba(124,58,237,.2);border-radius:50%;text-align:center;font-size:10px;font-weight:800;color:#a78bfa;vertical-align:middle;">3</td>
@@ -4387,7 +4387,7 @@ app.get('/audit/pdf', async (req, res) => {
 <div class="cover">
   <div class="cover-logo">⚡ FixOps Intelligence Report</div>
   <div class="cover-company">${company}</div>
-  <div class="cover-sub">210-Point Portal Audit · ${date}</div>
+  <div class="cover-sub">235-Point Portal Audit · ${date}</div>
   <div class="cover-grade" style="background:${gradeColor}22;color:${gradeColor};">${grade}</div>
   <div class="cover-meta">
     <div class="cover-stat">
@@ -4473,7 +4473,7 @@ ${waste > 500 ? `<div class="waste-callout">
     <div class="summary-lbl">Warnings</div>
   </div>
   <div class="summary-card">
-    <div class="summary-val" style="color:#6b7280">${summary.checksRun || 210}</div>
+    <div class="summary-val" style="color:#6b7280">${summary.checksRun || 235}</div>
     <div class="summary-lbl">Checks Run</div>
   </div>
 </div>
@@ -4724,8 +4724,8 @@ app.get('/audit/certificate', async (req, res) => {
   <!-- Divider -->
   <line x1="232" y1="236" x2="568" y2="236" stroke="rgba(255,255,255,0.07)" stroke-width="1"/>
 
-  <!-- 210-point audit badge -->
-  <text x="232" y="260" font-family="monospace" font-size="9" fill="rgba(255,255,255,0.25)" letter-spacing="1">✓ 210-POINT AUTOMATED AUDIT  ·  fixops.io</text>
+  <!-- 235-point audit badge -->
+  <text x="232" y="260" font-family="monospace" font-size="9" fill="rgba(255,255,255,0.25)" letter-spacing="1">✓ 235-POINT AUTOMATED AUDIT  ·  fixops.io</text>
 
   <!-- Bottom features -->
   <text x="232" y="290" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="10" fill="rgba(255,255,255,0.35)">Contacts · Deals · Workflows · Pipeline · Billing · Users · Properties</text>
@@ -5821,6 +5821,10 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── Extract Priority 5 results ───────────────────────────────────────────
   const securityEvents    = securityLogR.data?.results||[];
+  const notifConfig = notificationsR?.data || {};
+  const hasWorkflowErrorNotif = !!(notifConfig.workflowEnrollmentError || 
+    notifConfig.workflowActionError || notifConfig.workflowError ||
+    Object.values(notifConfig).some(v => typeof v === 'boolean' && v === true));
   const apiRateLimit = integrationSettingsR?.data || { currentUsage: 0, usageLimit: 500000 };
   const apiUsagePct  = apiRateLimit.usageLimit > 0
     ? Math.round(apiRateLimit.currentUsage / apiRateLimit.usageLimit * 100)
@@ -7213,9 +7217,9 @@ async function runFullAudit(token, auditId, meta) {
       const errorNames = erroredWorkflows.slice(0,3).map(wf => wf.name || wf.id || 'Unknown').join(', ');
       autoScore -= Math.min(25, totalErrored * 8);
       issues.push({
-        dimension: 'Data Integrity',
+        dimension: 'Automation Health',
         severity: totalErrored > 2 ? 'critical' : 'warning',
-        title: totalErrored + ' workflow' + (totalErrored!==1?'s':'') + ' in error state  -  contacts may be dropping silently',
+        title: totalErrored + ' workflow' + (totalErrored!==1?'s':'') + ' in error state — contacts may be dropping silently',
         description: 'These workflows are actively failing: ' + errorNames + '. When a workflow errors, HubSpot typically stops processing enrolled contacts  -  meaning leads, nurture sequences, or follow-ups may be silently falling through. Most teams do not know a workflow is broken until a rep asks why a lead never got a follow-up email.',
         detail: 'Workflow errors are the #1 source of silent revenue loss in HubSpot. A workflow broken for 30 days on a 500-contact list means 500 people never got the message you intended them to receive.',
         impact: totalErrored + ' broken workflow' + (totalErrored!==1?'s':'')+' · contacts dropping silently · automation ROI destroyed',
@@ -10407,6 +10411,24 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── API RATE LIMIT STANDALONE ISSUE (if engine exists and rate is high) ──────
   // (Individual issues are fired inside integration health loop above)
+
+  // ── NOTIFICATION CONFIGURATION CHECK ─────────────────────────────────────────
+  if (typeof hasWorkflowErrorNotif !== 'undefined' && !hasWorkflowErrorNotif && workflows.length > 5) {
+    issues.push({
+      dimension: 'Configuration & Security',
+      severity: 'info',
+      title: 'Workflow error notifications are not configured — you won\'t know when automations fail',
+      description: 'HubSpot can notify admins immediately when a workflow hits an error — but this is off by default and most portals never turn it on. Without it, broken workflows fail silently until a rep notices leads aren\'t moving.',
+      detail: 'Workflow errors are one of the most common and damaging silent failures in HubSpot. A contact can hit a broken step, get dropped from the workflow entirely, and never receive the follow-up they were supposed to get. The only way to catch this in real time is to have error notifications configured.',
+      impact: 'Broken workflows fail silently — no alert until a rep asks where their leads went',
+      guide: [
+        'Go to Settings (gear icon, top right) → Notifications (left sidebar)',
+        'Find the Workflows section — enable notifications for: Enrollment errors, Action errors',
+        'Assign these notifications to your HubSpot admin and any RevOps team member who owns automation',
+        'FixOps Sentinel monitoring sends same-day alerts for new workflow errors as a backup layer',
+      ],
+    });
+  }
 
 
   const finalResult = {
