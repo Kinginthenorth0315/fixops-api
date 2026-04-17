@@ -5934,6 +5934,7 @@ async function runFullAudit(token, auditId, meta) {
     if (completenessScore < 60) {
       dataScore -= Math.min(18, Math.round((60 - completenessScore) / 3));
       issues.push({
+        dimension: 'Data Integrity',
         severity: completenessScore < 40 ? 'critical' : 'warning',
         title: `Contact database is ${incompletePct}% incomplete — ${completenessScore}/100 property completeness score`,
         description: `Across your ${contacts.length.toLocaleString()} contacts, only ${completenessScore}% have all 5 key fields filled in (email, phone, company, lifecycle stage, owner). The biggest gap: ${worstField[1].toLocaleString()} contacts (${worstFieldPct}%) are missing ${worstFieldName}. Incomplete contacts can't be segmented, scored, or targeted effectively.`,
@@ -5950,6 +5951,7 @@ async function runFullAudit(token, auditId, meta) {
     } else if (completenessScore < 75) {
       dataScore -= Math.min(8, Math.round((75 - completenessScore) / 4));
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `Contact database ${completenessScore}% complete — ${worstField[1].toLocaleString()} contacts missing ${worstFieldName}`,
         description: `Your contact records are mostly complete but ${worstField[1].toLocaleString()} contacts (${worstFieldPct}%) are missing ${worstFieldName}. Filling this gap would improve segmentation, reporting, and personalization significantly.`,
@@ -5972,6 +5974,7 @@ async function runFullAudit(token, auditId, meta) {
   if (noFirstName.length > contacts.length * 0.15) {
     dataScore -= Math.min(10, Math.round(noFirstName.length / contacts.length * 20));
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'warning',
       title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — email personalization broken`,
       description: `Contacts without a first name can't be addressed personally in emails. Research by Outreach shows personalizing subject lines with a contact's name leads to a 22% increase in open rate. Without first name, every email starts with "Hi ," or a generic fallback — immediately signaling mass automation.`,
@@ -5992,6 +5995,7 @@ async function runFullAudit(token, auditId, meta) {
   if (companies.length > 5 && noCompanyPct > 40) {
     dataScore -= Math.min(8, Math.round(noCompanyPct / 10));
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'info',
       title: `${noCompanyPct}% of contacts not associated with a company — B2B attribution broken`,
       description: `${noCompanyAssoc.length.toLocaleString()} contacts have no company association. For B2B portals, this breaks account-based reporting, company-level activity timelines, and deal attribution. When contacts aren't linked to companies, your team can't see who else at that account you're already talking to.`,
@@ -6011,6 +6015,7 @@ async function runFullAudit(token, auditId, meta) {
   if (companiesNoDomain.length > companies.length * 0.2 && companies.length > 5) {
     dataScore -= Math.min(8, Math.round(companiesNoDomain.length / companies.length * 15));
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'info',
       title: `${companiesNoDomain.length} companies missing domain name — HubSpot auto-enrichment disabled`,
       description: `Companies without a domain name can't be enriched by HubSpot Insights (free company data including industry, size, and revenue). The domain is also how HubSpot auto-deduplicates companies and auto-associates contacts — without it, you get duplicate companies and broken contact associations.`,
@@ -6117,6 +6122,7 @@ async function runFullAudit(token, auditId, meta) {
       const worst = bottlenecks.sort((a,b)=>b.stuckPct-a.stuckPct)[0];
       pipelineScore -= Math.min(20, bottlenecks.length * 7);
       issues.push({
+        dimension: 'Pipeline Integrity',
         severity: bottlenecks.length >= 2 ? 'critical' : 'warning',
         title: `Pipeline bottleneck: ${worst.stuckPct}% of "${worst.stage}" deals stuck 14+ days`,
         description: `${worst.count} deals averaging ${worst.avgDays} days in "${worst.stage}" — well above healthy velocity benchmarks. ${bottlenecks.length > 1 ? `${bottlenecks.length} stages show similar stagnation.` : ''} Deals stalled in mid-stages have a 3× higher loss rate than deals with weekly activity.`,
@@ -6140,6 +6146,7 @@ async function runFullAudit(token, auditId, meta) {
     if (phantomDeals.length > 3) {
       pipelineScore -= Math.min(10, phantomDeals.length);
       issues.push({
+        dimension: 'Pipeline Integrity',
         severity: 'warning',
         title: `${phantomDeals.length} open deals in 0% probability stages — phantom pipeline`,
         description: `These deals sit in stages flagged as 0% close probability but remain "open." They inflate your reported pipeline value by $${Math.round(phantomDeals.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0)).toLocaleString()} while contributing nothing to forecast accuracy. Every sales leader who sees your pipeline is being misled.`,
@@ -6163,6 +6170,7 @@ async function runFullAudit(token, auditId, meta) {
   if (dealsNoContact.length > openDeals.length * 0.2 && openDeals.length > 5) {
     pipelineScore -= Math.min(15, Math.round(dealsNoContact.length / openDeals.length * 25));
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'warning',
       title: `${dealsNoContact.length} open deals have no associated contacts — these deals can't close`,
       description: `Deals without contacts have no human on the other side. They can't receive a proposal, can't be called, and won't appear in any rep's contact list. Research shows deals associated with 3+ contacts have 2× the close rate of single-contact deals. Zero-contact deals essentially don't exist.`,
@@ -6186,6 +6194,7 @@ async function runFullAudit(token, auditId, meta) {
   if (closedWonDeals.length > 5 && wonNoReason.length > closedWonDeals.length * 0.7) {
     pipelineScore -= 8;
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'info',
       title: `${wonNoReason.length} closed won deals missing win reason — can't replicate what's working`,
       description: `Your team is closing deals but nobody is capturing why. Without win reason data you can't identify which messaging works, which personas convert best, or which reps have repeatable success patterns. This is institutional knowledge walking out the door after every deal.`,
@@ -6203,6 +6212,7 @@ async function runFullAudit(token, auditId, meta) {
   if (closedLostDeals.length > 5 && lostNoReason2.length > closedLostDeals.length * 0.5) {
     pipelineScore -= 10;
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'warning',
       title: `${lostNoReason2.length} closed lost deals with no loss reason — burning pipeline without learning`,
       description: `${Math.round(lostNoReason2.length/Math.max(closedLostDeals.length,1)*100)}% of your lost deals have no recorded reason. Every loss without a reason code is a missed opportunity to improve your pitch, pricing, or process. Businesses that track loss reasons improve their win rate by an average of 15% within 2 quarters.`,
@@ -6267,6 +6277,7 @@ async function runFullAudit(token, auditId, meta) {
     configScore -= Math.min(15, inactiveUsers.length * 3);
     const topNames = ghostSeatData.slice(0,3).map(u => u.name + ' (' + u.daysSince + 'd)').join(', ');
     issues.push({
+      dimension: 'Configuration & Security',
       severity: inactiveUsers.length > 3 ? 'warning' : 'info',
       title: inactiveUsers.length + ' users have not logged in for 90+ days — $' + estMonthlySeatWaste.toLocaleString() + '/mo in ghost seats',
       description: inactiveUsers.length + ' paid HubSpot seats have had zero activity for 90+ days. On Sales or Service Hub Professional that is $90-$120/seat/month going to waste. Ghost seats are also a security risk. Top inactive: ' + topNames + '.',
@@ -6362,6 +6373,7 @@ async function runFullAudit(token, auditId, meta) {
   if(meetings.length === 0 && calls.length === 0 && tasks.length > 0 && users.length > 2){
     teamScore -= 20;
     issues.push({
+      dimension: 'Team Adoption',
       severity: 'warning',
       title: 'No meetings or calls logged — sales activity is completely dark',
       description: 'Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. Zero visibility into rep activity, call volume, meeting outcomes, or rep performance. The fix is a 5-minute calendar connection.',
@@ -6378,6 +6390,7 @@ async function runFullAudit(token, auditId, meta) {
   } else if(darkReps.length > 0 && users.length > 2 && totalActivity > 0){
     teamScore -= Math.min(15, darkReps.length * 4);
     issues.push({
+      dimension: 'Team Adoption',
       severity: darkReps.length > 2 ? 'warning' : 'info',
       title: darkReps.length + ' reps logged zero calls or meetings this week',
       description: darkReps.length + ' of your HubSpot users had no logged call or meeting activity in the last 7 days. Active reps averaged ' + (totalActivity / Math.max(repList.length - darkReps.length, 1)).toFixed(1) + ' activities. Silent reps: ' + darkReps.slice(0,4).map(r=>r.name).join(', ') + '.',
@@ -6398,6 +6411,7 @@ async function runFullAudit(token, auditId, meta) {
     teamScore -= Math.min(10, staleRepsCount * 3);
     const staleRepNames = repList.filter(r => r.staleDealCount > 2).slice(0,3).map(r => r.name + ' (' + r.staleDealCount + ' stale deals)').join(', ');
     issues.push({
+      dimension: 'Team Adoption',
       severity: 'warning',
       title: 'Reps with stale deals: ' + staleRepNames,
       description: staleRepsCount + ' rep' + (staleRepsCount!==1?'s':'') + ' have 2+ deals with no activity in 14+ days. Stale deals close at 11% vs 67% for actively worked deals (HubSpot research). These are revenue at risk right now.',
@@ -6435,6 +6449,7 @@ async function runFullAudit(token, auditId, meta) {
     if (daysToNextTier < 120) {
       dataScore -= 10;
       issues.push({
+        dimension: 'Team Adoption',
         severity: daysToNextTier < 30 ? 'critical' : 'warning',
         title: `At current growth rate you'll hit the ${nextTier.toLocaleString()} contact billing tier in ~${daysToNextTier} days`,
         description: `You currently have ${currentCount.toLocaleString()} contacts and added ~${monthlyGrowthRate} this month. HubSpot next billing tier is ${nextTier.toLocaleString()} contacts. At this rate you'll be paying for the next tier in under ${Math.ceil(daysToNextTier/30)} month${daysToNextTier>30?'s':''}. If ${Math.round(dupes/Math.max(currentCount,1)*100)}% are duplicates, you are accelerating toward that tier unnecessarily.`,
@@ -6472,6 +6487,7 @@ async function runFullAudit(token, auditId, meta) {
           const ownerInfo = owners.find(o => o.id === topOwner[0]);
           const ownerName = ownerInfo ? `${ownerInfo.firstName || ''} ${ownerInfo.lastName || ''}`.trim() : 'One rep';
           issues.push({
+            dimension: 'Team Adoption',
             severity: topPct > 70 ? 'critical' : 'warning',
             title: `${ownerName || 'One rep'} owns ${topPct}% of pipeline value — dangerous key person risk`,
             description: `When a single rep controls the majority of your pipeline, you have a critical business risk: if they leave, get sick, or go on vacation, your revenue forecast collapses. This is one of the first things investors and acquirers flag as a red flag in a revenue due diligence.`,
@@ -6506,6 +6522,7 @@ async function runFullAudit(token, auditId, meta) {
   if (totalJunk > 10) {
     dataScore -= Math.min(12, totalJunk / 5);
     issues.push({
+      dimension: 'Team Adoption',
       severity: totalJunk > 50 ? 'warning' : 'info',
       title: `${totalJunk} contacts have junk data in key fields (".", "N/A", "test", invalid phones)`,
       description: `Your team is entering placeholder values to bypass required fields — a classic sign of form friction or rep shortcuts. Junk data is worse than blank data: it looks complete in reports but breaks segmentation, workflows, and enrichment tools that rely on these fields being real.`,
@@ -6534,6 +6551,7 @@ async function runFullAudit(token, auditId, meta) {
   if (newDealsNoActivity.length > 3) {
     pipelineScore -= Math.min(12, newDealsNoActivity.length * 2);
     issues.push({
+      dimension: 'Team Adoption',
       severity: newDealsNoActivity.length > 8 ? 'critical' : 'warning',
       title: `${newDealsNoActivity.length} deals created but never touched by a rep — leads going cold`,
       description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
@@ -6560,6 +6578,7 @@ async function runFullAudit(token, auditId, meta) {
   if (highBounceRisk > contacts.length * 0.02) {
     marketingScore -= 12;
     issues.push({
+      dimension: 'Team Adoption',
       severity: highBounceRisk > contacts.length * 0.05 ? 'critical' : 'warning',
       title: `${highBounceRisk} contacts have hard email bounces — your sender reputation is at risk`,
       description: `Hard bounced emails mean these addresses definitively do not exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
@@ -6591,6 +6610,7 @@ async function runFullAudit(token, auditId, meta) {
   if(expiredQuotes.length > 0){
     pipelineScore -= Math.min(10, expiredQuotes.length * 2);
     issues.push({
+      dimension: 'Team Adoption',
       severity: expiredQuotes.length > 5 ? 'warning' : 'info',
       title: `${expiredQuotes.length} quotes have expired without a response — dead revenue opportunities`,
       description: `These quotes were sent to prospects but expired before they responded. No follow-up task was created, no rep was alerted. Each expired quote is a deal that likely went cold because nobody followed up when the deadline passed.`,
@@ -6611,6 +6631,7 @@ async function runFullAudit(token, auditId, meta) {
   if(unlinkedLineItems.length > lineItems.length * 0.3 && lineItems.length > 5){
     reportingScore -= 8;
     issues.push({
+      dimension: 'Team Adoption',
       severity: 'info',
       title: `${unlinkedLineItems.length} line items are not linked to your product library — revenue reporting is fragmented`,
       description: `These line items were created manually instead of from your HubSpot product library. This means your product revenue reports are inaccurate, you cannot track which products are driving the most revenue, and forecasting by product line is impossible.`,
@@ -6635,6 +6656,7 @@ async function runFullAudit(token, auditId, meta) {
   if(meetingsNoOutcome.length > meetings.length * 0.4 && meetings.length > 5){
     teamScore -= 10;
     issues.push({
+      dimension: 'Team Adoption',
       severity: 'warning',
       title: `${meetingsNoOutcome.length} meetings have no outcome logged — coaching and forecasting blind spot`,
       description: `Your team is logging meetings but not recording what happened. Without outcomes (Completed, No Show, Cancelled), you cannot measure meeting effectiveness, identify which reps have the highest no-show rates, or use meeting data to improve forecast accuracy.`,
@@ -6655,6 +6677,7 @@ async function runFullAudit(token, auditId, meta) {
   if(callsNoDisposition.length > calls.length * 0.4 && calls.length > 10){
     teamScore -= 8;
     issues.push({
+      dimension: 'Team Adoption',
       severity: 'info',
       title: `${callsNoDisposition.length} calls logged with no outcome — call data is useless for coaching`,
       description: `Your team is logging calls but not recording the result. Without call dispositions (Connected, Left Voicemail, No Answer, Wrong Number), you cannot track connect rates, measure rep call effectiveness, or identify which call times perform best.`,
@@ -6682,6 +6705,7 @@ async function runFullAudit(token, auditId, meta) {
     if(companiesNoRevenue.length > companies.length * 0.5){
       dataScore -= 6;
       issues.push({
+        dimension: 'Team Adoption',
         severity: 'info',
         title: `${companiesNoRevenue.length} company records have no revenue or employee data — account intelligence missing`,
         description: `More than half your company records have no annual revenue or employee count. This means you cannot segment by company size, cannot prioritize by account value, and HubSpot AI tools cannot generate meaningful account insights.`,
@@ -6715,6 +6739,7 @@ async function runFullAudit(token, auditId, meta) {
     if (avgDealAge > 45) {
       pipelineScore -= Math.min(15, Math.round(avgDealAge / 8));
       issues.push({
+        dimension: 'Team Adoption',
         severity: avgDealAge > 90 ? 'critical' : 'warning',
         title: `Average open deal is ${avgDealAge} days old — pipeline velocity ${avgDealAge > 90 ? 'critically' : 'dangerously'} slow`,
         description: `Your ${openDeals.length} open deals average ${avgDealAge} days old. Industry benchmark is 30–45 days. ${oldDeals.length} deals are over 90 days old. Deals inactive for 21+ days close at 11% vs 67% for deals touched weekly — every extra day costs you real revenue.`,
@@ -6741,6 +6766,7 @@ async function runFullAudit(token, auditId, meta) {
     if (untouchedPct > 25 && recentContacts.length > 20) {
       dataScore -= Math.min(14, Math.round(untouchedPct / 5));
       issues.push({
+        dimension: 'Team Adoption',
         severity: untouchedPct > 55 ? 'critical' : 'warning',
         title: `${untouchedPct}% of contacts added in the last 90 days have never been contacted`,
         description: `${neverTouched.length} of your ${recentContacts.length.toLocaleString()} recent contacts have received zero outreach. Harvard Business Review research shows companies responding within 1 hour are 7x more likely to qualify a lead. After 24 hours, qualification rates drop 60x. These contacts entered your CRM warm — they are leaving it cold.`,
@@ -6764,6 +6790,7 @@ async function runFullAudit(token, auditId, meta) {
     if (noLifecyclePct > 40) {
       dataScore -= Math.min(12, Math.round(noLifecyclePct / 8));
       issues.push({
+        dimension: 'Team Adoption',
         severity: noLifecyclePct > 70 ? 'critical' : 'warning',
         title: `${noLifecyclePct}% of contacts have no lifecycle stage — your revenue funnel is unmeasured`,
         description: `${noLifecycle.length.toLocaleString()} contacts have no lifecycle stage. Without this, you cannot calculate lead-to-customer conversion rate, measure marketing pipeline contribution, or hold any team accountable for funnel performance. HubSpot's research shows companies with defined lifecycle stages close 28% more deals.`,
@@ -6792,6 +6819,7 @@ async function runFullAudit(token, auditId, meta) {
       if (lostNoReason.length > closedLost.length * 0.5) {
         reportingScore -= 10;
         issues.push({
+          dimension: 'Team Adoption',
           severity: 'warning',
           title: `${lostNoReason.length} lost deals have no close-lost reason — you cannot learn from losses`,
           description: `Your team closed ${closedLost.length} lost deals but ${lostNoReason.length} have no reason recorded. Win rate is ${winRate}%${avgWonValue > 0 ? ` with avg deal value $${avgWonValue.toLocaleString()}` : ''}. Without loss reasons, you cannot identify whether you lose on price, timing, competition, or fit — making rep coaching and process improvement impossible.`,
@@ -6819,6 +6847,7 @@ async function runFullAudit(token, auditId, meta) {
       if (wonNoReason.length > closedWon.length * 0.5) {
         reportingScore -= 8;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'info',
           title: `${wonNoReason.length} closed-won deals have no win reason — you cannot replicate success`,
           description: `${wonNoReason.length} of your ${closedWon.length} won deals have no win reason recorded. Understanding why you win is just as important as understanding why you lose. Win reasons reveal your strongest value props, best-fit customers, and which reps close what type of deal.`,
@@ -6843,6 +6872,7 @@ async function runFullAudit(token, auditId, meta) {
     if (companiesNoContacts.length > companies.length * 0.25) {
       dataScore -= Math.min(10, Math.round(companiesNoContacts.length / companies.length * 15));
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${companiesNoContacts.length} companies have no associated contacts — orphaned records`,
         description: `${Math.round(companiesNoContacts.length/companies.length*100)}% of your company records have no contacts linked. Orphaned companies bloat your database, create confusion during manual data entry, and reduce report accuracy. If no one at the company is in HubSpot, the company record has no business value.`,
@@ -6861,6 +6891,7 @@ async function runFullAudit(token, auditId, meta) {
     if (companiesNoDomain.length > companies.length * 0.20) {
       dataScore -= Math.min(8, Math.round(companiesNoDomain.length / companies.length * 12));
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${companiesNoDomain.length} companies have no domain name — HubSpot cannot auto-deduplicate them`,
         description: `HubSpot uses domain name to automatically deduplicate companies and auto-associate contacts. Without a domain, HubSpot cannot match a contact's email to their company, cannot pull company data from HubSpot Insights, and will create duplicate company records over time.`,
@@ -6881,6 +6912,7 @@ async function runFullAudit(token, auditId, meta) {
     if (noFirstName.length > contacts.length * 0.15) {
       dataScore -= Math.min(8, Math.round(noFirstName.length / contacts.length * 15));
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${noFirstName.length} contacts (${Math.round(noFirstName.length/contacts.length*100)}%) have no first name — personalization impossible`,
         description: `Contacts without a first name cannot receive personalized emails, and email personalization tokens will fail or fall back to generic defaults. Research shows personalized subject lines increase open rates by 22%. Every nameless contact in your database is a missed personalization opportunity.`,
@@ -6902,6 +6934,7 @@ async function runFullAudit(token, auditId, meta) {
     const personaPct = Math.round(withPersona.length / contacts.length * 100);
     if (personaPct < 5) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `Only ${personaPct}% of contacts have a persona set — segmentation and targeting is generic`,
         description: `HubSpot Personas allow you to group contacts by buyer type and personalize messaging at scale. Only ${withPersona.length} of your ${contacts.length.toLocaleString()} contacts have a persona. Without it, all your contacts receive the same generic messaging regardless of their role, industry, or needs.`,
@@ -7016,6 +7049,7 @@ async function runFullAudit(token, auditId, meta) {
     // Legacy hubspotscore exists but stopped updating Aug 31 2025
     marketingScore -= 15;
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'critical',
       title: 'Legacy HubSpot Score stopped updating Aug 31, 2025 — migrate to new Lead Scoring tool now',
       description: `Your portal has the old HubSpot Score property, which stopped updating on August 31, 2025. Contacts are no longer being scored, workflows that relied on score changes have gone silent, and your lead prioritization is frozen at pre-cutoff values.`,
@@ -7035,6 +7069,7 @@ async function runFullAudit(token, auditId, meta) {
   } else if (!leadScoringEngine.isConfigured && contacts.length > 100) {
     marketingScore -= 8;
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'warning',
       title: 'Lead Scoring not configured — no way to prioritize which contacts to work',
       description: `You have ${fmt(contacts.length)} contacts but no lead score. HubSpot's Lead Scoring tool (Marketing Hub or Sales Hub Pro+) lets you build Engagement scores (what contacts do) and Fit scores (who they are) — separately or combined. Without it, every contact looks the same to your reps.`,
@@ -7055,6 +7090,7 @@ async function runFullAudit(token, auditId, meta) {
     });
   } else if (leadScoringEngine.isNewToolConfigured && leadScoringEngine.pctScored < 10 && contacts.length > 200) {
     issues.push({
+      dimension: 'Data Integrity',
       severity: 'warning',
       title: `Lead Scoring configured but only ${leadScoringEngine.pctScored}% of contacts have a score — criteria too narrow`,
       description: `The Lead Scoring tool is active with ${leadScoringEngine.scoreProperties.length} score propert${leadScoringEngine.scoreProperties.length!==1?'ies':'y'}, but only ${fmt(leadScoringEngine.scoredCount)} of ${fmt(contacts.length)} contacts have a score. Criteria are likely too specific or contacts aren't engaging with the tracked activities.`,
@@ -7143,6 +7179,7 @@ async function runFullAudit(token, auditId, meta) {
     const criticalErrors = integrationErrors.filter(e => e.severity === 'critical');
     autoScore -= Math.min(20, integrationErrors.length * 5);
     issues.push({
+      dimension: 'Data Integrity',
       severity: criticalErrors.length > 0 ? 'critical' : 'warning',
       title: `${integrationErrors.length} integration ${integrationErrors.length===1?'issue':'issues'} detected — data may not be syncing correctly`,
       description: `Integration failures cause silent data gaps: contacts created in Salesforce don't appear in HubSpot, deals don't update, email activity stops logging. Your team makes decisions on incomplete data without knowing it. ${criticalErrors.length > 0 ? `${criticalErrors.length} critical issue${criticalErrors.length!==1?'s':''} need immediate attention.` : ''}`,
@@ -7172,6 +7209,7 @@ async function runFullAudit(token, auditId, meta) {
       const errorNames = erroredWorkflows.slice(0,3).map(wf => wf.name || wf.id || 'Unknown').join(', ');
       autoScore -= Math.min(25, totalErrored * 8);
       issues.push({
+        dimension: 'Data Integrity',
         severity: totalErrored > 2 ? 'critical' : 'warning',
         title: totalErrored + ' workflow' + (totalErrored!==1?'s':'') + ' in error state  -  contacts may be dropping silently',
         description: 'These workflows are actively failing: ' + errorNames + '. When a workflow errors, HubSpot typically stops processing enrolled contacts  -  meaning leads, nurture sequences, or follow-ups may be silently falling through. Most teams do not know a workflow is broken until a rep asks why a lead never got a follow-up email.',
@@ -7205,6 +7243,7 @@ async function runFullAudit(token, auditId, meta) {
     if (deadWorkflows.length > 0) {
       autoScore -= Math.min(10, deadWorkflows.length * 2);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: deadWorkflows.length + ' active workflow' + (deadWorkflows.length!==1?'s':'') + ' with no enrollments in 90+ days',
         description: 'These workflows are marked active but have not enrolled anyone in 90+ days. Either the trigger criteria never fires, the audience is empty, or the workflow was abandoned without being turned off. Dead workflows create confusion, consume your workflow limit, and make portal audits harder.',
@@ -7269,6 +7308,7 @@ async function runFullAudit(token, auditId, meta) {
     if (oldTickets.length > 0 && oldTickets.length > openTix.length * 0.2) {
       serviceScore -= Math.min(30, Math.round(oldTickets.length / Math.max(openTix.length, 1) * 50));
       issues.push({
+        dimension: 'Data Integrity',
         severity: oldTickets.length > openTix.length * 0.4 ? 'critical' : 'warning',
         title: `${oldTickets.length.toLocaleString()} open tickets older than 3 days — SLA at risk`,
         description: `${Math.round(oldTickets.length/Math.max(openTix.length,1)*100)}% of your ${openTix.length.toLocaleString()} open tickets exceed 3 days with no resolution. HubSpot State of Service data shows 67% of customers expect resolution within 3 hours. Every day past that threshold increases churn probability significantly.`,
@@ -7289,6 +7329,7 @@ async function runFullAudit(token, auditId, meta) {
       const over7Pct = Math.round(over7Tix.length / Math.max(openTix.length,1) * 100);
       serviceScore -= Math.min(20, over7Tix.length);
       issues.push({
+        dimension: 'Data Integrity',
         severity: over7Pct > 20 ? 'critical' : 'warning',
         title: `${over7Tix.length.toLocaleString()} tickets open 7+ days — serious churn risk`,
         description: `${over7Tix.length.toLocaleString()} open tickets (${over7Pct}% of your open queue) have been waiting over 7 days. At this stage, customers have likely contacted you multiple times, may have escalated externally, or have already decided not to renew.`,
@@ -7309,6 +7350,7 @@ async function runFullAudit(token, auditId, meta) {
       const unassignedPct = Math.round(unassigned.length / Math.max(openTix.length,1) * 100);
       serviceScore -= Math.min(25, unassigned.length * 2);
       issues.push({
+        dimension: 'Data Integrity',
         severity: unassigned.length > 5 || unassignedPct > 15 ? 'critical' : 'warning',
         title: `${unassigned.length} unassigned open tickets — nobody is responsible`,
         description: `${unassigned.length} open ticket${unassigned.length!==1?'s':''} have no assigned owner. Unassigned tickets don't appear in anyone's queue, never get followed up on, and are invisible to rep dashboards. These customers are effectively being ignored.`,
@@ -7330,6 +7372,7 @@ async function runFullAudit(token, auditId, meta) {
       if (highPriOld.length > 0) {
         serviceScore -= Math.min(20, highPriOld.length * 3);
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'critical',
           title: `${highPriOld.length} HIGH PRIORITY ticket${highPriOld.length!==1?'s':''} open more than 24 hours`,
           description: `${highPriOld.length} high-priority ticket${highPriOld.length!==1?'s are':' is'} more than 24 hours old with no resolution. High priority tickets should be resolved same-day — these represent your most at-risk customers.`,
@@ -7350,6 +7393,7 @@ async function runFullAudit(token, auditId, meta) {
     if (overloadedReps > 0 && repLoads.length > 1) {
       serviceScore -= Math.min(10, overloadedReps * 3);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'warning',
         title: `Uneven ticket distribution — ${overloadedReps} rep${overloadedReps!==1?'s':''} carrying 2.5× average load`,
         description: `Ticket distribution is imbalanced across your service team. ${overloadedReps} rep${overloadedReps!==1?'s are':' is'} handling significantly more than the team average of ${avgLoad} open tickets. Overloaded reps produce slower responses, lower quality, and higher burnout risk.`,
@@ -7369,6 +7413,7 @@ async function runFullAudit(token, auditId, meta) {
     if (uncatPct > 40 && tickets.length > 20) {
       serviceScore -= 8;
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${uncatPct}% of tickets have no category — reporting is blind`,
         description: `${uncategorized.toLocaleString()} of your ${tickets.length.toLocaleString()} tickets have no category assigned. Without categories, you cannot identify your most common support issues, cannot automate routing by type, and cannot measure improvement over time.`,
@@ -7393,6 +7438,7 @@ async function runFullAudit(token, auditId, meta) {
     if (avgTicketAgeDays > 5 && openTix.length > 10) {
       serviceScore -= 10;
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'warning',
         title: `Average open ticket age is ${Math.round(avgTicketAgeDays)} days — no SLA enforcement detected`,
         description: `Your open tickets have been sitting an average of ${Math.round(avgTicketAgeDays)} days without resolution. This pattern suggests SLA rules are either not configured or not being enforced. Without SLA enforcement, there is no automatic escalation and no accountability.`,
@@ -7446,6 +7492,7 @@ async function runFullAudit(token, auditId, meta) {
     if (churnRate > 25) {
       reportingScore -= 12;
       issues.push({
+        dimension: 'Data Integrity',
         severity: churnRate > 40 ? 'critical' : 'warning',
         title: churnRate + '% subscription churn rate — revenue retention at risk',
         description: cancelledSubs.length + ' of ' + subscriptions.length + ' subscriptions are cancelled. Industry benchmark is under 5% monthly churn. At ' + churnRate + '% your MRR is actively shrinking.',
@@ -7460,6 +7507,7 @@ async function runFullAudit(token, auditId, meta) {
     }
     if (renewNext30.length > 0) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: renewNext30.length + ' subscription' + (renewNext30.length!==1?'s':'') + ' renewing in the next 30 days — proactive outreach window',
         description: 'You have ' + renewNext30.length + ' active subscriptions renewing within 30 days. This is the highest-leverage customer success window: a proactive check-in before renewal reduces churn by 40% vs reactive handling after cancellation.',
@@ -7484,6 +7532,7 @@ async function runFullAudit(token, auditId, meta) {
     if (expiredQuotes.length > 0) {
       reportingScore -= Math.min(10, expiredQuotes.length * 2);
       issues.push({
+        dimension: 'Data Integrity',
         severity: expiredQuotes.length > 5 ? 'warning' : 'info',
         title: expiredQuotes.length + ' quote' + (expiredQuotes.length!==1?'s':'') + ' expired without being accepted — lost revenue signal',
         description: 'Expired unaccepted quotes indicate deals that stalled at the proposal stage. Each expired quote is a buyer who evaluated your offer and did not convert — without follow-up, this is silent churn in your pipeline.',
@@ -7506,6 +7555,7 @@ async function runFullAudit(token, auditId, meta) {
       const overdueRate = Math.round((overdueInvoices.length/invoices.length)*100);
       reportingScore -= Math.min(12, overdueInvoices.length * 3);
       issues.push({
+        dimension: 'Data Integrity',
         severity: overdueRate > 30 ? 'critical' : 'warning',
         title: overdueInvoices.length + ' overdue invoice' + (overdueInvoices.length!==1?'s':'') + ' — cash flow risk',
         description: overdueInvoices.length + ' invoices are past due (' + overdueRate + '% of all invoices). Uncollected invoices are cash that should already be in your account. Each day overdue increases collection difficulty exponentially.',
@@ -7531,6 +7581,7 @@ async function runFullAudit(token, auditId, meta) {
     if (noStepSeqs.length > 0) {
       autoScore -= Math.min(10, noStepSeqs.length * 3);
       issues.push({
+        dimension: 'Automation Health',
         severity: 'warning',
         title: noStepSeqs.length + ' sequence' + (noStepSeqs.length!==1?'s':'') + ' with no steps configured',
         description: 'These sequences are active but have no steps. Any contact enrolled receives nothing — a silent fail that damages sender reputation and wastes rep time.',
@@ -7541,6 +7592,7 @@ async function runFullAudit(token, auditId, meta) {
     }
     if (lowReplySeqs.length > 0) {
       issues.push({
+        dimension: 'Automation Health',
         severity: 'info',
         title: lowReplySeqs.length + ' sequence' + (lowReplySeqs.length!==1?'s':'') + ' under 5% reply rate — copy needs work',
         description: 'Industry benchmark for cold outreach reply rates is 8-12%. Under 5% means you are burning sending reputation on contacts who will not respond.',
@@ -7558,6 +7610,7 @@ async function runFullAudit(token, auditId, meta) {
     if (emptyLists.length > 5) {
       marketingScore -= Math.min(8, emptyLists.length);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: emptyLists.length + ' empty contact lists cluttering your portal',
         description: 'Empty lists signal abandoned segmentation. They slow down list selection in workflows and emails and confuse new team members.',
@@ -7568,6 +7621,7 @@ async function runFullAudit(token, auditId, meta) {
     }
     if (staticLists.length > lists.length * 0.7 && lists.length > 10) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: Math.round(staticLists.length / lists.length * 100) + '% of lists are static — missing auto-segmentation',
         description: 'Most lists are manually managed rather than auto-updating. Static lists go stale — contacts graduate out of criteria but stay listed until someone removes them manually.',
@@ -7586,6 +7640,7 @@ async function runFullAudit(token, auditId, meta) {
       if (pct > 30) {
         pipelineScore -= Math.min(10, Math.round(pct / 10));
         issues.push({
+          dimension: 'Data Integrity',
           severity: pct > 60 ? 'critical' : 'warning',
           title: pct + '% cart abandonment rate — ' + abandoned.length + ' of ' + carts.length + ' carts not completed',
           description: 'Over ' + pct + '% of shopping carts are being abandoned before purchase. Industry average is 70% — but abandoned carts still represent recoverable revenue through automated follow-up sequences.',
@@ -7606,6 +7661,7 @@ async function runFullAudit(token, auditId, meta) {
     const noBudgetCampaigns = campaigns.filter(c => !c.budget && !c.budgetMicros);
     if (noBudgetCampaigns.length > 0) {
       issues.push({
+        dimension: 'Marketing Health',
         severity: 'info',
         title: noBudgetCampaigns.length + ' campaign' + (noBudgetCampaigns.length!==1?'s':'') + ' with no budget tracked — ROI reporting blind spot',
         description: 'Campaigns without budget data make true ROI uncalculable. HubSpot shows revenue influenced but cannot show cost-per-acquisition without spend tracked.',
@@ -7653,6 +7709,7 @@ async function runFullAudit(token, auditId, meta) {
       if (overallBounceRate > 5) {
         marketingScore -= 20;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'critical',
           title: `Email bounce rate ${overallBounceRate}% — HubSpot will suspend your sending account above 5%`,
           description: `Your overall email bounce rate across ${sentEmails.length} campaigns is ${overallBounceRate}%. HubSpot suspends email sending when bounce rate exceeds 5% — at ${overallBounceRate}% you are at immediate risk. This means marketing emails AND workflow emails stop sending completely until resolved.`,
@@ -7669,6 +7726,7 @@ async function runFullAudit(token, auditId, meta) {
       } else if (overallBounceRate > 3) {
         marketingScore -= 10;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'warning',
           title: `Email bounce rate ${overallBounceRate}% — approaching HubSpot's 5% suspension threshold`,
           description: `Your bounce rate of ${overallBounceRate}% is above the healthy benchmark of <2% and approaching the 5% threshold where HubSpot suspends your account. At this trajectory, one large send to a dirty list could trigger an account suspension.`,
@@ -7686,6 +7744,7 @@ async function runFullAudit(token, auditId, meta) {
       if (overallUnsubRate > 3) {
         marketingScore -= 15;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'critical',
           title: `Unsubscribe rate ${overallUnsubRate}% — HubSpot suspends accounts above 3%`,
           description: `Your unsubscribe rate of ${overallUnsubRate}% exceeds HubSpot's 3% threshold for account suspension. ${totalUnsub.toLocaleString()} contacts have actively opted out. High unsub rates signal wrong audience, wrong content, or wrong frequency — and once suspended, no emails send until HubSpot manually reviews your account.`,
@@ -7701,6 +7760,7 @@ async function runFullAudit(token, auditId, meta) {
       } else if (overallUnsubRate > 1) {
         marketingScore -= 7;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'warning',
           title: `Unsubscribe rate ${overallUnsubRate}% — above the healthy 1% benchmark`,
           description: `Industry standard is under 1% unsubscribe rate. At ${overallUnsubRate}% your contacts are opting out faster than healthy. This erodes your list quality, damages sender reputation, and signals content or targeting problems.`,
@@ -7718,6 +7778,7 @@ async function runFullAudit(token, auditId, meta) {
       if (overallSpamRate > 0.1) {
         marketingScore -= 18;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'critical',
           title: `Spam report rate ${overallSpamRate}% — above 0.1% triggers account suspension`,
           description: `Your spam complaint rate of ${overallSpamRate}% (${totalSpam} reports from ${totalSent.toLocaleString()} sends) exceeds HubSpot's 0.1% threshold. Contacts marking your email as spam is the most damaging signal to your domain reputation — Gmail and Yahoo now enforce strict spam rate limits for bulk senders.`,
@@ -7736,6 +7797,7 @@ async function runFullAudit(token, auditId, meta) {
       if (overallOpenRate < 15 && totalSent > 1000) {
         marketingScore -= 8;
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'warning',
           title: `Overall email open rate ${overallOpenRate}% — below the 20-25% industry benchmark`,
           description: `Across ${sentEmails.length} email campaigns, your average open rate is ${overallOpenRate}%. The industry benchmark is 20-25%. Low open rates indicate subject line problems, wrong send time, wrong audience, or contacts who have mentally unsubscribed without clicking the button.`,
@@ -7761,6 +7823,7 @@ async function runFullAudit(token, auditId, meta) {
     if (highBounce.length > 0 && !issues.find(i => i.title.includes('bounce rate'))) {
       marketingScore -= Math.min(15, highBounce.length * 5);
       issues.push({
+        dimension: 'Marketing Health',
         severity: highBounce.length > 2 ? 'critical' : 'warning',
         title: `${highBounce.length} individual email${highBounce.length!==1?'s':''} with >5% bounce rate — list health problems`,
         description: `${highBounce.length} specific campaigns have bounce rates above 5%. This signals those sends went to old, invalid, or purchased contact segments. Each high-bounce send damages your domain reputation even if your overall rate looks acceptable.`,
@@ -7782,6 +7845,7 @@ async function runFullAudit(token, auditId, meta) {
     });
     if (staleDrafts.length > 5) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${staleDrafts.length} marketing email drafts untouched for 90+ days — portal clutter`,
         description: 'Stale drafts represent abandoned campaigns. They clutter the email tool, confuse new team members, and make it harder to find active work.',
@@ -7803,6 +7867,7 @@ async function runFullAudit(token, auditId, meta) {
       if (nps !== null && nps < 20) {
         serviceScore -= 15;
         issues.push({
+          dimension: 'Data Integrity',
           severity: nps < 0 ? 'critical' : 'warning',
           title: 'NPS score ' + nps + ' — customer sentiment below healthy threshold (benchmark: 31+)',
           description: 'B2B SaaS NPS benchmark is 31+. Scores below 20 mean more detractors than promoters. Detractors churn faster and share negative experiences more than promoters share positive ones.',
@@ -7818,6 +7883,7 @@ async function runFullAudit(token, auditId, meta) {
   // ── 10. EMAIL SUBSCRIPTION HEALTH ────────────────────────────────────────
   if (optOutDefs.length > 20) {
     issues.push({
+      dimension: 'Marketing Health',
       severity: 'info',
       title: optOutDefs.length + ' email subscription types — preference center too complex',
       description: 'Most contacts see ' + optOutDefs.length + ' subscription types as overwhelming and unsubscribe from everything. Best practice is 4-6 meaningful categories.',
@@ -7833,6 +7899,7 @@ async function runFullAudit(token, auditId, meta) {
     if (superAdminUsers.length > 5) {
       configScore -= Math.min(15, (superAdminUsers.length - 5) * 3);
       issues.push({
+        dimension: 'Data Integrity',
         severity: superAdminUsers.length > 10 ? 'critical' : 'warning',
         title: superAdminUsers.length + ' super admins — too many users with full portal access',
         description: 'You have ' + superAdminUsers.length + ' super admins. HubSpot best practice is 2-3 maximum. Super admins can delete records, change billing, modify all settings, and access all data. Each unnecessary super admin is a security and compliance risk.',
@@ -7855,6 +7922,7 @@ async function runFullAudit(token, auditId, meta) {
     if (undocumented.length > 10) {
       dataScore -= Math.min(8, Math.round(undocumented.length / customProps.length * 20));
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: undocumented.length + ' custom properties have no description — data model undocumented',
         description: 'Custom properties without descriptions are invisible to new team members, make reporting harder, and signal a portal that has grown without governance. When a rep or marketer cannot find the right property, they create a duplicate.',
@@ -7881,6 +7949,7 @@ async function runFullAudit(token, auditId, meta) {
     if (avgPerUser < 5 && users.length > 3) {
       teamScore -= Math.min(15, Math.max(0, 15 - avgPerUser * 3));
       issues.push({
+        dimension: 'Marketing Health',
         severity: 'warning',
         title: 'Low rep activity logging — avg ' + avgPerUser + ' engagements per user in last 30 days',
         description: 'Across ' + users.length + ' users, FixOps found an average of ' + avgPerUser + ' logged engagements (calls, emails, meetings, notes) per user. Low logging means your CRM does not reflect reality — pipeline data is unreliable and managers cannot coach from actual activity.',
@@ -7912,6 +7981,7 @@ async function runFullAudit(token, auditId, meta) {
     });
     if (expiredGoals.length > 0) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: expiredGoals.length + ' expired sales goal' + (expiredGoals.length!==1?'s':'') + ' — rep targets not updated',
         description: 'Sales goals past their end date without replacement mean reps are working without active targets. Pipeline discipline and accountability drop without current goals.',
@@ -7933,6 +8003,7 @@ async function runFullAudit(token, auditId, meta) {
     if (unownedLeads.length > 0) {
       dataScore -= Math.min(10, unownedLeads.length * 2);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'warning',
         title: unownedLeads.length + ' unowned lead' + (unownedLeads.length!==1?'s':'') + ' — falling through the cracks',
         description: 'Unowned leads have no rep responsible for them. In a healthy setup, every lead is assigned the same day it is created.',
@@ -7944,6 +8015,7 @@ async function runFullAudit(token, auditId, meta) {
     if (stalledLeads.length > 0) {
       pipelineScore -= Math.min(12, stalledLeads.length * 3);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'warning',
         title: stalledLeads.length + ' lead' + (stalledLeads.length!==1?'s':'') + ' stuck in New status for 14+ days',
         description: 'Leads in New status for over 2 weeks are either forgotten or being worked without updates. Healthy conversion time is 3-5 days for qualified leads.',
@@ -7969,6 +8041,7 @@ async function runFullAudit(token, auditId, meta) {
     if (unpublishedKB.length > 5) {
       serviceScore -= Math.min(12, unpublishedKB.length);
       issues.push({
+        dimension: 'Data Integrity',
         severity: unpublishedKB.length > 15 ? 'critical' : 'warning',
         title: `${unpublishedKB.length} knowledge base articles unpublished — support deflection blocked`,
         description: `You have ${totalKB} KB articles total but ${unpublishedKB.length} remain in draft. Each unpublished article is a customer question that cannot be self-served — forcing a support ticket instead. HubSpot data shows portals with complete KBs deflect 30-40% of tier-1 tickets.`,
@@ -7987,6 +8060,7 @@ async function runFullAudit(token, auditId, meta) {
     if (zeroViewKB.length > 3 && totalKB > 10) {
       const zeroViewPct = Math.round(zeroViewKB.length / totalKB * 100);
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${zeroViewKB.length} knowledge base articles have zero views — content effort wasted`,
         description: `${zeroViewPct}% of your KB articles have never been viewed. These articles represent content creation time with zero support deflection value. Either they're not discoverable, cover topics customers do not search for, or are not linked from support workflows.`,
@@ -8013,6 +8087,7 @@ async function runFullAudit(token, auditId, meta) {
       teamScore -= Math.min(15, ownersWithoutLinks.length * 2);
       const noLinkNames = ownersWithoutLinks.slice(0,5).map(id => ownerMap[id] || ('Rep ' + id)).filter(n => !n.startsWith('Rep '));
       issues.push({
+        dimension: 'Data Integrity',
         severity: noLinkPct > 60 ? 'critical' : 'warning',
         title: `${ownersWithoutLinks.length} of ${ownerIds.length} reps have no meeting booking link — forcing manual scheduling`,
         description: `${noLinkPct}% of your sales team has no HubSpot meeting booking link. Every meeting they book requires back-and-forth emails instead of a single click. Studies show booking links reduce time-to-meeting by 60% and increase meeting volume by 25%.${noLinkNames.length > 0 ? ` Missing: ${noLinkNames.join(', ')}.` : ''}`,
@@ -8040,6 +8115,7 @@ async function runFullAudit(token, auditId, meta) {
   if (emailTemplates.length === 0 && users.length > 2) {
     teamScore -= 5;
     issues.push({
+      dimension: 'Marketing Health',
       severity: 'info',
       title: 'No email templates created — every sales email written from scratch',
       description: 'Your team has no shared email templates in HubSpot. Every rep writes individual emails from scratch, leading to inconsistent messaging, longer ramp time for new hires, and zero visibility into which messages perform best.',
@@ -8057,6 +8133,7 @@ async function runFullAudit(token, auditId, meta) {
 
   if (playbooks.length === 0 && deals.length > 20 && users.length > 2) {
     issues.push({
+      dimension: 'Marketing Health',
       severity: 'info',
       title: 'No playbooks configured — reps have no guided selling process',
       description: 'HubSpot Playbooks give reps structured call scripts, discovery frameworks, and objection handling guides right inside the CRM. With zero playbooks, every rep runs their own process — making it impossible to replicate what your top performers do.',
@@ -8081,6 +8158,7 @@ async function runFullAudit(token, auditId, meta) {
   if (users.length > 3 && !hasNeverLogList) {
     configScore -= 5;
     issues.push({
+      dimension: 'Marketing Health',
       severity: 'info',
       title: 'Never Log email list not configured — internal emails may log to CRM',
       description: 'Without a "Never Log" list configured in HubSpot, your email integration may log internal emails (sent between team members) as contact activity. This pollutes contact timelines with irrelevant data and makes rep activity reports inaccurate.',
@@ -8100,6 +8178,7 @@ async function runFullAudit(token, auditId, meta) {
   const pipelineCount = dealPipelines.length;
   if (pipelineCount === 1 && deals.length > 50 && products.length === 0) {
     issues.push({
+      dimension: 'Pipeline Integrity',
       severity: 'info',
       title: 'Single deal pipeline — different products or sales motions not separated',
       description: 'With one pipeline, every deal type — new business, renewal, upsell, partnership — follows the same stage progression. This makes it impossible to measure conversion rates accurately by deal type or optimize your process for different selling motions.',
@@ -8129,6 +8208,7 @@ async function runFullAudit(token, auditId, meta) {
   if (breezeMissing.length >= 2) {
     configScore -= 5;
     issues.push({
+      dimension: 'Configuration & Security',
       severity: 'info',
       title: `HubSpot Breeze AI not ready — ${breezeMissing.length} prerequisites missing`,
       description: `HubSpot's AI tools (Breeze) require foundational data to function. ${breezeMissing.length} key prerequisites are missing from your portal: ${breezeMissing.join('; ')}. Without these, Breeze Agents cannot answer customer questions, prospect effectively, or generate insights from your data.`,
@@ -8170,6 +8250,7 @@ async function runFullAudit(token, auditId, meta) {
     if (underperformingTeams.length > 0) {
       const worst = underperformingTeams[0];
       issues.push({
+        dimension: 'Team Adoption',
         severity: 'warning',
         title: `Team "${worst.name}" averaging ${worst.avgCalls} calls/rep vs company average of ${Math.round(overallAvgCalls * 10)/10}`,
         description: `Your ${worst.reps} reps in "${worst.name}" are logging significantly fewer activities than the rest of the team. This gap is 50%+ below company average — indicating either a coaching need, a different territory type, or a CRM logging problem.`,
@@ -8207,6 +8288,7 @@ async function runFullAudit(token, auditId, meta) {
       if (noSpfDomains.length > 0) issues_list.push(`SPF missing on ${noSpfDomains.map(d=>d.domain).slice(0,2).join(', ')}`);
       if (noDkimDomains.length > 0) issues_list.push(`DKIM missing on ${noDkimDomains.map(d=>d.domain).slice(0,2).join(', ')}`);
       issues.push({
+        dimension: 'Marketing Health',
         severity: 'critical',
         title: `Email authentication incomplete — ${issues_list.join(' · ')}`,
         description: `Email authentication (SPF, DKIM, DMARC) tells receiving mail servers your emails are legitimate. Without it, emails land in spam, get blocked, and your sender reputation degrades over time. This affects every marketing email, every sales sequence, and every notification you send.`,
@@ -8236,6 +8318,7 @@ async function runFullAudit(token, auditId, meta) {
   if (repsWithoutEmailInt > allUsers.length * 0.4 && allUsers.length > 2) {
     teamScore -= 12;
     issues.push({
+      dimension: 'Marketing Health',
       severity: repsWithoutEmailInt > allUsers.length * 0.7 ? 'warning' : 'info',
       title: `${repsWithoutEmailInt} users haven't connected their email — activity logging is manual`,
       description: `Without Gmail or Outlook connected, reps must manually log every email, call, and meeting. Most don't. That means your CRM timeline is incomplete, rep activity reports are inaccurate, and managers have no real visibility into what's happening.`,
@@ -8265,6 +8348,7 @@ async function runFullAudit(token, auditId, meta) {
   if (lowReplySeqs.length > 0) {
     marketingScore -= Math.min(10, lowReplySeqs.length * 2);
     issues.push({
+      dimension: 'Automation Health',
       severity: lowReplySeqs.length > 3 ? 'warning' : 'info',
       title: `${lowReplySeqs.length} sequence${lowReplySeqs.length!==1?'s':''} below 3% reply rate — copy or targeting is broken`,
       description: `${lowReplySeqs.length} of your active sequences have reply rates under 3% with 50+ enrollments. Industry benchmark is 8-12% for well-targeted sequences. Low reply rates mean your messaging, targeting, or send timing needs a rewrite — continuing to enroll contacts is burning your domain reputation.`,
@@ -8302,6 +8386,7 @@ async function runFullAudit(token, auditId, meta) {
       const maxCollide = Math.max(...sharedTriggers.map(([,n]) => n.length));
       configScore -= Math.min(12, sharedTriggers.length * 3);
       issues.push({
+        dimension: 'Automation Health',
         severity: sharedTriggers.length > 3 ? 'warning' : 'info',
         title: `${sharedTriggers.length} workflow${sharedTriggers.length!==1?'s share':' shares'} enrollment triggers — race condition risk`,
         description: `${sharedTriggers.length} pairs of active workflows enroll from the same trigger condition. When two workflows run simultaneously on the same contact or deal, the order they execute is not guaranteed. If they both write to the same property, the result is unpredictable — you can't know which value will stick.`,
@@ -8335,6 +8420,7 @@ async function runFullAudit(token, auditId, meta) {
   if (darkFunnelPct > 20 && recentContacts.length > 20) {
     marketingScore -= Math.min(12, Math.round(darkFunnelPct / 5));
     issues.push({
+      dimension: 'Data Integrity',
       severity: darkFunnelPct > 50 ? 'critical' : 'warning',
       title: `${darkFunnelPct}% of new contacts have no source — your funnel is partly invisible`,
       description: `${noSourceContacts.length} of your ${recentContacts.length} contacts created in the last 90 days have no analytics source recorded. You're acquiring leads you can't trace back to a campaign, channel, or ad. Every budget decision you make about marketing spend is based on incomplete data.`,
@@ -8362,6 +8448,7 @@ async function runFullAudit(token, auditId, meta) {
   if (pastDueNoTask.length > 0) {
     pipelineScore -= Math.min(15, pastDueNoTask.length * 2);
     issues.push({
+      dimension: 'Data Integrity',
       severity: pastDueNoTask.length > 5 ? 'critical' : 'warning',
       title: `${pastDueNoTask.length} overdue deal${pastDueNoTask.length!==1?'s':''} with zero tasks — nobody is following up`,
       description: `${pastDueNoTask.length} open deals have passed their close date with no tasks scheduled and no recent notes. These aren't just stalled — they're actively being ignored. In competitive sales, deals with no follow-up action within 72 hours of going overdue are 60% less likely to close.`,
@@ -8395,6 +8482,7 @@ async function runFullAudit(token, auditId, meta) {
   if (ghostContacts.length > 500 && ghostPct > 15) {
     dataScore -= Math.min(10, Math.round(ghostPct / 5));
     issues.push({
+      dimension: 'Data Integrity',
       severity: ghostPct > 40 ? 'warning' : 'info',
       title: `${ghostContacts.length.toLocaleString()} contacts (${ghostPct}%) with no activity in 12+ months — billing tier inflation`,
       description: `${ghostContacts.length.toLocaleString()} contacts have had zero engagement — no emails sent, no sales activity, no notes — for over a year. They're counted in your HubSpot billing tier but contributing nothing to pipeline or revenue. Archiving them could drop your contact tier and reduce your monthly bill.`,
@@ -8437,6 +8525,7 @@ async function runFullAudit(token, auditId, meta) {
   if (featureChecks.length >= 2) {
     configScore -= Math.min(15, featureChecks.length * 3);
     issues.push({
+      dimension: 'Data Integrity',
       severity: featureChecks.length >= 4 ? 'warning' : 'info',
       title: `${featureChecks.length} HubSpot features in your plan are completely unused`,
       description: `Based on your portal data, ${featureChecks.length} features included in your HubSpot subscription have zero usage. You're paying for capabilities your team either hasn't been set up on or doesn't know exist. Each unused feature represents both a cost and a competitive gap.`,
@@ -8478,6 +8567,7 @@ async function runFullAudit(token, auditId, meta) {
     if (lowFillProps.length > 10) {
       dataScore -= Math.min(10, Math.round(lowFillProps.length / 5));
       issues.push({
+        dimension: 'Data Integrity',
         severity: lowFillProps.length > 25 ? 'warning' : 'info',
         title: `${lowFillProps.length} custom contact properties have <5% fill rate — CRM bloat`,
         description: `These ${lowFillProps.length} properties exist in your contact schema but are virtually empty across your ${contacts.length.toLocaleString()} contacts. They clutter your views, slow your forms, confuse your team, and make HubSpot reporting harder. Properties like these accumulate from integrations, old campaigns, and ad-hoc field creation.`,
@@ -8495,6 +8585,7 @@ async function runFullAudit(token, auditId, meta) {
 
     if (undocumentedCount > 15) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'info',
         title: `${undocumentedCount} custom properties have no description — onboarding and documentation gap`,
         description: `${undocumentedCount} of your custom contact properties have no description. When a new team member sees "hs_custom_field_47" in a view, they have no idea what it means or when to use it. This is a hidden knowledge management problem that compounds over time.`,
@@ -8521,6 +8612,7 @@ async function runFullAudit(token, auditId, meta) {
 
     if (pctNoAttribution > 60 && zeroDealCampaigns > 5) {
       issues.push({
+        dimension: 'Data Integrity',
         severity: 'warning',
         title: `${zeroDealCampaigns} of ${campaigns.length} campaigns have zero deal attribution — marketing ROI invisible`,
         description: `${pctNoAttribution}% of your campaigns show no influenced contacts or revenue. This means either your UTM tracking is broken, your campaign-to-contact associations aren't being set, or most campaigns genuinely aren't driving pipeline. Without attribution, your marketing team cannot defend their budget or optimize spend.`,
@@ -8550,6 +8642,7 @@ async function runFullAudit(token, auditId, meta) {
     if (unrespondedConvs.length > 3) {
       serviceScore -= Math.min(12, unrespondedConvs.length * 2);
       issues.push({
+        dimension: 'Data Integrity',
         severity: unrespondedConvs.length > 10 ? 'critical' : 'warning',
         title: `${unrespondedConvs.length} conversations open 24+ hours with no response`,
         description: `${unrespondedConvs.length} customer conversations in your HubSpot inbox have been waiting more than 24 hours without a reply. Industry benchmark: 73% of customers expect a response within 24 hours. Each unresponded conversation is a customer whose trust is actively eroding.`,
@@ -8588,6 +8681,7 @@ async function runFullAudit(token, auditId, meta) {
       if (noCloseDatePct > 40 || noAmountPct > 30) {
         reportingScore -= Math.min(20, Math.round((noCloseDatePct + noAmountPct) / 8));
         issues.push({
+          dimension: 'Pipeline Integrity',
           severity: 'critical',
           title: `Revenue forecast is unreliable — ${noCloseDatePct}% of deals missing close dates, ${noAmountPct}% missing amounts`,
           description: `Your pipeline forecast is built on incomplete data. ${noCloseDatePct}% of open deals have no close date and ${noAmountPct}% have no dollar value. This means your weighted pipeline forecast — the number your CEO and board see — could be off by six figures or more. HubSpot's forecast tool multiplies amount × probability × close date timing. Missing any one of these makes the entire number meaningless.`,
@@ -8607,6 +8701,7 @@ async function runFullAudit(token, auditId, meta) {
         const winPct = Math.round(winRateD * 100);
         if (q90 > 0 && winPct > 0) {
           issues.push({
+            dimension: 'Pipeline Integrity',
             severity: 'info',
             title: `Pipeline Forecast: ~$${q90.toLocaleString()} weighted pipeline at ${winPct}% historical win rate`,
             description: `Based on your current pipeline and historical close rates, your weighted forecast is $${q90.toLocaleString()}. Your team closes ${winPct}% of opportunities — ${winPct >= 30 ? 'above' : 'below'} the 25-35% industry benchmark for B2B sales. Pipeline velocity is healthy when deals move through stages in under 30 days average.`,
@@ -8637,6 +8732,7 @@ async function runFullAudit(token, auditId, meta) {
     if (deadPct > 25) {
       dataScore -= Math.min(15, Math.round(deadPct / 5));
       issues.push({
+        dimension: 'Data Integrity',
         severity: deadPct > 50 ? 'critical' : 'warning',
         title: `${deadContacts.length.toLocaleString()} contacts (${deadPct}%) are inactive — costing ~$${billingCost.toLocaleString()}/mo with zero pipeline value`,
         description: `${deadPct}% of your contact database has had zero activity in over a year, is opted out, or has no email address. You're paying for these contacts in your HubSpot billing tier every month and getting nothing in return. This also degrades email deliverability — every send to a dead list hurts your sender reputation score.`,
@@ -8666,6 +8762,7 @@ async function runFullAudit(token, auditId, meta) {
       if (unusedProps.length > 5) {
         dataScore -= Math.min(10, unusedProps.length);
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'info',
           title: `${unusedProps.length} custom contact properties have zero data — portal bloat costing team efficiency`,
           description: `${unusedProps.length} custom properties exist on your contact records but contain data for zero contacts. These empty properties clutter your property list, make it harder for reps to find what they need, and often lead to duplicate properties being created. In portals that have grown organically, this is the #1 cause of "we can't find anything in HubSpot" complaints.`,
@@ -8682,6 +8779,7 @@ async function runFullAudit(token, auditId, meta) {
 
       if (undescribed.length > customProps.length * 0.6 && undescribed.length > 5) {
         issues.push({
+          dimension: 'Data Integrity',
           severity: 'info',
           title: `${undescribed.length} custom properties have no description — data model undocumented`,
           description: `${Math.round(undescribed.length/customProps.length*100)}% of your custom properties have no description. When a new team member, consultant, or admin looks at your properties, they have no idea what they're for. This is how duplicate properties get created — someone can't find "Sales Region" because it's undocumented, so they create "Territory" instead.`,
@@ -8709,6 +8807,7 @@ async function runFullAudit(token, auditId, meta) {
       if (brokenForms.length > 0) {
         marketingScore -= Math.min(12, brokenForms.length * 4);
         issues.push({
+          dimension: 'Marketing Health',
           severity: brokenForms.length > 2 ? 'critical' : 'warning',
           title: `${brokenForms.length} form${brokenForms.length!==1?'s':''} with <1% conversion rate — lead capture silently failing`,
           description: `${brokenForms.length} high-traffic forms are receiving significant views but almost zero submissions. A form with 500 views and 2 submissions (0.4% conversion) either has a technical problem, asks too many friction-heavy fields, or is embedded on a page where visitors aren't ready to convert. Industry benchmark for a well-optimized HubSpot form is 15-25% conversion rate.`,
@@ -8737,6 +8836,7 @@ async function runFullAudit(token, auditId, meta) {
       const worst = allRanked[allRanked.length-1];
       if (best && worst && best.rate - worst.rate > 15) {
         issues.push({
+          dimension: 'Marketing Health',
           severity: 'info',
           title: `Form conversion gap: best form ${best.rate}% vs worst ${worst.rate}% — ${Math.round(best.rate - worst.rate)}pp spread`,
           description: `Your top-performing form "${best.name}" converts at ${best.rate}% while "${worst.name}" converts at ${worst.rate}%. The ${Math.round(best.rate-worst.rate)} percentage point gap suggests the best form has something the worst doesn't — shorter length, better placement, stronger CTA, or better audience targeting. Applying the same approach to your worst performers could double their lead volume.`,
@@ -8768,6 +8868,7 @@ async function runFullAudit(token, auditId, meta) {
       if (unknownPct > 50) {
         reportingScore -= 10;
         issues.push({
+          dimension: 'Reporting Quality',
           severity: 'warning',
           title: `${unknownPct}% of closed won revenue has no source attribution — marketing ROI invisible`,
           description: `$${Math.round(unknownRev).toLocaleString()} of your closed won revenue (${unknownPct}%) shows "Unknown" as the original source. This means your marketing team can't prove which channels are generating revenue, can't defend their budget, and can't double down on what's working. UTM parameters aren't being captured or the HubSpot tracking code isn't installed on your website.`,
@@ -8785,6 +8886,7 @@ async function runFullAudit(token, auditId, meta) {
         const topSrc = Object.entries(srcRevMap).sort((a,b)=>b[1]-a[1])[0];
         if (topSrc) {
           issues.push({
+            dimension: 'Reporting Quality',
             severity: 'info',
             title: `Top revenue source: "${topSrc[0]}" generated $${Math.round(topSrc[1]).toLocaleString()} in closed won deals`,
             description: `Your source attribution data is healthy. "${topSrc[0]}" is your highest-revenue channel, accounting for $${Math.round(topSrc[1]).toLocaleString()} of closed won revenue. Use this data to double down on what's working and reduce spend on lower-performing channels.`,
@@ -8812,6 +8914,7 @@ async function runFullAudit(token, auditId, meta) {
     if (highTicketCompanies > 0) {
       serviceScore -= Math.min(10, highTicketCompanies * 3);
       issues.push({
+        dimension: 'Service Health',
         severity: 'warning',
         title: `${highTicketCompanies} customer${highTicketCompanies!==1?'s have':' has'} 5+ open tickets — churn risk elevated`,
         description: `High ticket volume from individual customers is the clearest leading indicator of churn in B2B SaaS. A customer submitting 5+ support tickets signals product friction, implementation problems, or unmet expectations. By the time they mention it on a renewal call, it's often too late.`,
