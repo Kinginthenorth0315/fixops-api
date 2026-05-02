@@ -3809,7 +3809,6 @@ const buildAuthUrl = (req, res, params) => {
       'crm.objects.users.read',
       'crm.objects.quotes.read',
       'crm.objects.line_items.read',
-      'crm.objects.products.read',
       'crm.objects.invoices.read',
       'crm.objects.orders.read',
       'crm.objects.subscriptions.read',
@@ -3818,7 +3817,6 @@ const buildAuthUrl = (req, res, params) => {
       'crm.schemas.deals.read',
       'crm.lists.read',
       'tickets',
-      'sales-email-read',
       'e-commerce',
       'account-info.security.read',
       'settings.users.read',
@@ -3829,7 +3827,6 @@ const buildAuthUrl = (req, res, params) => {
 
     const OPTIONAL_SCOPES = [
       'content',
-      'social',
       'automation',
       'automation.sequences.read',
       'forms',
@@ -3843,12 +3840,9 @@ const buildAuthUrl = (req, res, params) => {
       'scheduler.meetings.meeting-link.read',
       'crm.schemas.custom.read',
       'crm.objects.custom.read',
-      'crm.objects.projects.read',
-      'crm.dealsplits.read_write',
       'settings.users.teams.read',
       'crm.objects.carts.read',
       'crm.objects.marketing_events.read',
-      'crm.pipelines.orders.read',
     ].join(' ');
     const url = new URL('https://app.hubspot.com/oauth/authorize');
     url.searchParams.set('client_id', HUBSPOT_CLIENT_ID);
