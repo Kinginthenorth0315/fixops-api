@@ -8942,37 +8942,47 @@ async function runFullAudit(token, auditId, meta) {
   // Score floors: no dimension should realistically show below 10
   // Prevents 0-scores on portals that are bad but not literally non-functional
   const scoreFloor = (s, floor) => Math.max(floor, Math.min(100, Math.round(s)));
+  // ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
+  dataScore       = Math.max(10, dataScore);
+  autoScore       = Math.max(10, autoScore);
+  pipelineScore   = Math.max(10, pipelineScore);
+  marketingScore  = Math.max(10, marketingScore);
+  configScore     = Math.max(10, configScore);
+  teamScore       = Math.max(10, teamScore);
+  serviceScore    = Math.max(10, serviceScore);
+  reportingScore  = Math.max(10, reportingScore);
+
   const scoreMap = {
-    dataIntegrity:    contacts.length > 50 
+    dataIntegrity: Math.max(10, contacts.length > 50)
       ? scoreFloor(dataScore, 12)
       : contacts.length > 0 
         ? scoreFloor(dataScore + 10, 15)
         : null,
 
-    automationHealth: (workflows.length > 0 || sequences.length > 0) 
+    automationHealth: Math.max(10, (workflows.length > 0 || sequences.length > 0))
       ? scoreFloor(autoScore, 15)
       : null,
 
-    pipelineIntegrity: deals.length > 0 
+    pipelineIntegrity: Math.max(10, deals.length > 0)
       ? scoreFloor(pipelineScore, 12)
       : null,
 
-    marketingHealth:  hasMarketingData 
+    marketingHealth: Math.max(10, hasMarketingData)
       ? scoreFloor(marketingScore, 10)
       : null,
 
-    configSecurity:   scoreFloor(configScore, 28),
+    configSecurity: Math.max(10, scoreFloor(configScore), 28),
     // Config starts at 88, floor at 28 — even terrible config is functional
 
-    reportingQuality: deals.length > 10 
+    reportingQuality: Math.max(10, deals.length > 10)
       ? scoreFloor(reportingScore, 15)
       : null,
 
-    teamAdoption:     (users.length > 1 && hasActivityData)
+    teamAdoption: Math.max(10, (users.length > 1 && hasActivityData))
       ? scoreFloor(teamScore, 15)
       : null,
 
-    serviceHealth:    hasServiceData 
+    serviceHealth: Math.max(10, hasServiceData)
       ? scoreFloor(serviceScore, 18)
       : null,
   };
@@ -8996,14 +9006,43 @@ async function runFullAudit(token, auditId, meta) {
     weightedSum += v * w;
     weightTotal += w;
   });
-  let overallScore = weightTotal > 0
+  // Enforce minimum floors so no dimension goes below 5
+  dataScore       = Math.max(5, dataScore);
+  automationScore = Math.max(5, automationScore);
+  pipelineScore   = Math.max(5, pipelineScore);
+  marketingScore  = Math.max(5, marketingScore);
+  configScore     = Math.max(5, configScore);
+  teamScore       = Math.max(5, teamScore);
+  serviceScore    = Math.max(5, serviceScore);
+  reportingScore  = Math.max(5, reportingScore);
+
+  // Portal maturity guard — portals with very little data get baseline scores
+  // A new/empty portal shouldn't score 8 just because nothing exists yet
+  const hasEnoughData = contacts.length > 50 || deals.length > 5 || workflows.length > 2;
+  if (!hasEnoughData) {
+    // New portal — only flag genuine configuration issues, not missing activity
+    dataScore       = Math.max(dataScore, 55);
+    automationScore = Math.max(automationScore, 55);
+    pipelineScore   = Math.max(pipelineScore, 60);
+    marketingScore  = Math.max(marketingScore, 55);
+    teamScore       = Math.max(teamScore, 60);
+    serviceScore    = Math.max(serviceScore, 65);
+  }
+
+  overallScore = weightTotal > 0
     ? Math.round(weightedSum / weightTotal)
     : 70;
+
+  // Portal maturity guard: new portals with minimal data shouldn't score near 0
+  // Only genuine config issues should affect an empty portal's score
+  const _hasData = contacts.length > 25 || deals.length > 3 || workflows.length > 2;
+  if (!_hasData && overallScore < 45) overallScore = 45;
+
   // Critical penalty: each critical issue drops overall by 2pts (max -20)
-  const critPenalty = Math.min(20, criticalCount * 2);
+  const critPenalty = Math.min(15, Math.round(criticalCount * 1.5));
   // Warning penalty: each warning drops overall by 0.5pt (max -8)
   const warnPenalty = Math.min(8, Math.round(warningCount * 0.5));
-  overallScore = Math.max(0, overallScore - critPenalty - warnPenalty);
+  overallScore = Math.max(12, overallScore - critPenalty - warnPenalty);
   // Hard grade caps based on critical issue count
   if (criticalCount > 0 && overallScore > 84) overallScore = 84;
   if (criticalCount >= 3 && overallScore > 71) overallScore = 71;
