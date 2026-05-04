@@ -10433,6 +10433,16 @@ async function runFullAudit(token, auditId, meta) {
         // Store open deals for deal-risk endpoint (capped to avoid storage bloat)
         dealList: deals.filter(d => d.properties?.hs_is_closed !== 'true').slice(0, 500).map(d => ({
           id: d.id,
+          deal: d.properties?.dealname || ('Deal #' + d.id),
+          name: d.properties?.dealname || ('Deal #' + d.id),
+          amount: d.properties?.amount,
+          value: d.properties?.amount ? '$' + Math.round(parseFloat(d.properties.amount)||0).toLocaleString() : '$0',
+          stage: d.properties?.dealstage,
+          closedate: d.properties?.closedate,
+          owner: d.properties?.hubspot_owner_id,
+          daysStalled: d.properties?.hs_lastmodifieddate
+            ? Math.floor((Date.now() - new Date(d.properties.hs_lastmodifieddate).getTime()) / 86400000)
+            : 0,
           properties: {
             dealname: d.properties?.dealname,
             amount: d.properties?.amount,
