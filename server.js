@@ -3189,6 +3189,18 @@ const runSentinelCheck = async (customer) => {
       headers: { Authorization: `Bearer ${freshToken}` },
       timeout: 15000
     });
+    // Log every HubSpot API call so scope usage is visible in Railway logs
+    hs.interceptors.request.use(config => {
+      console.log(`[FixOps API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+      return config;
+    });
+    hs.interceptors.response.use(
+      res => res,
+      err => {
+        console.error(`[FixOps API ERROR] ${err.config?.method?.toUpperCase()} ${err.config?.url} → ${err.response?.status} ${err.response?.data?.message || err.message}`);
+        return Promise.reject(err);
+      }
+    );
     const safe = async (fn, fb) => { try { return await fn(); } catch(e) { return fb; } };
 
     const [wfRes, usersRes, contactsRes] = await Promise.all([
