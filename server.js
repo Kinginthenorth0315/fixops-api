@@ -9020,7 +9020,7 @@ async function runFullAudit(token, auditId, meta) {
   });
   // Enforce minimum floors so no dimension goes below 5
   dataScore       = Math.max(5, dataScore);
-  automationScore = Math.max(5, automationScore);
+  autoScore = Math.max(5, autoScore);
   pipelineScore   = Math.max(5, pipelineScore);
   marketingScore  = Math.max(5, marketingScore);
   configScore     = Math.max(5, configScore);
@@ -9034,7 +9034,7 @@ async function runFullAudit(token, auditId, meta) {
   if (!hasEnoughData) {
     // New portal — only flag genuine configuration issues, not missing activity
     dataScore       = Math.max(dataScore, 55);
-    automationScore = Math.max(automationScore, 55);
+    autoScore = Math.max(autoScore, 55);
     pipelineScore   = Math.max(pipelineScore, 60);
     marketingScore  = Math.max(marketingScore, 55);
     teamScore       = Math.max(teamScore, 60);
