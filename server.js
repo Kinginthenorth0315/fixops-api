@@ -3204,7 +3204,7 @@ const runSentinelCheck = async (customer) => {
     const safe = async (fn, fb) => { try { return await fn(); } catch(e) { return fb; } };
 
     const [wfRes, usersRes, contactsRes] = await Promise.all([
-      safe(() => hs.get('/automation/v3/workflows?limit=100'), { data: { workflows: [] } }),
+      safe(() => paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: r } })), { data: { workflows: [] } }),
       safe(() => hs.get('/settings/v3/users/?limit=100'), { data: { results: [] } }),
       safe(() => hs.get('/crm/v3/objects/contacts?limit=1&properties=email'), { data: { total: 0 } }),
     ]);
@@ -5437,10 +5437,7 @@ async function runFullAudit(token, auditId, meta) {
   const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', activitySampleLimit);
 
   // Workflows and forms — attempt with Public App scope, fall back gracefully
-  const workflowsR = await safe(
-    () => hs.get('/automation/v3/workflows?limit=100'),
-    {data:{workflows:[]}}
-  );
+  const workflowsR = await paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: r } }))
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
@@ -5802,7 +5799,7 @@ async function runFullAudit(token, auditId, meta) {
 
   // Sequence enrollment stats
   const sequenceStatsR = await safe(
-    () => hs.get('/automation/v4/sequences?limit=100&include=stats'),
+    () => paginate('/automation/v4/sequences?include=stats', 9999).then(r => ({data:{results:r}})),
     {data:{results:[]}}
   );
 
@@ -8965,37 +8962,34 @@ async function runFullAudit(token, auditId, meta) {
   reportingScore  = Math.max(10, reportingScore);
 
   const scoreMap = {
-    dataIntegrity: Math.max(10, contacts.length > 50)
-      ? scoreFloor(dataScore, 12)
-      : contacts.length > 0 
-        ? scoreFloor(dataScore + 10, 15)
-        : null,
-
-    automationHealth: Math.max(10, (workflows.length > 0 || sequences.length > 0))
-      ? scoreFloor(autoScore, 15)
+    dataIntegrity:     contacts.length > 0
+      ? scoreFloor(dataScore, 10)
       : null,
 
-    pipelineIntegrity: Math.max(10, deals.length > 0)
-      ? scoreFloor(pipelineScore, 12)
+    automationHealth:  (workflows.length > 0 || sequences.length > 0)
+      ? scoreFloor(autoScore, 10)
       : null,
 
-    marketingHealth: Math.max(10, hasMarketingData)
+    pipelineIntegrity: deals.length > 0
+      ? scoreFloor(pipelineScore, 10)
+      : null,
+
+    marketingHealth:   hasMarketingData
       ? scoreFloor(marketingScore, 10)
       : null,
 
-    configSecurity: Math.max(10, scoreFloor(configScore), 28),
-    // Config starts at 88, floor at 28 — even terrible config is functional
+    configSecurity:    scoreFloor(configScore, 10),
 
-    reportingQuality: Math.max(10, deals.length > 10)
-      ? scoreFloor(reportingScore, 15)
+    reportingQuality:  deals.length > 5
+      ? scoreFloor(reportingScore, 10)
       : null,
 
-    teamAdoption: Math.max(10, (users.length > 1 && hasActivityData))
-      ? scoreFloor(teamScore, 15)
+    teamAdoption:      users.length > 0
+      ? scoreFloor(teamScore, 10)
       : null,
 
-    serviceHealth: Math.max(10, hasServiceData)
-      ? scoreFloor(serviceScore, 18)
+    serviceHealth:     tickets.length > 0
+      ? scoreFloor(serviceScore, 10)
       : null,
   };
   // Filter to only scored dimensions, build scores object
@@ -9012,34 +9006,15 @@ async function runFullAudit(token, auditId, meta) {
     marketingHealth: 1.0, configSecurity: 0.8, reportingQuality: 0.9,
     teamAdoption: 1.0, serviceHealth: 1.0
   };
+  // scoreMap already applied floors via scoreFloor()
+  // scores object filters out null dimensions (portals without that data)
   let weightedSum = 0, weightTotal = 0;
   Object.entries(scores).forEach(([k, v]) => {
+    if (v === null || v === undefined || isNaN(v)) return; // skip invalid
     const w = WEIGHTS[k] || 1.0;
     weightedSum += v * w;
     weightTotal += w;
   });
-  // Enforce minimum floors so no dimension goes below 5
-  dataScore       = Math.max(5, dataScore);
-  autoScore = Math.max(5, autoScore);
-  pipelineScore   = Math.max(5, pipelineScore);
-  marketingScore  = Math.max(5, marketingScore);
-  configScore     = Math.max(5, configScore);
-  teamScore       = Math.max(5, teamScore);
-  serviceScore    = Math.max(5, serviceScore);
-  reportingScore  = Math.max(5, reportingScore);
-
-  // Portal maturity guard — portals with very little data get baseline scores
-  // A new/empty portal shouldn't score 8 just because nothing exists yet
-  const hasEnoughData = contacts.length > 50 || deals.length > 5 || workflows.length > 2;
-  if (!hasEnoughData) {
-    // New portal — only flag genuine configuration issues, not missing activity
-    dataScore       = Math.max(dataScore, 55);
-    autoScore = Math.max(autoScore, 55);
-    pipelineScore   = Math.max(pipelineScore, 60);
-    marketingScore  = Math.max(marketingScore, 55);
-    teamScore       = Math.max(teamScore, 60);
-    serviceScore    = Math.max(serviceScore, 65);
-  }
 
   let overallScore = weightTotal > 0
     ? Math.round(weightedSum / weightTotal)
@@ -10486,6 +10461,7 @@ async function runFullAudit(token, auditId, meta) {
           id: d.id,
           deal: d.properties?.dealname || ('Deal #' + d.id),
           name: d.properties?.dealname || ('Deal #' + d.id),
+          recordId: d.id,
           amount: d.properties?.amount,
           value: d.properties?.amount ? '$' + Math.round(parseFloat(d.properties.amount)||0).toLocaleString() : '$0',
           stage: d.properties?.dealstage,
