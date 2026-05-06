@@ -9041,7 +9041,7 @@ async function runFullAudit(token, auditId, meta) {
     serviceScore    = Math.max(serviceScore, 65);
   }
 
-  overallScore = weightTotal > 0
+  let overallScore = weightTotal > 0
     ? Math.round(weightedSum / weightTotal)
     : 70;
 
