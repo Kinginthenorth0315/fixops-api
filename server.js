@@ -8984,28 +8984,6 @@ async function runFullAudit(token, auditId, meta) {
   // Prevents 0-scores on portals that are bad but not literally non-functional
   const scoreFloor = (s, floor) => Math.max(floor, Math.min(100, Math.round(s)));
   
-  // ── Duplicate property issues ────────────────────────────────────────────
-  if ((propertyUsage?.duplicateGroupCount||0) > 0) {
-    issues.push({
-      dimension: 'Data Integrity',
-      severity: propertyUsage.duplicateGroupCount > 5 ? 'critical' : 'warning',
-      title: propertyUsage.duplicateGroupCount + ' duplicate contact propert' + (propertyUsage.duplicateGroupCount === 1 ? 'y' : 'ies') + ' detected',
-      description: 'Duplicate properties cause inconsistent data, broken workflows, and confusing forms. Contacts have data split across both versions making reporting unreliable.',
-      impact: 'High — duplicates corrupt segmentation, lead scoring, and personalization tokens',
-      fix: 'CRM → Properties → review and consolidate duplicate pairs. Migrate data from the less-used version then deprecate it.',
-    });
-  }
-  if ((propertyUsage?.conflictPropCount||0) > 3) {
-    issues.push({
-      dimension: 'Automation Health',
-      severity: 'warning',
-      title: propertyUsage.conflictPropCount + ' properties written by 3+ workflows — collision risk',
-      description: 'When multiple workflows write to the same property the last one wins. This creates unpredictable behavior — wrong stage, score, or segment depending on which workflow fires last.',
-      impact: 'Medium — data integrity issues in lifecycle stages, lead scores, and routing',
-      fix: 'Review each high-collision property in the workflow dependency map. Consolidate logic or use workflow prioritization.',
-    });
-  }
-
 
   // ── All-objects property health issues ────────────────────────────────────
   if (allPropsEngine) {
@@ -9594,7 +9572,31 @@ async function runFullAudit(token, auditId, meta) {
       conflictPropCount: conflictProps.length,
     };
   })();
+
   const propertyUsage = propertyUsageEngine;
+
+  // ── Duplicate property issues ────────────────────────────────────────────
+  if ((propertyUsage?.duplicateGroupCount||0) > 0) {
+    issues.push({
+      dimension: 'Data Integrity',
+      severity: propertyUsage.duplicateGroupCount > 5 ? 'critical' : 'warning',
+      title: propertyUsage.duplicateGroupCount + ' duplicate contact propert' + (propertyUsage.duplicateGroupCount === 1 ? 'y' : 'ies') + ' detected',
+      description: 'Duplicate properties cause inconsistent data, broken workflows, and confusing forms. Contacts have data split across both versions making reporting unreliable.',
+      impact: 'High — duplicates corrupt segmentation, lead scoring, and personalization tokens',
+      fix: 'CRM → Properties → review and consolidate duplicate pairs. Migrate data from the less-used version then deprecate it.',
+    });
+  }
+  if ((propertyUsage?.conflictPropCount||0) > 3) {
+    issues.push({
+      dimension: 'Automation Health',
+      severity: 'warning',
+      title: propertyUsage.conflictPropCount + ' properties written by 3+ workflows — collision risk',
+      description: 'When multiple workflows write to the same property the last one wins. This creates unpredictable behavior — wrong stage, score, or segment depending on which workflow fires last.',
+      impact: 'Medium — data integrity issues in lifecycle stages, lead scores, and routing',
+      fix: 'Review each high-collision property in the workflow dependency map. Consolidate logic or use workflow prioritization.',
+    });
+  }
+
 
 
   // ── All-Objects Property Health Engine ───────────────────────────────────
