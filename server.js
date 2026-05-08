@@ -3204,8 +3204,8 @@ const runSentinelCheck = async (customer) => {
     const safe = async (fn, fb) => { try { return await fn(); } catch(e) { return fb; } };
 
     const [wfRes, usersRes, contactsRes] = await Promise.all([
-      safe(() => paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: r } })), { data: { workflows: [] } }),
-      safe(() => hs.get('/settings/v3/users/?limit=100'), { data: { results: [] } }),
+      safe(() => paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: Array.isArray(r) ? r : [] } })), { data: { workflows: [] } }),
+      safe(async () => ({ data: { results: await paginate('/settings/v3/users', 500) } }), { data: { results: [] } }),
       safe(() => hs.get('/crm/v3/objects/contacts?limit=1&properties=email'), { data: { total: 0 } }),
     ]);
 
@@ -5433,7 +5433,7 @@ async function runFullAudit(token, auditId, meta) {
   // ── PRIORITY 3: Owners — available via MCP ──────────────────────────────────
   // Note: pipelines and properties are NOT available via MCP beta — using empty fallbacks
   const [ownersR] = await Promise.all([
-    safe(()=>hs.get('/crm/v3/owners?limit=100'), {data:{results:[]}}),
+    safe(async ()=>({ data: { results: await paginate('/crm/v3/owners', 500) } }), {data:{results:[]}}),
   ]);
   const pipelinesR = {data:{results:[]}};
   const cPropsR    = {data:{results:[]}};
@@ -5450,7 +5450,8 @@ async function runFullAudit(token, auditId, meta) {
   const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', activitySampleLimit);
 
   // Workflows and forms — attempt with Public App scope, fall back gracefully
-  const workflowsR = await paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: r } }))
+  const workflowsRaw = await paginate('/automation/v3/workflows', 9999);
+  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : (workflowsRaw?.data?.workflows || []) } }
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
@@ -5525,13 +5526,13 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── Meeting booking links (scheduler.meetings.meeting-link.read) ─────────
   const meetingLinksR = await safe(
-    () => hs.get('/scheduler/v3/meetings/meeting-links?limit=100'),
+    () => paginate('/scheduler/v3/meetings/meeting-links', 500).then(r=>({data:{results:r}})),
     {data:{results:[]}}
   );
 
   // ── Teams structure (settings.users.teams.read) ───────────────────────────
   const teamsR = await safe(
-    () => hs.get('/settings/v3/users/teams?limit=100'),
+    () => paginate('/settings/v3/users/teams', 200).then(r=>({data:{results:r}})),
     {data:{results:[]}}
   );
   const settingsUsersR = await safe(
@@ -8964,7 +8965,30 @@ async function runFullAudit(token, auditId, meta) {
   // Score floors: no dimension should realistically show below 10
   // Prevents 0-scores on portals that are bad but not literally non-functional
   const scoreFloor = (s, floor) => Math.max(floor, Math.min(100, Math.round(s)));
-  // ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
+  
+  // ── Duplicate property issues ────────────────────────────────────────────
+  if ((propertyUsage?.duplicateGroupCount||0) > 0) {
+    issues.push({
+      dimension: 'Data Integrity',
+      severity: propertyUsage.duplicateGroupCount > 5 ? 'critical' : 'warning',
+      title: propertyUsage.duplicateGroupCount + ' duplicate contact propert' + (propertyUsage.duplicateGroupCount === 1 ? 'y' : 'ies') + ' detected',
+      description: 'Duplicate properties cause inconsistent data, broken workflows, and confusing forms. Contacts have data split across both versions making reporting unreliable.',
+      impact: 'High — duplicates corrupt segmentation, lead scoring, and personalization tokens',
+      fix: 'CRM → Properties → review and consolidate duplicate pairs. Migrate data from the less-used version then deprecate it.',
+    });
+  }
+  if ((propertyUsage?.conflictPropCount||0) > 3) {
+    issues.push({
+      dimension: 'Automation Health',
+      severity: 'warning',
+      title: propertyUsage.conflictPropCount + ' properties written by 3+ workflows — collision risk',
+      description: 'When multiple workflows write to the same property the last one wins. This creates unpredictable behavior — wrong stage, score, or segment depending on which workflow fires last.',
+      impact: 'Medium — data integrity issues in lifecycle stages, lead scores, and routing',
+      fix: 'Review each high-collision property in the workflow dependency map. Consolidate logic or use workflow prioritization.',
+    });
+  }
+
+// ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
   dataScore       = Math.max(10, dataScore);
   autoScore       = Math.max(10, autoScore);
   pipelineScore   = Math.max(10, pipelineScore);
@@ -9458,11 +9482,58 @@ async function runFullAudit(token, auditId, meta) {
     const bloat      = propData.filter(p => p.fillRate < 5).length;
     const noDesc     = propData.filter(p => !p.hasDescription).length;
 
+    // ── Duplicate property detection ──────────────────────────────────────
+    // Find properties with very similar labels (potential duplicates)
+    const allContactPropLabels = contactProps.map(p => ({
+      name: p.name,
+      label: (p.label || p.name || '').toLowerCase().trim(),
+      fillRate: propData.find(d => d.name === p.name)?.fillRate || 0,
+    }));
+
+    const dupePropGroups = [];
+    const seen = new Set();
+    allContactPropLabels.forEach(p => {
+      if (seen.has(p.name)) return;
+      // Find others with same label (exact or very similar)
+      const matches = allContactPropLabels.filter(q =>
+        q.name !== p.name && !seen.has(q.name) &&
+        (q.label === p.label ||
+         q.label.replace(/[_\s-]/g,'') === p.label.replace(/[_\s-]/g,''))
+      );
+      if (matches.length > 0) {
+        const group = [p, ...matches];
+        group.forEach(m => seen.add(m.name));
+        dupePropGroups.push(group);
+      }
+    });
+
+    // Properties referenced in multiple workflows (conflict risk)
+    const wfPropRefs = {};
+    workflows.forEach(wf => {
+      const wfName = wf.name || wf.id;
+      const json = JSON.stringify(wf);
+      contactProps.forEach(p => {
+        if (json.includes('"' + p.name + '"') || json.includes("'" + p.name + "'")) {
+          if (!wfPropRefs[p.name]) wfPropRefs[p.name] = [];
+          if (!wfPropRefs[p.name].includes(wfName)) wfPropRefs[p.name].push(wfName);
+        }
+      });
+    });
+    const conflictProps = Object.entries(wfPropRefs)
+      .filter(([,wfs]) => wfs.length >= 3)
+      .map(([name, wfs]) => ({ name, workflowCount: wfs.length, workflows: wfs.slice(0,5) }))
+      .sort((a,b) => b.workflowCount - a.workflowCount)
+      .slice(0, 20);
+
     return {
       total: customProps.length,
       wellUsed, underUsed, bloat, noDesc,
       topProps: propData.slice(0, 10),
       bloatProps: propData.filter(p => p.fillRate < 5).slice(0, 10),
+      duplicateGroups: dupePropGroups.slice(0, 20),
+      duplicateGroupCount: dupePropGroups.length,
+      conflictProps,
+      conflictPropCount: conflictProps.length,
     };
   })();
 
@@ -11295,8 +11366,12 @@ async function runFullAudit(token, auditId, meta) {
         landingPagesDraft:     landingPages.filter(p => p.state === 'DRAFT').length,
         emailTemplatesTotal:   emailTemplates.length,
         contactsMissingEmail:  contacts.filter(c => !c.properties?.email).length,
-        erroredWorkflows:      workflows.filter(w => w.status === 'ERROR' || w.internalProcessingState === 'SUSPENDED').length,
-        workflowsMissingGoals: workflows.filter(w => (w.enabled||w.isEnabled) && (!w.goalCriteria || w.goalCriteria.length === 0)).length,
+        erroredWorkflows:      workflows.filter(function(wf) {
+          const st = wf.executionState || wf.status || '';
+          return wf.errorCount > 0 || wf.errorsCount > 0 ||
+            ['ERROR', 'FAILED', 'PAUSED_DUE_TO_ERROR'].includes(String(st).toUpperCase());
+        }).length,
+        workflowsMissingGoals: workflows.filter(w => (w.enabled||w.isEnabled) && (!w.goalCriteria || (Array.isArray(w.goalCriteria) && w.goalCriteria.length === 0))).length,
         forecastEnabled:       deals.length > 5,
         unusedCustomProperties: (undocumentedProps||[]).length,
         dealPropsUnused:       Math.max(0, 0),
