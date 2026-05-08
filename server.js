@@ -3205,7 +3205,7 @@ const runSentinelCheck = async (customer) => {
 
     const [wfRes, usersRes, contactsRes] = await Promise.all([
       safe(() => paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: Array.isArray(r) ? r : [] } })), { data: { workflows: [] } }),
-      safe(async () => ({ data: { results: await paginate('/settings/v3/users', 500) } }), { data: { results: [] } }),
+      safe(() => hs.get('/settings/v3/users/?limit=500'), { data: { results: [] } }),
       safe(() => hs.get('/crm/v3/objects/contacts?limit=1&properties=email'), { data: { total: 0 } }),
     ]);
 
@@ -5433,7 +5433,7 @@ async function runFullAudit(token, auditId, meta) {
   // ── PRIORITY 3: Owners — available via MCP ──────────────────────────────────
   // Note: pipelines and properties are NOT available via MCP beta — using empty fallbacks
   const [ownersR] = await Promise.all([
-    safe(async ()=>({ data: { results: await paginate('/crm/v3/owners', 500) } }), {data:{results:[]}}),
+    safe(()=>hs.get('/crm/v3/owners?limit=500'), {data:{results:[]}}),
   ]);
   const pipelinesR = {data:{results:[]}};
   const cPropsR    = {data:{results:[]}};
@@ -5451,7 +5451,7 @@ async function runFullAudit(token, auditId, meta) {
 
   // Workflows and forms — attempt with Public App scope, fall back gracefully
   const workflowsRaw = await paginate('/automation/v3/workflows', 9999);
-  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : (workflowsRaw?.data?.workflows || []) } }
+  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : [] } }
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
@@ -5526,13 +5526,13 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── Meeting booking links (scheduler.meetings.meeting-link.read) ─────────
   const meetingLinksR = await safe(
-    () => paginate('/scheduler/v3/meetings/meeting-links', 500).then(r=>({data:{results:r}})),
+    () => hs.get('/scheduler/v3/meetings/meeting-links?limit=500'),
     {data:{results:[]}}
   );
 
   // ── Teams structure (settings.users.teams.read) ───────────────────────────
   const teamsR = await safe(
-    () => paginate('/settings/v3/users/teams', 200).then(r=>({data:{results:r}})),
+    () => hs.get('/settings/v3/users/teams?limit=200&includeMembers=true'),
     {data:{results:[]}}
   );
   const settingsUsersR = await safe(
@@ -5744,8 +5744,9 @@ async function runFullAudit(token, auditId, meta) {
   const companies     = (companiesR.data?.results||[]).slice(0, companyLimit);
   const deals         = (dealsR.data?.results||[]).slice(0, dealLimit);
   const tickets       = (ticketsR.data?.results||[]).slice(0, ticketLimit);
-  const owners        = ownersR.data?.results||[];
-  const workflows     = workflowsR.data?.workflows||workflowsR.data?.results||[];
+  const owners        = Array.isArray(ownersR.data?.results) ? ownersR.data.results : (Array.isArray(ownersR.data) ? ownersR.data : []);
+  const _wfRaw = workflowsR.data?.workflows || workflowsR.data?.results || workflowsRaw;
+  const workflows     = Array.isArray(_wfRaw) ? _wfRaw : [];
   const forms         = Array.isArray(formsR.data)?formsR.data:(formsR.data?.results||[]);
   const users         = usersR.data?.results||[];
   const pipelines     = pipelinesR.data?.results||[];
@@ -5760,7 +5761,7 @@ async function runFullAudit(token, auditId, meta) {
   const conversations = conversationsR.data?.results||[];
   const kbArticles    = (kbArticlesR.data?.objects||kbArticlesAlt.data?.articles||[]);
   const meetingLinks  = meetingLinksR.data?.results||[];
-  const teams         = teamsR.data?.results||[];
+  const teams         = Array.isArray(teamsR.data?.results) ? teamsR.data.results : (Array.isArray(teamsR.data) ? teamsR.data : []);
   const currencies      = currencyR.data?.currencies||[];
   const settingsUsers   = settingsUsersR.data?.results||[];
   const dealPipelines   = dealPipelinesR.data?.results||[];
