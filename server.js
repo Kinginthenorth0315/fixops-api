@@ -5450,8 +5450,10 @@ async function runFullAudit(token, auditId, meta) {
   const callsR    = await paginate('/crm/v3/objects/calls?properties=hs_call_title,hs_call_disposition,hs_createdate,hubspot_owner_id', activitySampleLimit);
 
   // Workflows and forms — attempt with Public App scope, fall back gracefully
-  const workflowsRaw = await paginate('/automation/v3/workflows', 9999);
-  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : [] } }
+  // workflows already fetched in parallel above via wfRes
+  // workflowsRaw kept as alias for compatibility
+  const workflowsRaw = wfRes.data?.workflows || [];
+  const workflowsR = wfRes
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
@@ -9592,6 +9594,8 @@ async function runFullAudit(token, auditId, meta) {
       conflictPropCount: conflictProps.length,
     };
   })();
+  const propertyUsage = propertyUsageEngine;
+
 
   // ── All-Objects Property Health Engine ───────────────────────────────────
   const allPropsEngine = (() => {
@@ -11233,29 +11237,7 @@ async function runFullAudit(token, auditId, meta) {
         })(),
 
         // ── PROPERTY USAGE AUDIT ─────────────────────────────────────────────
-        propertyUsage: (() => {
-          if (!contactProps.length) return null;
-          const customProps = contactProps.filter(p => p.createdUserId || p.hubspotOwned === false);
-          if (!customProps.length || !contacts.length) return { total: 0, unused: 0, lowUsage: 0 };
-          const propUsage = customProps.map(prop => {
-            const filled = contacts.filter(c => c.properties?.[prop.name] && c.properties[prop.name] !== '').length;
-            const pct = Math.round(filled / contacts.length * 100);
-            return {
-              name: prop.name,
-              label: prop.label || prop.name,
-              pct,
-              filled,
-              hasDescription: !!(prop.description && prop.description.trim()),
-            };
-          });
-          const unused    = propUsage.filter(p => p.pct === 0).length;
-          const lowUsage  = propUsage.filter(p => p.pct > 0 && p.pct < 5).length;
-          const healthy   = propUsage.filter(p => p.pct >= 50).length;
-          const noDesc    = propUsage.filter(p => !p.hasDescription).length;
-          // Top 5 lowest usage (non-zero) - candidates for deletion
-          const deleteCalm = propUsage.filter(p=>p.pct>0&&p.pct<5).slice(0,5).map(p=>p.label);
-          return { total: customProps.length, unused, lowUsage, healthy, noDesc, deleteCalm };
-        })(),
+        propertyUsage:         propertyUsage,
 
         // ── FORM CONVERSION FUNNEL ────────────────────────────────────────────
         formConversion: (() => {
