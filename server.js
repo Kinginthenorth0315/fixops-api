@@ -3204,12 +3204,12 @@ const runSentinelCheck = async (customer) => {
     const safe = async (fn, fb) => { try { return await fn(); } catch(e) { return fb; } };
 
     const [wfRes, usersRes, contactsRes] = await Promise.all([
-      safe(() => paginate('/automation/v3/workflows', 9999).then(r => ({ data: { workflows: Array.isArray(r) ? r : [] } })), { data: { workflows: [] } }),
+      safe(() => (async () => { try { const _r = await paginate('/automation/v3/workflows', 9999); return { data: { workflows: Array.isArray(_r) ? _r : [] } }; } catch(e) { return { data: { workflows: [] } }; } })(), { data: { workflows: [] } }),
       safe(() => hs.get('/settings/v3/users/?limit=500'), { data: { results: [] } }),
       safe(() => hs.get('/crm/v3/objects/contacts?limit=1&properties=email'), { data: { total: 0 } }),
     ]);
 
-    const workflows = wfRes.data?.workflows || [];
+    const _workflowsInitial = wfRes.data?.workflows || [];
     const users = usersRes.data?.results || [];
     const contactCount = contactsRes.data?.total || 0;
 
@@ -5829,7 +5829,7 @@ async function runFullAudit(token, auditId, meta) {
 
   // Sequence enrollment stats
   const sequenceStatsR = await safe(
-    () => paginate('/automation/v4/sequences?include=stats', 9999).then(r => ({data:{results:r}})),
+    async () => { const _r = await paginate('/automation/v4/sequences?include=stats', 9999); return {data:{results: Array.isArray(_r) ? _r : []}}; },
     {data:{results:[]}}
   );
 
@@ -5858,7 +5858,7 @@ async function runFullAudit(token, auditId, meta) {
     ? Math.round(apiRateLimit.currentUsage / apiRateLimit.usageLimit * 100)
     : 0;
   const campaignRevenue   = campaignRevenueR.data?.results||[];
-  const seqStats          = sequenceStatsR.data?.results||[];
+  const seqStats          = Array.isArray(sequenceStatsR.data?.results) ? sequenceStatsR.data.results : (Array.isArray(sequenceStatsR.data) ? sequenceStatsR.data : []);
   const extUsers          = userIntegrationsR.data?.results||[];
   // Note: allContactProps already extracted from allContactPropsR above
 
