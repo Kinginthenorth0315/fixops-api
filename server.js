@@ -5592,6 +5592,21 @@ async function runFullAudit(token, auditId, meta) {
     () => hs.get('/crm/v3/properties/companies?limit=500&archived=false'),
     {data:{results:[]}}
   );
+  // ── All object properties for full property health analysis ──────────────
+  const allTicketPropsR = await safe(
+    () => hs.get('/crm/v3/properties/tickets?limit=500&archived=false'),
+    {data:{results:[]}}
+  );
+  const allTicketProps = allTicketPropsR.data?.results || [];
+
+  const allLineItemPropsR = await safe(
+    () => hs.get('/crm/v3/properties/line_items?limit=200&archived=false'),
+    {data:{results:[]}}
+  );
+  const allLineItemProps = allLineItemPropsR.data?.results || [];
+
+
+
   const contactPropGroupsR = await safe(
     () => hs.get('/crm/v3/properties/contacts/groups'),
     {data:{results:[]}}
@@ -8988,6 +9003,46 @@ async function runFullAudit(token, auditId, meta) {
     });
   }
 
+
+  // ── All-objects property health issues ────────────────────────────────────
+  if (allPropsEngine) {
+    // Bloated objects - many never-used custom properties
+    allPropsEngine.objects.forEach(obj => {
+      if (obj.neverUsedCount >= 10) {
+        issues.push({
+          dimension: 'Data Integrity',
+          severity: obj.neverUsedCount >= 25 ? 'critical' : 'warning',
+          title: obj.object + ' has ' + obj.neverUsedCount + ' custom propert' + (obj.neverUsedCount===1?'y':'ies') + ' never filled in — property bloat',
+          description: 'Properties that are never filled in clutter your forms, slow your team, and make data analysis unreliable. They also consume your property limit.',
+          impact: 'Medium — bloated property lists slow onboarding and reduce data quality',
+          fix: 'CRM → Properties → ' + obj.object + ' → filter by Created By = you/your team → sort by usage → archive any never-filled custom properties. Check no workflows reference them first.',
+        });
+      }
+      if (obj.dupeCount >= 3) {
+        issues.push({
+          dimension: 'Data Integrity',
+          severity: 'warning',
+          title: obj.object + ' has ' + obj.dupeCount + ' sets of duplicate properties with identical or near-identical labels',
+          description: 'Duplicate properties split your data across fields, making segmentation and reporting unreliable. Different team members fill different versions of the same field.',
+          impact: 'High — duplicate properties corrupt reporting and personalization',
+          fix: 'CRM → Properties → ' + obj.object + ' → review duplicates → pick the primary field, migrate data from the other, then archive the duplicate. Update all forms and workflows referencing the archived field.',
+        });
+      }
+    });
+
+    // Cross-object property name conflicts
+    if (allPropsEngine.crossObjectPropCount > 5) {
+      issues.push({
+        dimension: 'Data Integrity',
+        severity: 'info',
+        title: allPropsEngine.crossObjectPropCount + ' properties share the same name across multiple objects — naming collision risk',
+        description: 'Properties with the same name on different objects (Contacts, Deals, Companies) create confusion in workflows, APIs, and reports. A workflow updating "status" may be ambiguous about which object it targets.',
+        impact: 'Low-Medium — causes confusion in workflow configuration and API integrations',
+        fix: 'Review shared property names and consider adding object-specific prefixes: contact_status, deal_status rather than just status on both objects.',
+      });
+    }
+  }
+
 // ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
   dataScore       = Math.max(10, dataScore);
   autoScore       = Math.max(10, autoScore);
@@ -9534,6 +9589,116 @@ async function runFullAudit(token, auditId, meta) {
       duplicateGroupCount: dupePropGroups.length,
       conflictProps,
       conflictPropCount: conflictProps.length,
+    };
+  })();
+
+  // ── All-Objects Property Health Engine ───────────────────────────────────
+  const allPropsEngine = (() => {
+    const objects = [
+      { name: 'Contacts',   props: contactPropsR.data?.results||[],  records: contacts,  key: 'contacts' },
+      { name: 'Deals',      props: allDealPropsR.data?.results||[],   records: deals,     key: 'deals' },
+      { name: 'Companies',  props: allCompanyPropsR.data?.results||[], records: companies, key: 'companies' },
+      { name: 'Tickets',    props: allTicketProps,                     records: tickets,   key: 'tickets' },
+    ];
+
+    // Add custom objects
+    customSchemas.forEach(schema => {
+      const schemaName = schema.labels?.singular || schema.name || 'Custom Object';
+      const schemaProps = schema.properties || [];
+      objects.push({ name: schemaName, props: schemaProps, records: [], key: schema.objectTypeId || schema.fullyQualifiedName });
+    });
+
+    const report = [];
+
+    objects.forEach(obj => {
+      if (obj.props.length === 0) return;
+
+      // Split into custom vs HubSpot-native properties
+      const customProps = obj.props.filter(p => p.createdUserId || p.hubspotOwned === false || p.externalOptions);
+      const nativeProps = obj.props.filter(p => !p.createdUserId && p.hubspotOwned !== false);
+
+      // Duplicate label detection across ALL props for this object
+      const labelMap = {};
+      obj.props.forEach(p => {
+        const label = (p.label || p.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!labelMap[label]) labelMap[label] = [];
+        labelMap[label].push(p.name);
+      });
+      const dupeLabels = Object.entries(labelMap)
+        .filter(([,names]) => names.length > 1)
+        .map(([label, names]) => ({ label, names }));
+
+      // Property fill rate for custom props (requires record data)
+      const fillRates = [];
+      if (obj.records.length > 0 && obj.records.length <= 5000) {
+        customProps.slice(0, 100).forEach(p => {
+          const filled = obj.records.filter(r => {
+            const val = r.properties?.[p.name];
+            return val && String(val).trim() !== '' && val !== 'false';
+          }).length;
+          fillRates.push({
+            name: p.name,
+            label: p.label || p.name,
+            type: p.type,
+            fillRate: Math.round(filled / obj.records.length * 100),
+            neverFilled: filled === 0,
+          });
+        });
+      }
+
+      const neverUsedProps = fillRates.filter(p => p.neverFilled);
+      const underusedProps = fillRates.filter(p => p.fillRate > 0 && p.fillRate < 5);
+      const wellUsedProps  = fillRates.filter(p => p.fillRate >= 40);
+
+      // Required but missing — props with description containing "required" 
+      const requiredProps = obj.props.filter(p =>
+        (p.description||'').toLowerCase().includes('required') && p.formField
+      );
+
+      // Archived/hidden props still in use
+      const archivedActive = obj.props.filter(p => p.archived === true);
+
+      report.push({
+        object:        obj.name,
+        key:           obj.key,
+        totalProps:    obj.props.length,
+        customProps:   customProps.length,
+        nativeProps:   nativeProps.length,
+        dupeGroups:    dupeLabels.slice(0, 10),
+        dupeCount:     dupeLabels.length,
+        neverUsed:     neverUsedProps.slice(0, 10),
+        neverUsedCount:neverUsedProps.length,
+        underused:     underusedProps.slice(0, 10),
+        underusedCount:underusedProps.length,
+        wellUsed:      wellUsedProps.slice(0, 5),
+        archivedActive:archivedActive.length,
+        bloatScore:    Math.round(((neverUsedProps.length + underusedProps.length) / Math.max(customProps.length, 1)) * 100),
+      });
+    });
+
+    // Cross-object issues
+    const crossObjectIssues = [];
+
+    // Same property name used in different objects = confusion risk
+    const allPropNames = {};
+    objects.forEach(obj => {
+      obj.props.forEach(p => {
+        if (!p.name) return;
+        if (!allPropNames[p.name]) allPropNames[p.name] = [];
+        allPropNames[p.name].push(obj.name);
+      });
+    });
+    const crossObjectProps = Object.entries(allPropNames)
+      .filter(([name, objs]) => objs.length > 1 && !name.startsWith('hs_') && !name.startsWith('hubspot'))
+      .map(([name, objs]) => ({ name, objects: objs }));
+
+    return {
+      objects: report,
+      crossObjectProps: crossObjectProps.slice(0, 20),
+      crossObjectPropCount: crossObjectProps.length,
+      totalCustomProps: report.reduce((s, o) => s + o.customProps, 0),
+      totalDupeGroups:  report.reduce((s, o) => s + o.dupeCount, 0),
+      totalNeverUsed:   report.reduce((s, o) => s + o.neverUsedCount, 0),
     };
   })();
 
@@ -11335,6 +11500,7 @@ async function runFullAudit(token, auditId, meta) {
         })(),
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
+        allPropsEngine:            allPropsEngine,
 
         // ── Aliases and computed fields for reporting views ─────────────────
         totalContacts:         contacts.length,
