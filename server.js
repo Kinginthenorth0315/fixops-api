@@ -5452,8 +5452,9 @@ async function runFullAudit(token, auditId, meta) {
   // Workflows and forms — attempt with Public App scope, fall back gracefully
   // workflows already fetched in parallel above via wfRes
   // workflowsRaw kept as alias for compatibility
-  const workflowsRaw = await paginate('/automation/v3/workflows', 9999);
-  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : [] } }
+  const _wfPaginateResult = await paginate('/automation/v3/workflows', 9999);
+  const workflowsRaw = _wfPaginateResult?.data?.results || _wfPaginateResult?.workflows || (_wfPaginateResult && Array.isArray(_wfPaginateResult) ? _wfPaginateResult : []);
+  const workflowsR = { data: { workflows: workflowsRaw } }
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
@@ -5763,6 +5764,7 @@ async function runFullAudit(token, auditId, meta) {
   const conversations = conversationsR.data?.results||[];
   const kbArticles    = (kbArticlesR.data?.objects||kbArticlesAlt.data?.articles||[]);
   const meetingLinks  = meetingLinksR.data?.results||[];
+  const landingPages  = landingPagesR?.data?.results || [];
   const teams         = Array.isArray(teamsR.data?.results) ? teamsR.data.results : (Array.isArray(teamsR.data) ? teamsR.data : []);
   const currencies      = currencyR.data?.currencies||[];
   const settingsUsers   = settingsUsersR.data?.results||[];
