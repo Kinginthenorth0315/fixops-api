@@ -3793,7 +3793,20 @@ app.get('/audit/redeem-token', async (req, res) => {
 // ── Auth URL — GET (free) and POST (paid) ─────────────────────────────────────
 const buildAuthUrl = (req, res, params) => {
   try {
-    const { email = '', company = '', plan = 'free', paid = false, auditToken = '' } = params;
+    const { email = '', company = '', plan: planRaw = 'free', paid = false, auditToken = '', promo = '' } = params;
+
+    // ── Promo code handling ───────────────────────────────────────────────────
+    const PROMO_CODES = {
+      'FIXOPS10':  { plan: 'pro', maxUses: 10 },
+      'REDDIT10':  { plan: 'pro', maxUses: 10 },
+      'SLACK10':   { plan: 'pro', maxUses: 10 },
+      'HUBSPOT10': { plan: 'pro', maxUses: 10 },
+      'LAUNCH10':  { plan: 'pro', maxUses: 10 },
+    };
+    const promoData = promo ? PROMO_CODES[promo.toUpperCase()] : null;
+    const plan = promoData ? promoData.plan : planRaw;
+    const promoApplied = promoData ? promo.toUpperCase() : null;
+    if (promoApplied) console.log('[Promo] Code ' + promoApplied + ' applied — upgrading to plan: ' + plan);
 
     // ── Security: paid plans must have a valid DB token ───────────────────────
     // Prevents URL manipulation: e.g. ?plan=deep without payment
@@ -3809,7 +3822,7 @@ const buildAuthUrl = (req, res, params) => {
     const codeVerifier  = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     const state = crypto.randomBytes(16).toString('hex');
-    pendingAudits.set(state, { email, company, plan, paid: !!paid, auditToken, codeVerifier, createdAt: Date.now() });
+    pendingAudits.set(state, { email, company, plan, paid: !!paid, auditToken, codeVerifier, createdAt: Date.now() , promoCode: promoApplied });
     // Standard Public App OAuth — counts as marketplace install
     // Scopes must match exactly what's configured in app-hsmeta.json
     const REQUIRED_SCOPES = [
@@ -6043,18 +6056,18 @@ async function runFullAudit(token, auditId, meta) {
   const deadWf   = workflows.filter(w=>(w.enabled||w.isEnabled)&&(w.enrolledObjectsCount||w.contactsEnrolled||0)===0);
   if(deadWf.length>0){
     autoScore-=Math.min(25,deadWf.length*3);
-    issues.push({severity:deadWf.length>5?'warning':'info',title:`${deadWf.length} active workflows with zero enrollments — consuming quota for nothing`,description:`These workflows are switched on but have never enrolled anyone. They were likely built for campaigns that ended or criteria no contacts will ever meet. They clutter your automation dashboard and create false confidence that your portal is actively running automations.`,detail:`Dead workflows consume your plan\'s workflow quota, inflate the number of "active" automations in reports, and make it nearly impossible to identify what\'s actually running vs what\'s abandoned.`,impact: `Dead automations consuming workflow limit · portal complexity inflated · team confused by inactive workflows`,dimension:'Automation',guide:['Workflows → sort by "Enrolled" ascending — zero-enrollment workflows rise to the top','Review each: is the trigger criteria achievable? If not, archive it with a backup','Create a "Review" folder and move dead candidates there for 30 days before archiving','FixOps auto-archives dead workflows with complete JSON backup — restore any within 30 days']});
+    issues.push({severity:deadWf.length>5?'warning':'info',title:`${deadWf.length} active workflows with zero enrollments — consuming quota for nothing`,description:`These workflows are switched on but have never enrolled anyone. They were likely built for campaigns that ended or criteria no contacts will ever meet. They clutter your automation dashboard and create false confidence that your portal is actively running automations.`,detail:`Dead workflows consume your plan\'s workflow quota, inflate the number of "active" automations in reports, and make it nearly impossible to identify what\'s actually running vs what\'s abandoned.`,impact: `Dead automations consuming workflow limit · portal complexity inflated · team confused by inactive workflows`,dimension:'Automation Health',guide:['Workflows → sort by "Enrolled" ascending — zero-enrollment workflows rise to the top','Review each: is the trigger criteria achievable? If not, archive it with a backup','Create a "Review" folder and move dead candidates there for 30 days before archiving','FixOps auto-archives dead workflows with complete JSON backup — restore any within 30 days']});
   }
 
   const noGoalWf = workflows.filter(w=>(w.enabled||w.isEnabled)&&!w.goalCriteria&&!w.goals);
   if(noGoalWf.length>2){
     autoScore-=Math.min(14,noGoalWf.length);
-    issues.push({severity:'warning',title:`${noGoalWf.length} workflows have no goal — converted contacts keep getting nurture emails`,description:`Without a workflow goal, there\'s no exit condition. A contact who converts to a customer at step 2 still receives steps 10, 11, and 12. Your most valuable contacts — the ones who already said yes — are being over-emailed with messaging meant for cold prospects.`,detail:`Goal-less workflows are one of the top 3 causes of HubSpot unsubscribes. Converted contacts getting irrelevant nurture emails is the #1 complaint we hear from HubSpot users about their own automations.`,impact:`Converted contacts receiving cold-prospect emails · elevated unsubscribe rates · inflated metrics`,dimension:'Automation',guide:['Lead nurture: goal = Lifecycle stage becomes SQL or Deal is created','Onboarding: goal = Custom "Onboarded" property = Yes','Re-engagement: goal = Contact opens an email or clicks a link','Start with your 3 highest-enrollment workflows — the ones with the most contacts are causing the most damage']});
+    issues.push({severity:'warning',title:`${noGoalWf.length} workflows have no goal — converted contacts keep getting nurture emails`,description:`Without a workflow goal, there\'s no exit condition. A contact who converts to a customer at step 2 still receives steps 10, 11, and 12. Your most valuable contacts — the ones who already said yes — are being over-emailed with messaging meant for cold prospects.`,detail:`Goal-less workflows are one of the top 3 causes of HubSpot unsubscribes. Converted contacts getting irrelevant nurture emails is the #1 complaint we hear from HubSpot users about their own automations.`,impact:`Converted contacts receiving cold-prospect emails · elevated unsubscribe rates · inflated metrics`,dimension:'Automation Health',guide:['Lead nurture: goal = Lifecycle stage becomes SQL or Deal is created','Onboarding: goal = Custom "Onboarded" property = Yes','Re-engagement: goal = Contact opens an email or clicks a link','Start with your 3 highest-enrollment workflows — the ones with the most contacts are causing the most damage']});
   }
 
   if(contacts.length>0&&activeWf.length<3&&contacts.length>200){
     autoScore-=12;
-    issues.push({severity:'warning',title:`${contacts.length.toLocaleString()} contacts but only ${activeWf.length} active automations — severe manual work overload`,description:`You have a significant contact database but almost no automation working against it. Every follow-up, task creation, lifecycle update, and nurture sequence is being done manually by your team — work that should be running automatically while they sleep.`,detail:`Benchmark: healthy HubSpot portals have 1 active workflow per 150-200 contacts. At your ratio, your team is doing 10x more manual work than necessary.`,impact:`Hundreds of hours per year in manual rep work that should be automated`,dimension:'Automation',guide:['The 3 workflows every portal needs: new lead assignment, demo request follow-up, closed-lost re-engagement','Map your customer journey from first contact to closed won — every manual step is an automation waiting to be built','FixOps Workflow Repair builds your core automation stack with documentation and conflict checking']});
+    issues.push({severity:'warning',title:`${contacts.length.toLocaleString()} contacts but only ${activeWf.length} active automations — severe manual work overload`,description:`You have a significant contact database but almost no automation working against it. Every follow-up, task creation, lifecycle update, and nurture sequence is being done manually by your team — work that should be running automatically while they sleep.`,detail:`Benchmark: healthy HubSpot portals have 1 active workflow per 150-200 contacts. At your ratio, your team is doing 10x more manual work than necessary.`,impact:`Hundreds of hours per year in manual rep work that should be automated`,dimension:'Automation Health',guide:['The 3 workflows every portal needs: new lead assignment, demo request follow-up, closed-lost re-engagement','Map your customer journey from first contact to closed won — every manual step is an automation waiting to be built','FixOps Workflow Repair builds your core automation stack with documentation and conflict checking']});
   }
 
   await up(60, `Analyzing ${deals.length} deals in pipeline…`);
@@ -6065,19 +6078,19 @@ async function runFullAudit(token, auditId, meta) {
   const stalledVal= stalled.reduce((s,d)=>s+parseFloat(d.properties?.amount||0),0);
   if(stalled.length>0){
     pipelineScore-=Math.min(30,stalled.length*4);
-    issues.push({severity:stalled.length>4?'critical':'warning',title:`${stalled.length} deals stalled 21+ days — $${stalledVal.toLocaleString()} quietly dying`,description:`HubSpot\'s own data shows deals inactive for 21 days close at 11% vs 67% for deals touched weekly. Your team doesn\'t know these deals are stalling, there\'s no automated alert, and no manager is being notified.`,detail:`The #1 reason deals are lost isn\'t "no" — it\'s silence. Automated inactivity alerts are the single highest-ROI workflow any sales team can add to HubSpot.`,impact:`$${stalledVal.toLocaleString()} in pipeline at risk · close rate dropping from 67% to 11% on each deal`,dimension:'Pipeline',guide:['Workflow: Deal active AND days since last engagement > 14 → urgent task for owner AND manager notification','Add a "Next Step + Date" required property before deals advance to Proposal Sent stage','Enable the visual "deal inactive" indicator in Pipeline Settings','FixOps builds this inactivity alert system and creates tasks on all currently stalled deals in one session']});
+    issues.push({severity:stalled.length>4?'critical':'warning',title:`${stalled.length} deals stalled 21+ days — $${stalledVal.toLocaleString()} quietly dying`,description:`HubSpot\'s own data shows deals inactive for 21 days close at 11% vs 67% for deals touched weekly. Your team doesn\'t know these deals are stalling, there\'s no automated alert, and no manager is being notified.`,detail:`The #1 reason deals are lost isn\'t "no" — it\'s silence. Automated inactivity alerts are the single highest-ROI workflow any sales team can add to HubSpot.`,impact:`$${stalledVal.toLocaleString()} in pipeline at risk · close rate dropping from 67% to 11% on each deal`,dimension:'Pipeline Integrity',guide:['Workflow: Deal active AND days since last engagement > 14 → urgent task for owner AND manager notification','Add a "Next Step + Date" required property before deals advance to Proposal Sent stage','Enable the visual "deal inactive" indicator in Pipeline Settings','FixOps builds this inactivity alert system and creates tasks on all currently stalled deals in one session']});
   }
 
   const noClose = openDeals.filter(d=>!d.properties?.closedate);
   if(noClose.length>0){
     pipelineScore-=Math.min(20,noClose.length*3);
-    issues.push({severity:noClose.length>5?'warning':'info',title:`${noClose.length} open deals have no close date — your revenue forecast is fiction`,description:`HubSpot\'s pipeline-weighted forecast calculates expected revenue using close dates and probabilities. Every deal without a close date shows as $0 in forecast reports. ${noClose.length} deals means your revenue projection could be understated by six figures.`,detail:`Without close dates you can\'t run a pipeline-weighted forecast, calculate average sales cycle, trigger close-date-based workflows, or give leadership accurate revenue projections. This is a fundamental forecast failure.`,impact:`Forecast accuracy completely broken for ${noClose.length} deals`,dimension:'Pipeline',guide:['Make Close Date required in Settings → Properties → Close Date → Required on deal creation','Export all no-close-date deals → reps estimate dates → reimport to restore forecast accuracy','Workflow: Deal created AND close date unknown → task for rep to set it within 48 hours']});
+    issues.push({severity:noClose.length>5?'warning':'info',title:`${noClose.length} open deals have no close date — your revenue forecast is fiction`,description:`HubSpot\'s pipeline-weighted forecast calculates expected revenue using close dates and probabilities. Every deal without a close date shows as $0 in forecast reports. ${noClose.length} deals means your revenue projection could be understated by six figures.`,detail:`Without close dates you can\'t run a pipeline-weighted forecast, calculate average sales cycle, trigger close-date-based workflows, or give leadership accurate revenue projections. This is a fundamental forecast failure.`,impact:`Forecast accuracy completely broken for ${noClose.length} deals`,dimension:'Pipeline Integrity',guide:['Make Close Date required in Settings → Properties → Close Date → Required on deal creation','Export all no-close-date deals → reps estimate dates → reimport to restore forecast accuracy','Workflow: Deal created AND close date unknown → task for rep to set it within 48 hours']});
   }
 
   const zeroDeal = openDeals.filter(d=>!d.properties?.amount||parseFloat(d.properties.amount)===0);
   if(zeroDeal.length>openDeals.length*0.15&&openDeals.length>3){
     pipelineScore-=14;
-    issues.push({severity:'warning',title:`${zeroDeal.length} deals show $0 value — pipeline massively understated to leadership`,description:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of active pipeline has no dollar value. Every board deck, pipeline review, and revenue forecast is showing a significantly lower number than your team\'s actual opportunity.`,detail:`This is the most common and most damaging HubSpot reporting problem. Leadership makes headcount, budget, and strategy decisions based on a pipeline number that doesn\'t reflect reality.`,impact:`Pipeline understated · board reports inaccurate · rep quota calculations wrong`,dimension:'Pipeline',guide:['Require Amount on deal creation: Settings → Properties → Amount → Required','Export $0 deals, add realistic values based on product pricing, reimport same day','Workflow: Deal created AND amount unknown → task to rep to fill in amount same day']});
+    issues.push({severity:'warning',title:`${zeroDeal.length} deals show $0 value — pipeline massively understated to leadership`,description:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of active pipeline has no dollar value. Every board deck, pipeline review, and revenue forecast is showing a significantly lower number than your team\'s actual opportunity.`,detail:`This is the most common and most damaging HubSpot reporting problem. Leadership makes headcount, budget, and strategy decisions based on a pipeline number that doesn\'t reflect reality.`,impact:`Pipeline understated · board reports inaccurate · rep quota calculations wrong`,dimension:'Pipeline Integrity',guide:['Require Amount on deal creation: Settings → Properties → Amount → Required','Export $0 deals, add realistic values based on product pricing, reimport same day','Workflow: Deal created AND amount unknown → task to rep to fill in amount same day']});
   }
 
   const overdueTasks = tasks.filter(t=>{
@@ -6086,7 +6099,7 @@ async function runFullAudit(token, auditId, meta) {
   });
   if(overdueTasks.length>5){
     pipelineScore-=Math.min(10,overdueTasks.length);
-    issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact: `Missed rep commitments · pipeline going cold · no management visibility on follow-up gaps`,dimension:'Pipeline',guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
+    issues.push({severity:overdueTasks.length>20?'critical':'warning',title:`${overdueTasks.length} overdue tasks — rep commitments being missed`,description:`Each overdue task is a follow-up that didn\'t happen, a proposal not sent, a call not made. This is the clearest indicator of pipeline neglect — and it\'s invisible to management without a dedicated alert system.`,detail:`Overdue tasks compound: a missed follow-up becomes a cold deal, a cold deal becomes a lost deal. The cost is measured in pipeline, not time.`,impact: `Missed rep commitments · pipeline going cold · no management visibility on follow-up gaps`,dimension:'Pipeline Integrity',guide:['Create a daily digest email to each rep listing their overdue tasks','Set a rule: no deal moves forward on the board if it has an overdue task','Weekly team meeting: first 10 minutes reviewing overdue task backlog — visibility drives action','FixOps builds the automated daily digest workflow and pipeline gating logic']});
   }
 
   // ── DEAL STAGE FUNNEL ANALYSIS ─────────────────────────────
@@ -6140,7 +6153,7 @@ async function runFullAudit(token, auditId, meta) {
           `Audit the stage exit criteria — if they\'re unclear, deals pool here by default`,
           `FixOps can build an automated stage SLA system with escalation alerts and manager visibility`,
         ],
-        dimension: 'Pipeline',
+        dimension: 'Pipeline Integrity',
       });
     }
 
@@ -6163,7 +6176,7 @@ async function runFullAudit(token, auditId, meta) {
           'Add a workflow: "If deal in 0% stage for 30 days → auto-set to Closed Lost"',
           'This single cleanup often improves forecast accuracy by 20-40%',
         ],
-        dimension: 'Pipeline',
+        dimension: 'Pipeline Integrity',
       });
     }
   }
@@ -6181,7 +6194,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${dealsNoContact.length} open deals have no associated contacts — these deals can\'t close`,
       description: `Deals without contacts have no human on the other side. They can\'t receive a proposal, can\'t be called, and won\'t appear in any rep's contact list. Research shows deals associated with 3+ contacts have 2× the close rate of single-contact deals. Zero-contact deals essentially don\'t exist.`,
       impact: `Deals with no stakeholder mapped · pipeline accuracy understated · close rate impacted`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Deals → filter "Associated contacts = 0" → assign each to the right contact',
         'Make contact association required before a deal advances past "Prospect" stage',
@@ -6205,7 +6218,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${wonNoReason.length} closed won deals missing win reason — can\'t replicate what's working`,
       description: `Your team is closing deals but nobody is capturing why. Without win reason data you can\'t identify which messaging works, which personas convert best, or which reps have repeatable success patterns. This is institutional knowledge walking out the door after every deal.`,
       impact: `Win patterns untracked · coaching blind spot · best practices not scalable`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Make "Closed Won Reason" a required field when moving a deal to Closed Won stage',
         'Settings → Pipelines → Closed Won stage → add required properties → Closed Won Reason',
@@ -6223,7 +6236,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `${lostNoReason2.length} closed lost deals with no loss reason — burning pipeline without learning`,
       description: `${Math.round(lostNoReason2.length/Math.max(closedLostDeals.length,1)*100)}% of your lost deals have no recorded reason. Every loss without a reason code is a missed opportunity to improve your pitch, pricing, or process. Businesses that track loss reasons improve their win rate by an average of 15% within 2 quarters.`,
       impact: `Loss patterns invisible · pipeline objections never addressed · same mistakes recurring`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Make "Closed Lost Reason" required when moving a deal to Closed Lost stage',
         'Standard options: Price too high, Went with competitor, No budget, No decision, Timing, Poor fit',
@@ -6239,13 +6252,13 @@ async function runFullAudit(token, auditId, meta) {
   const deadForms = forms.filter(f=>(f.submissionCounts?.total||f.totalSubmissions||0)===0);
   if(deadForms.length>0){
     marketingScore-=Math.min(14,deadForms.length*2);
-    issues.push({severity:'warning',title:`${deadForms.length} forms have zero submissions — silent lead capture failures`,description:`These forms are live in HubSpot and may be embedded on live pages — but have never received a single submission. You don\'t know how many leads you\'ve missed until you actually test them.`,detail:`The most dangerous version of this problem: a form on a high-traffic landing page that\'s broken. You\'re spending money on ads driving traffic to a page that\'s silently failing to capture any leads.`,impact: `Broken forms causing unknown lead loss · ad spend driving traffic to non-converting pages`,dimension:'Marketing',guide:['Test each form right now — submit it yourself, confirm the thank-you page fires and you receive the notification email','Check if the form is actually embedded on a live page with real traffic','Marketing → Lead Capture → Forms → check views vs submissions — views with zero submissions = broken form','Archive forms from discontinued campaigns to reduce confusion']});
+    issues.push({severity:'warning',title:`${deadForms.length} forms have zero submissions — silent lead capture failures`,description:`These forms are live in HubSpot and may be embedded on live pages — but have never received a single submission. You don\'t know how many leads you\'ve missed until you actually test them.`,detail:`The most dangerous version of this problem: a form on a high-traffic landing page that\'s broken. You\'re spending money on ads driving traffic to a page that\'s silently failing to capture any leads.`,impact: `Broken forms causing unknown lead loss · ad spend driving traffic to non-converting pages`,dimension:'Marketing Health',guide:['Test each form right now — submit it yourself, confirm the thank-you page fires and you receive the notification email','Check if the form is actually embedded on a live page with real traffic','Marketing → Lead Capture → Forms → check views vs submissions — views with zero submissions = broken form','Archive forms from discontinued campaigns to reduce confusion']});
   }
 
   const deadLists = lists.filter(l=>(l.metaData?.size||0)===0);
   if(deadLists.length>5){
     marketingScore-=8;
-    issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact: `Empty lists adding portal complexity · suppression risk · automation confusion`,dimension:'Marketing',guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
+    issues.push({severity:'info',title:`${deadLists.length} contact lists are completely empty`,description:`Empty lists clutter your marketing setup and are a risk if accidentally used as workflow suppression lists. If an empty list becomes a suppression list, nobody gets enrolled in the workflow — silently.`,impact: `Empty lists adding portal complexity · suppression risk · automation confusion`,dimension:'Marketing Health',guide:['Review each empty list — is it feeding a workflow or campaign?','Archive empty lists that are no longer in use: Contacts → Lists → Archive','Never use an empty list as a workflow suppression list without verifying it has members']});
   }
 
   await up(83, 'Checking configuration and security…');
@@ -6254,7 +6267,7 @@ async function runFullAudit(token, auditId, meta) {
   const superAdmins = users.filter(u=>u.superAdmin);
   if(superAdmins.length>3&&users.length>0){
     configScore-=12;
-    issues.push({severity:superAdmins.length>6?'critical':'warning',title:`${superAdmins.length} super admins — excess full-access accounts are a security risk`,description:`Super admins can delete any record, change billing, modify any setting, and install any integration with zero approval. Best practice is 2 maximum. Every extra super admin is an unmonitored security surface — and a former employee\'s compromised account gives full access to your entire CRM.`,detail:`The most common data breach vector in HubSpot portals: a super admin who left the company 6+ months ago, whose account was never deactivated, gets compromised. Immediate risk: full database access and deletion rights.`,impact: `Accounts with unrestricted portal access · deletion rights · data export risk · compliance exposure`,dimension:'Configuration',guide:['Settings → Users → filter Super Admin — does each person still need full unrestricted access?','Reduce to 2 super admins: primary admin and one backup only','Deactivate any super admin account belonging to someone who has left the company immediately','Replace super admin access with granular role-based permissions for all other users']});
+    issues.push({severity:superAdmins.length>6?'critical':'warning',title:`${superAdmins.length} super admins — excess full-access accounts are a security risk`,description:`Super admins can delete any record, change billing, modify any setting, and install any integration with zero approval. Best practice is 2 maximum. Every extra super admin is an unmonitored security surface — and a former employee\'s compromised account gives full access to your entire CRM.`,detail:`The most common data breach vector in HubSpot portals: a super admin who left the company 6+ months ago, whose account was never deactivated, gets compromised. Immediate risk: full database access and deletion rights.`,impact: `Accounts with unrestricted portal access · deletion rights · data export risk · compliance exposure`,dimension:'Configuration & Security',guide:['Settings → Users → filter Super Admin — does each person still need full unrestricted access?','Reduce to 2 super admins: primary admin and one backup only','Deactivate any super admin account belonging to someone who has left the company immediately','Replace super admin access with granular role-based permissions for all other users']});
   }
 
   // settings/v3/users returns: { id, email, firstName, lastName, superAdmin,
@@ -6289,7 +6302,7 @@ async function runFullAudit(token, auditId, meta) {
       description: inactiveUsers.length + ' paid HubSpot seats have had zero activity for 90+ days. On Sales or Service Hub Professional that is $90-$120/seat/month going to waste. Ghost seats are also a security risk. Top inactive: ' + topNames + '.',
       detail: 'Ghost seats are the easiest budget win in HubSpot: immediate savings with zero operational impact. User data, records, and activity history stay intact after deactivation — only login access is removed.',
       impact: '~$' + estMonthlySeatWaste.toLocaleString() + '-$' + (inactiveUsers.length*120).toLocaleString() + '/mo in unused paid seat costs',
-      dimension: 'Configuration',
+      dimension: 'Configuration & Security',
       ghostSeatData: ghostSeatData,
       guide: [
         'Settings → Users → sort by last login date — oldest first to find ghost seats immediately',
@@ -6304,7 +6317,7 @@ async function runFullAudit(token, auditId, meta) {
   const undocProps = (cProps||[]).filter(p=>!p.hubspotDefined&&!p.description);
   if(undocProps.length>10){
     configScore-=8;
-    issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration',guide:['Settings → Properties → filter Custom → add description to each: what does it track, where is it populated, who uses it?','Identify unused properties (0 records updated) and archive them','FixOps AutoDoc automatically documents every custom property and exports a full Property Bible PDF']});
+    issues.push({severity:'info',title:`${undocProps.length} custom properties have no description — documentation debt compounding`,description:`Undocumented properties get misused, create duplicate data in wrong fields, and make your portal impossible to navigate for new team members. Over time this is how portals end up with 400+ properties and nobody knows what half of them do.`,detail:`Documentation debt compounds: every undocumented property created today will confuse the next person who joins your team, the next admin who takes over, and the next audit that tries to clean up the portal.`,impact:`Data quality degradation over time · onboarding friction · property misuse`,dimension:'Configuration & Security',guide:['Settings → Properties → filter Custom → add description to each: what does it track, where is it populated, who uses it?','Identify unused properties (0 records updated) and archive them','FixOps AutoDoc automatically documents every custom property and exports a full Property Bible PDF']});
   }
 
   await up(90, 'Checking reporting quality…');
@@ -6312,12 +6325,12 @@ async function runFullAudit(token, auditId, meta) {
   // ── REPORTING QUALITY ───────────────────────────────────────
   if(zeroDeal.length>openDeals.length*0.3&&openDeals.length>3){
     reportingScore-=22;
-    issues.push({severity:'critical',title:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of pipeline has no value — revenue reports are fundamentally wrong`,description:`When nearly a third of your pipeline shows as $0, every revenue metric breaks: total pipeline value, average deal size, win rate by value, forecast accuracy, and board projections. Leadership is making strategic decisions based on data that doesn\'t reflect reality.`,detail:`This is the single most common HubSpot reporting failure. The fix takes one afternoon. The cost of not fixing it is measured in wrong business decisions made every week.`,impact:`Revenue reporting fundamentally broken · every board projection understated`,dimension:'Reporting',guide:['Make Amount required on deal creation: Settings → Properties → Amount → Required','Pull all $0 deals → each rep estimates value → reimport same day to restore forecast integrity','FixOps Reporting Rebuild creates the revenue dashboards your leadership needs with accurate underlying data']});
+    issues.push({severity:'critical',title:`${Math.round(zeroDeal.length/Math.max(openDeals.length,1)*100)}% of pipeline has no value — revenue reports are fundamentally wrong`,description:`When nearly a third of your pipeline shows as $0, every revenue metric breaks: total pipeline value, average deal size, win rate by value, forecast accuracy, and board projections. Leadership is making strategic decisions based on data that doesn\'t reflect reality.`,detail:`This is the single most common HubSpot reporting failure. The fix takes one afternoon. The cost of not fixing it is measured in wrong business decisions made every week.`,impact:`Revenue reporting fundamentally broken · every board projection understated`,dimension:'Reporting Quality',guide:['Make Amount required on deal creation: Settings → Properties → Amount → Required','Pull all $0 deals → each rep estimates value → reimport same day to restore forecast integrity','FixOps Reporting Rebuild creates the revenue dashboards your leadership needs with accurate underlying data']});
   }
 
   if(tickets.length===0&&users.length>2){
     reportingScore-=12;
-    issues.push({severity:'info',title:`No support tickets in HubSpot — customer health is a blind spot`,description:`If your team handles support but tickets aren\'t in HubSpot, you can\'t see which customers have open issues, there\'s no link between support history and deal records, and churn prediction is impossible because you have no signal.`,impact:`Customer health invisible · churn signals absent · no support-to-revenue correlation`,dimension:'Reporting',guide:['HubSpot has native integrations for Zendesk, Intercom, and Freshdesk to sync ticket data','Even a basic ticket pipeline (New → In Progress → Resolved) dramatically improves customer health visibility','Connect tickets to company records for full account health view — critical for renewal conversations']});
+    issues.push({severity:'info',title:`No support tickets in HubSpot — customer health is a blind spot`,description:`If your team handles support but tickets aren\'t in HubSpot, you can\'t see which customers have open issues, there\'s no link between support history and deal records, and churn prediction is impossible because you have no signal.`,impact:`Customer health invisible · churn signals absent · no support-to-revenue correlation`,dimension:'Reporting Quality',guide:['HubSpot has native integrations for Zendesk, Intercom, and Freshdesk to sync ticket data','Even a basic ticket pipeline (New → In Progress → Resolved) dramatically improves customer health visibility','Connect tickets to company records for full account health view — critical for renewal conversations']});
   }
 
   await up(93, 'Checking team adoption…');
@@ -6385,7 +6398,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'Your reps have tasks and contacts but are not logging meetings or calls in HubSpot. Zero visibility into rep activity, call volume, meeting outcomes, or rep performance. The fix is a 5-minute calendar connection.',
       detail: 'Once Google Calendar or Outlook is connected, meetings log automatically with one click. Call logging via the HubSpot mobile app takes 10 seconds per call.',
       impact: 'Rep activity invisible · performance coaching impossible · activity-based reports all show zero',
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Connect HubSpot to Google Calendar or Outlook: Settings → Integrations → Email & Calendar',
         'Install HubSpot Sales Chrome Extension for one-click Gmail/Outlook logging',
@@ -6402,7 +6415,7 @@ async function runFullAudit(token, auditId, meta) {
       description: darkReps.length + ' of your HubSpot users had no logged call or meeting activity in the last 7 days. Active reps averaged ' + (totalActivity / Math.max(repList.length - darkReps.length, 1)).toFixed(1) + ' activities. Silent reps: ' + darkReps.slice(0,4).map(r=>r.name).join(', ') + '.',
       detail: 'Activity gaps are either a logging problem (rep is busy but not recording) or a performance problem (rep is not engaging). Both are invisible without this data. Weekly rep scorecards make this visible before it becomes a pipeline problem.',
       impact: 'Pipeline at risk from ' + darkReps.length + ' rep' + (darkReps.length!==1?'s':'') + ' with no logged activity · coaching blind spot',
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       repScorecard: repList,
       guide: [
         'This week: ' + repList.slice(0,5).map(r => r.name + ' — ' + r.calls + ' calls, ' + r.meetings + ' meetings, ' + r.staleDealCount + ' stale deals').join(' | '),
@@ -6423,7 +6436,7 @@ async function runFullAudit(token, auditId, meta) {
       description: staleRepsCount + ' rep' + (staleRepsCount!==1?'s':'') + ' have 2+ deals with no activity in 14+ days. Stale deals close at 11% vs 67% for actively worked deals (HubSpot research). These are revenue at risk right now.',
       detail: 'Deal velocity is the most predictive pipeline metric. A deal that goes 14 days without activity has crossed the threshold where probability drops sharply. Catching this weekly prevents the end-of-quarter surprise.',
       impact: 'Deals at risk · pipeline velocity dropping · forecast accuracy declining',
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Stale deal owners: ' + staleRepNames,
         'Set deal activity reminder: any deal with no activity in 10 days → task created automatically for rep',
@@ -6499,7 +6512,7 @@ async function runFullAudit(token, auditId, meta) {
             description: `When a single rep controls the majority of your pipeline, you have a critical business risk: if they leave, get sick, or go on vacation, your revenue forecast collapses. This is one of the first things investors and acquirers flag as a red flag in a revenue due diligence.`,
             detail: `Healthy pipeline distribution: no single rep should own more than 35-40% of total pipeline value. Above 55% is a warning. Above 70% is critical. Beyond the risk of losing the rep, concentrated pipelines also indicate CRM adoption problems across the rest of the team.`,
             impact: `$${topOwner[1].toLocaleString()} concentrated with one person · business continuity and valuation risk`,
-            dimension: 'Pipeline',
+            dimension: 'Pipeline Integrity',
             guide: [
               'Immediately: ensure deal notes, contact history, and next steps are documented for ALL deals in this the rep\'s pipeline',
               'Implement mandatory deal documentation: a "Key contacts" and "Next steps" required property on every open deal',
@@ -6563,7 +6576,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These deals were created in HubSpot but a rep has never logged a single activity, moved a stage, or updated a property. Lead response time data shows contacting within 5 minutes vs 30 minutes increases qualification rate by 21x. These deals are sitting untouched while leads go cold.`,
       detail: `The most common cause: deals created automatically by a Zapier integration or form submission, assigned to a rep, but with no notification or task created to prompt action. The rep does not know the deal exists.`,
       impact: `New deals assigned but never followed up · qualification window closing · revenue at risk`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Create a workflow: Deal is created → immediately create a "New deal — first contact required" task for the owner with a 2-hour due date',
         'Add a Slack notification when a new deal is created so reps see it in real time, not just in HubSpot',
@@ -6590,7 +6603,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Hard bounced emails mean these addresses definitively do not exist or are blocking your domain. Continuing to send to them damages your sender reputation with email providers like Gmail and Outlook, causing your emails to land in spam for everyone — including your good contacts.`,
       detail: `Email deliverability is invisible until it breaks catastrophically. Industry best practice: hard bounce rate above 2% triggers spam filter escalation. Above 5% can result in your sending domain being blacklisted.`,
       impact: `Hard bounces damaging sender reputation · emails landing in spam for all future sends`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       guide: [
         'Immediately: HubSpot auto-suppresses hard bounces from future sends — verify this is working in Marketing → Email → Bounced',
         'Export hard bounced contacts and permanently remove or archive them from your active database',
@@ -6622,7 +6635,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These quotes were sent to prospects but expired before they responded. No follow-up task was created, no rep was alerted. Each expired quote is a deal that likely went cold because nobody followed up when the deadline passed.`,
       detail: `Expired quotes with no follow-up are one of the clearest signs of pipeline neglect. A quote expiring should trigger an immediate rep task — this is a 5-minute workflow fix.`,
       impact: `Expired quotes with unknown pipeline value · proposals sent with no follow-up`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Create a workflow: Quote expiration date is reached AND status is not Approved → create urgent task for deal owner',
         'Review each expired quote — many prospects just need a nudge, not a lost deal',
@@ -6643,7 +6656,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `These line items were created manually instead of from your HubSpot product library. This means your product revenue reports are inaccurate, you cannot track which products are driving the most revenue, and forecasting by product line is impossible.`,
       detail: `Unlinked line items are a reporting blind spot. Every manually typed line item bypasses your product library analytics, making it impossible to answer "which product generates the most revenue?" without a spreadsheet.`,
       impact: `Product revenue reporting broken · pricing consistency at risk · forecast by product line impossible`,
-      dimension: 'Reporting',
+      dimension: 'Reporting Quality',
       guide: [
         'Settings → Products → build out your full product library with standardized names and pricing',
         'Train reps to always select from the product library when creating quotes and deals',
@@ -6668,7 +6681,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Your team is logging meetings but not recording what happened. Without outcomes (Completed, No Show, Cancelled), you cannot measure meeting effectiveness, identify which reps have the highest no-show rates, or use meeting data to improve forecast accuracy.`,
       detail: `Meeting outcomes are required for HubSpot's activity-based forecasting to work accurately. They are also essential for sales coaching — a rep with a 40% no-show rate needs different help than one with 90% completion.`,
       impact: `Activity-based forecasting inaccurate · coaching data incomplete · rep performance invisible`,
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Make meeting outcome a required field: Settings → Properties → Meeting Outcome → Required',
         'Create a workflow: Meeting is logged AND outcome is unknown → task for rep to update within 24 hours',
@@ -6689,7 +6702,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Your team is logging calls but not recording the result. Without call dispositions (Connected, Left Voicemail, No Answer, Wrong Number), you cannot track connect rates, measure rep call effectiveness, or identify which call times perform best.`,
       detail: `Call disposition data is the foundation of sales call analytics. Without it, you have a log of activity with no context — you know calls happened but not whether they produced anything.`,
       impact: `Call connect rate unknown · rep coaching data missing · call time optimization impossible`,
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Make call disposition required: Settings → Properties → Call Outcome → Required',
         'Install the HubSpot Sales mobile app — it prompts for disposition immediately after each call',
@@ -6751,7 +6764,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `Your ${openDeals.length} open deals average ${avgDealAge} days old. Industry benchmark is 30–45 days. ${oldDeals.length} deals are over 90 days old. Deals inactive for 21+ days close at 11% vs 67% for deals touched weekly — every extra day costs you real revenue.`,
         detail: `Pipeline velocity is the most predictive revenue health metric most HubSpot users never track. Slow velocity means deals are stuck at a specific stage, close dates are being pushed without action, or reps are hoarding pipeline. Each has a different fix — but none are fixable if you can\'t see the data.`,
         impact: `Deals over 90 days old · close rate dropping · pipeline accuracy declining`,
-        dimension: 'Pipeline',
+        dimension: 'Pipeline Integrity',
         guide: [
           'Build a pipeline age report: filter open deals by Create Date → group by stage → oldest average age = your bottleneck stage',
           'Set deal age SLA alerts: any deal > 21 days without activity → automated task for rep + Slack notification to manager',
@@ -6831,7 +6844,7 @@ async function runFullAudit(token, auditId, meta) {
           description: `Your team closed ${closedLost.length} lost deals but ${lostNoReason.length} have no reason recorded. Win rate is ${winRate}%${avgWonValue > 0 ? ` with avg deal value $${avgWonValue.toLocaleString()}` : ''}. Without loss reasons, you cannot identify whether you lose on price, timing, competition, or fit — making rep coaching and process improvement impossible.`,
           detail: `Loss reason data is the most valuable coaching asset a sales manager has. Teams that track loss reasons systematically improve win rate by 12% within 2 quarters according to Gong research. "Lost to competitor" requires completely different action than "lost — no budget" or "lost — wrong timing."`,
           impact: `Win rate improvement blocked · rep coaching impossible · competitive intelligence blind · product feedback loop broken`,
-          dimension: 'Reporting',
+          dimension: 'Reporting Quality',
           guide: [
             'Add required Close Lost Reason dropdown: Price, Competitor, Timing, No Budget, No Decision, Product Gap, Other',
             'Workflow: Deal stage = Closed Lost AND reason is unknown → task to rep: fill in reason within 24 hours',
@@ -6858,7 +6871,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `${wonNoReason.length} closed-won deals have no win reason — you cannot replicate success`,
           description: `${wonNoReason.length} of your ${closedWon.length} won deals have no win reason recorded. Understanding why you win is just as important as understanding why you lose. Win reasons reveal your strongest value props, best-fit customers, and which reps close what type of deal.`,
           impact: `Win pattern analysis impossible · rep coaching incomplete · product feedback loop broken`,
-          dimension: 'Reporting',
+          dimension: 'Reporting Quality',
           guide: [
             'Add a required "Closed Won Reason" dropdown to your final won stage: Champion, Price Win, Feature Fit, Speed, Referral, Other',
             'Workflow: Deal moved to Closed Won → task to rep to fill in win reason within 48 hours',
@@ -6945,7 +6958,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `Only ${personaPct}% of contacts have a persona set — segmentation and targeting is generic`,
         description: `HubSpot Personas allow you to group contacts by buyer type and personalize messaging at scale. Only ${withPersona.length} of your ${contacts.length.toLocaleString()} contacts have a persona. Without it, all your contacts receive the same generic messaging regardless of their role, industry, or needs.`,
         impact: `${contacts.length - withPersona.length} contacts receiving untargeted messaging · campaign ROI reduced`,
-        dimension: 'Marketing',
+        dimension: 'Marketing Health',
         guide: [
           'Define 2-4 buyer personas based on your best customers — job title, company size, pain points, goals',
           'Build a workflow: set persona based on form submission answers, job title keywords, or company industry',
@@ -7061,7 +7074,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Your portal has the old HubSpot Score property, which stopped updating on August 31, 2025. Contacts are no longer being scored, workflows that relied on score changes have gone silent, and your lead prioritization is frozen at pre-cutoff values.`,
       detail: 'HubSpot replaced score properties with the new Lead Scoring tool. The new tool supports separate Fit scores (who they are), Engagement scores (what they do), and Combined scores — all updating in real time.',
       impact: `Contact data quality affecting segmentation, workflows, and email personalization`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       leadScoringEngine,
       guide: [
         'Go to: Marketing → Lead Scoring (in Marketing Hub Pro+) or Sales → Lead Scoring (in Sales Hub Pro+)',
@@ -7081,7 +7094,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `You have ${fmt(contacts.length)} contacts but no lead score. HubSpot's Lead Scoring tool (Marketing Hub or Sales Hub Pro+) lets you build Engagement scores (what contacts do) and Fit scores (who they are) — separately or combined. Without it, every contact looks the same to your reps.`,
       detail: 'The new HubSpot Lead Scoring tool (2024–2025) replaced the old HubSpot Score property. It scores contacts, companies, and deals with separate Fit + Engagement dimensions, time-based criteria, and optional AI-assisted scoring.',
       impact: `Contact data quality affecting segmentation, workflows, and email personalization`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       leadScoringEngine,
       fixItService: 'Lead Scoring Setup',
       fixItEstimate: '$349',
@@ -7101,7 +7114,7 @@ async function runFullAudit(token, auditId, meta) {
       title: `Lead Scoring configured but only ${leadScoringEngine.pctScored}% of contacts have a score — criteria too narrow`,
       description: `The Lead Scoring tool is active with ${leadScoringEngine.scoreProperties.length} score propert${leadScoringEngine.scoreProperties.length!==1?'ies':'y'}, but only ${fmt(leadScoringEngine.scoredCount)} of ${fmt(contacts.length)} contacts have a score. Criteria are likely too specific or contacts aren\'t engaging with the tracked activities.`,
       impact: `Contacts invisible to scoring — lead prioritization and MQL automation affected`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       leadScoringEngine,
       guide: [
         'Marketing → Lead Scoring → open each score → review Engagement and Fit criteria',
@@ -7191,7 +7204,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Integration failures cause silent data gaps: contacts created in Salesforce don\'t appear in HubSpot, deals don\'t update, email activity stops logging. Your team makes decisions on incomplete data without knowing it. ${criticalErrors.length > 0 ? `${criticalErrors.length} critical issue${criticalErrors.length!==1?'s':''} need immediate attention.` : ''}`,
       detail: 'Integration sync errors compound over time — a break that started last week means weeks of missing data. Contacts created, deals updated, and emails sent during the outage are not reflected in HubSpot reporting.',
       impact: `Integration errors blocking sync · records missing or duplicated · data trust broken`,
-      dimension: 'Automation',
+      dimension: 'Automation Health',
       integrationErrors,
       fixItService: 'Integration Repair',
       fixItEstimate: 'From $299',
@@ -7221,7 +7234,7 @@ async function runFullAudit(token, auditId, meta) {
         description: 'These workflows are actively failing: ' + errorNames + '. When a workflow errors, HubSpot typically stops processing enrolled contacts  -  meaning leads, nurture sequences, or follow-ups may be silently falling through. Most teams do not know a workflow is broken until a rep asks why a lead never got a follow-up email.',
         detail: 'Workflow errors are the #1 source of silent revenue loss in HubSpot. A workflow broken for 30 days on a 500-contact list means 500 people never got the message you intended them to receive.',
         impact: totalErrored + ' broken workflow' + (totalErrored!==1?'s':'')+' · contacts dropping silently · automation ROI destroyed',
-        dimension: 'Automation',
+        dimension: 'Automation Health',
         erroredWorkflows: erroredWorkflows.slice(0,10).map(wf => ({
           name: wf.name || wf.id,
           id: wf.id,
@@ -7254,7 +7267,7 @@ async function runFullAudit(token, auditId, meta) {
         title: deadWorkflows.length + ' active workflow' + (deadWorkflows.length!==1?'s':'') + ' with no enrollments in 90+ days',
         description: 'These workflows are marked active but have not enrolled anyone in 90+ days. Either the trigger criteria never fires, the audience is empty, or the workflow was abandoned without being turned off. Dead workflows create confusion, consume your workflow limit, and make portal audits harder.',
         impact: 'Workflow limit consumed · portal complexity inflated · team confusion',
-        dimension: 'Automation',
+        dimension: 'Automation Health',
         guide: [
           'Review each: does it still serve a business purpose?',
           'If yes  -  check the trigger: is the enrollment criteria too narrow?',
@@ -7320,7 +7333,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `${Math.round(oldTickets.length/Math.max(openTix.length,1)*100)}% of your ${openTix.length.toLocaleString()} open tickets exceed 3 days with no resolution. HubSpot State of Service data shows 67% of customers expect resolution within 3 hours. Every day past that threshold increases churn probability significantly.`,
         detail: `Benchmark: healthy Service Hub portals resolve 80%+ of tickets within 3 business days. Your current resolution lag suggests either staffing gaps, missing SLA rules, or unassigned ticket routing issues.`,
         impact: `Customers waiting past SLA · renewal conversations starting from a deficit`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Set up SLA rules: Service Hub → Settings → SLA → configure response and resolution targets by priority',
           'Create escalation workflows: tickets over 48 hours without update → notify manager + reassign',
@@ -7341,7 +7354,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `${over7Tix.length.toLocaleString()} open tickets (${over7Pct}% of your open queue) have been waiting over 7 days. At this stage, customers have likely contacted you multiple times, may have escalated externally, or have already decided not to renew.`,
         detail: `Research shows that ticket resolution after 7 days correlates directly with churn — customers who wait longer than a week are 4× more likely to not renew their contract.`,
         impact: `Tickets in severe SLA breach · churn probability elevated on each open account`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Pull all 7-day+ tickets immediately — assign directly to senior support or escalation tier',
           'Send a personal outreach email to each customer acknowledging the delay',
@@ -7362,7 +7375,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `${unassigned.length} open ticket${unassigned.length!==1?'s':''} have no assigned owner. Unassigned tickets don\'t appear in anyone's queue, never get followed up on, and are invisible to rep dashboards. These customers are effectively being ignored.`,
         detail: `Unassigned tickets are one of the most reliable predictors of churn — if no one owns the problem, no one solves it. Even 1 unassigned critical ticket can result in a lost account.`,
         impact: `Customers with no assigned rep · invisible to all rep dashboards · no follow-up`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Bulk-assign unassigned tickets: Service Hub → Tickets → filter by No Owner → assign to queue or rep',
           'Create a workflow: Ticket created with no owner → round-robin assign to available support reps',
@@ -7384,7 +7397,7 @@ async function runFullAudit(token, auditId, meta) {
           description: `${highPriOld.length} high-priority ticket${highPriOld.length!==1?'s are':' is'} more than 24 hours old with no resolution. High priority tickets should be resolved same-day — these represent your most at-risk customers.`,
           detail: `High priority tickets that age past 24 hours signal broken escalation paths. The issue was flagged as urgent but nothing happened urgently. That disconnect destroys customer trust.`,
           impact: `Critical accounts aging past SLA · highest churn probability in your queue`,
-          dimension: 'Service',
+          dimension: 'Service Health',
           guide: [
             'Immediate action: pull these tickets now and have a manager contact each customer personally',
             'Build a high-priority escalation workflow: High priority + age > 4 hours → Slack alert + auto-assign to senior rep',
@@ -7405,7 +7418,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `Ticket distribution is imbalanced across your service team. ${overloadedReps} rep${overloadedReps!==1?'s are':' is'} handling significantly more than the team average of ${avgLoad} open tickets. Overloaded reps produce slower responses, lower quality, and higher burnout risk.`,
         detail: `The top-loaded rep has ${maxLoad} open tickets vs team average of ${avgLoad}. Without workload balancing, SLA breaches happen on the overloaded rep's tickets first — and customers don\'t know or care that it\'s a capacity problem.`,
         impact: `Uneven load → SLA misses on overloaded reps · burnout risk · inconsistent customer experience`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Set up round-robin or capacity-based ticket assignment in Service Hub → Settings → Routing',
           'Create a team workload report: open tickets per rep, average age per rep, priority breakdown per rep',
@@ -7425,7 +7438,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `${uncategorized.toLocaleString()} of your ${tickets.length.toLocaleString()} tickets have no category assigned. Without categories, you cannot identify your most common support issues, cannot automate routing by type, and cannot measure improvement over time.`,
         detail: `Top 3 categories found in your data: ${topCategories.map(([cat,n]) => cat+' ('+n+')').join(', ')}. Standardizing categories enables product-level issue tracking and proactive churn prevention.`,
         impact: `${uncatPct}% uncategorized · no routing automation possible · product feedback loop broken`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Define 6-10 standard ticket categories that match your most common support types',
           'Make category a required field on ticket creation: Settings → Tickets → Required Properties',
@@ -7450,7 +7463,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `Your open tickets have been sitting an average of ${Math.round(avgTicketAgeDays)} days without resolution. This pattern suggests SLA rules are either not configured or not being enforced. Without SLA enforcement, there is no automatic escalation and no accountability.`,
         detail: `Industry benchmark: SaaS companies at $1–10M ARR typically target 4-hour first response and 24-hour resolution for standard tickets. Service-heavy portals without SLA automation see 40% higher churn on accounts with aging tickets.`,
         impact: `${Math.round(avgTicketAgeDays)}-day avg age · churn correlated with resolution time · team flying blind`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Set up SLA policies: Service Hub → Settings → SLA → create policies for each priority level',
           'Configure SLA breach notifications: when SLA is missed → notify rep + manager automatically',
@@ -7503,7 +7516,7 @@ async function runFullAudit(token, auditId, meta) {
         title: churnRate + '% subscription churn rate — revenue retention at risk',
         description: cancelledSubs.length + ' of ' + subscriptions.length + ' subscriptions are cancelled. Industry benchmark is under 5% monthly churn. At ' + churnRate + '% your MRR is actively shrinking.',
         impact: 'MRR at risk · customer lifetime value declining · growth offset by churn',
-        dimension: 'Reporting',
+        dimension: 'Reporting Quality',
         guide: [
           'Map cancelled subscriptions to contact records — identify churn patterns',
           'Set up a churn prevention workflow: trigger at 60 days before renewal with proactive check-in',
@@ -7518,7 +7531,7 @@ async function runFullAudit(token, auditId, meta) {
         title: renewNext30.length + ' subscription' + (renewNext30.length!==1?'s':'') + ' renewing in the next 30 days — proactive outreach window',
         description: 'You have ' + renewNext30.length + ' active subscriptions renewing within 30 days. This is the highest-leverage customer success window: a proactive check-in before renewal reduces churn by 40% vs reactive handling after cancellation.',
         impact: 'MRR renewal window · proactive outreach opportunity',
-        dimension: 'Sales',
+        dimension: 'Pipeline Integrity',
         guide: [
           'Create a renewal sequence: 30-day, 14-day, and 7-day pre-renewal touch points',
           'Assign each renewal to a CSM or account owner with a task due this week',
@@ -7543,7 +7556,7 @@ async function runFullAudit(token, auditId, meta) {
         title: expiredQuotes.length + ' quote' + (expiredQuotes.length!==1?'s':'') + ' expired without being accepted — lost revenue signal',
         description: 'Expired unaccepted quotes indicate deals that stalled at the proposal stage. Each expired quote is a buyer who evaluated your offer and did not convert — without follow-up, this is silent churn in your pipeline.',
         impact: 'Proposal conversion gap · unworked pipeline · revenue intelligence missing',
-        dimension: 'Pipeline',
+        dimension: 'Pipeline Integrity',
         guide: [
           'Review all expired quotes — were these deals lost, delayed, or forgotten?',
           'Set quote expiration reminders: 3 days before expiry → task to rep to follow up',
@@ -7566,7 +7579,7 @@ async function runFullAudit(token, auditId, meta) {
         title: overdueInvoices.length + ' overdue invoice' + (overdueInvoices.length!==1?'s':'') + ' — cash flow risk',
         description: overdueInvoices.length + ' invoices are past due (' + overdueRate + '% of all invoices). Uncollected invoices are cash that should already be in your account. Each day overdue increases collection difficulty exponentially.',
         impact: 'Cash flow at risk · accounts receivable aging · collection cost rising',
-        dimension: 'Reporting',
+        dimension: 'Reporting Quality',
         guide: [
           'Set up automated payment reminder sequences: 7 days before due, on due date, 3 days after, 7 days after',
           'Review overdue invoices by amount — prioritize largest for immediate personal outreach',
@@ -7592,7 +7605,7 @@ async function runFullAudit(token, auditId, meta) {
         title: noStepSeqs.length + ' sequence' + (noStepSeqs.length!==1?'s':'') + ' with no steps configured',
         description: 'These sequences are active but have no steps. Any contact enrolled receives nothing — a silent fail that damages sender reputation and wastes rep time.',
         impact: noStepSeqs.length + ' empty sequences · enrolled contacts get no messages',
-        dimension: 'Automation',
+        dimension: 'Automation Health',
         guide: ['Go to Sales Sequences', 'Add minimum 3 steps to each empty sequence', 'Re-enroll any contacts who missed messages']
       });
     }
@@ -7603,7 +7616,7 @@ async function runFullAudit(token, auditId, meta) {
         title: lowReplySeqs.length + ' sequence' + (lowReplySeqs.length!==1?'s':'') + ' under 5% reply rate — copy needs work',
         description: 'Industry benchmark for cold outreach reply rates is 8-12%. Under 5% means you are burning sending reputation on contacts who will not respond.',
         impact: 'Sender reputation risk · rep time wasted · deals not progressing',
-        dimension: 'Automation',
+        dimension: 'Automation Health',
         guide: ['Shorten step 1 to under 75 words', 'Add personalization tokens in body', 'Test subject lines — avoid "Following up"', 'Reduce to 3-4 steps max for cold outreach']
       });
     }
@@ -7651,7 +7664,7 @@ async function runFullAudit(token, auditId, meta) {
           title: pct + '% cart abandonment rate — ' + abandoned.length + ' of ' + carts.length + ' carts not completed',
           description: 'Over ' + pct + '% of shopping carts are being abandoned before purchase. Industry average is 70% — but abandoned carts still represent recoverable revenue through automated follow-up sequences.',
           impact: abandoned.length + ' abandoned carts · unrecovered revenue · no automated recovery in place',
-          dimension: 'Pipeline',
+          dimension: 'Pipeline Integrity',
           guide: [
             'Create an abandoned cart workflow: trigger 1 hour after cart created with no purchase',
             'Send 3-step recovery sequence: reminder email, discount offer, final reminder',
@@ -7672,7 +7685,7 @@ async function runFullAudit(token, auditId, meta) {
         title: noBudgetCampaigns.length + ' campaign' + (noBudgetCampaigns.length!==1?'s':'') + ' with no budget tracked — ROI reporting blind spot',
         description: 'Campaigns without budget data make true ROI uncalculable. HubSpot shows revenue influenced but cannot show cost-per-acquisition without spend tracked.',
         impact: 'Marketing ROI uncalculable · board reporting missing cost data · budget decisions made blind',
-        dimension: 'Reporting',
+        dimension: 'Reporting Quality',
         guide: ['Marketing Campaigns — open each active campaign', 'Add budget amount to each', 'Even rough estimates enable ROI tracking']
       });
     }
@@ -7720,7 +7733,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Email bounce rate ${overallBounceRate}% — HubSpot will suspend your sending account above 5%`,
           description: `Your overall email bounce rate across ${sentEmails.length} campaigns is ${overallBounceRate}%. HubSpot suspends email sending when bounce rate exceeds 5% — at ${overallBounceRate}% you are at immediate risk. This means marketing emails AND workflow emails stop sending completely until resolved.`,
           impact: `Account suspension risk · ${totalBounced.toLocaleString()} bounced emails · all email automation could stop`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Immediate: check app.hubspot.com/email/[portalId]/health for your account status',
             'Create an active list: "Email hard bounced = true" → do NOT email these contacts',
@@ -7737,7 +7750,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Email bounce rate ${overallBounceRate}% — approaching HubSpot's 5% suspension threshold`,
           description: `Your bounce rate of ${overallBounceRate}% is above the healthy benchmark of <2% and approaching the 5% threshold where HubSpot suspends your account. At this trajectory, one large send to a dirty list could trigger an account suspension.`,
           impact: `Deliverability declining · sender reputation damaged · ${totalBounced.toLocaleString()} total bounces`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Filter "Email hard bounced = true" → create a suppression list → never email these contacts',
             'Scrub your list with an email validation tool (NeverBounce, ZeroBounce) before your next large send',
@@ -7755,7 +7768,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Unsubscribe rate ${overallUnsubRate}% — HubSpot suspends accounts above 3%`,
           description: `Your unsubscribe rate of ${overallUnsubRate}% exceeds HubSpot's 3% threshold for account suspension. ${totalUnsub.toLocaleString()} contacts have actively opted out. High unsub rates signal wrong audience, wrong content, or wrong frequency — and once suspended, no emails send until HubSpot manually reviews your account.`,
           impact: `Account suspension risk · ${totalUnsub.toLocaleString()} unsubscribed contacts · campaign disruption`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Segment your list — only send relevant content to contacts who opted in for that type of email',
             'Set clear expectations at sign-up: tell contacts what emails they\'ll receive and how often',
@@ -7771,7 +7784,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Unsubscribe rate ${overallUnsubRate}% — above the healthy 1% benchmark`,
           description: `Industry standard is under 1% unsubscribe rate. At ${overallUnsubRate}% your contacts are opting out faster than healthy. This erodes your list quality, damages sender reputation, and signals content or targeting problems.`,
           impact: `${totalUnsub.toLocaleString()} unsubscribes · list quality declining`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Use contact segmentation to send more relevant content to smaller, better-targeted lists',
             'Review email frequency — over-sending is the #1 cause of elevated unsub rates',
@@ -7789,7 +7802,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Spam report rate ${overallSpamRate}% — above 0.1% triggers account suspension`,
           description: `Your spam complaint rate of ${overallSpamRate}% (${totalSpam} reports from ${totalSent.toLocaleString()} sends) exceeds HubSpot's 0.1% threshold. Contacts marking your email as spam is the most damaging signal to your domain reputation — Gmail and Yahoo now enforce strict spam rate limits for bulk senders.`,
           impact: `Domain blacklist risk · account suspension · all future emails potentially blocked`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Audit your contact acquisition sources — spam reports almost always come from purchased or scraped lists',
             'Add an obvious unsubscribe link at the TOP of your emails — people who can\'t find it report as spam',
@@ -7808,7 +7821,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Overall email open rate ${overallOpenRate}% — below the 20-25% industry benchmark`,
           description: `Across ${sentEmails.length} email campaigns, your average open rate is ${overallOpenRate}%. The industry benchmark is 20-25%. Low open rates indicate subject line problems, wrong send time, wrong audience, or contacts who have mentally unsubscribed without clicking the button.`,
           impact: `${overallOpenRate}% open rate · email ROI significantly below potential`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'A/B test your subject lines — even a 5-word change can move open rate by 10%',
             'Send to engaged contacts first (opened in last 90 days) to train inbox placement',
@@ -7834,7 +7847,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${highBounce.length} individual email${highBounce.length!==1?'s':''} with >5% bounce rate — list health problems`,
         description: `${highBounce.length} specific campaigns have bounce rates above 5%. This signals those sends went to old, invalid, or purchased contact segments. Each high-bounce send damages your domain reputation even if your overall rate looks acceptable.`,
         impact: 'Sender reputation damage · deliverability degrading for future sends',
-        dimension: 'Marketing',
+        dimension: 'Marketing Health',
         guide: [
           'Marketing Emails → open each high-bounce email → Performance tab → download bounced contacts',
           'Create a suppression list from all hard-bounced addresses — never email these again',
@@ -7856,7 +7869,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${staleDrafts.length} marketing email drafts untouched for 90+ days — portal clutter`,
         description: 'Stale drafts represent abandoned campaigns. They clutter the email tool, confuse new team members, and make it harder to find active work.',
         impact: `Abandoned draft emails cluttering portal · deliverability risk if accidentally sent`,
-        dimension: 'Marketing',
+        dimension: 'Marketing Health',
         guide: ['Marketing Emails → filter by Draft → sort by Last Updated ascending', 'Delete or archive any draft not touched in 90+ days', 'Document active drafts with a naming convention: [Campaign Name] [Date] [Owner]']
       });
     }
@@ -7878,7 +7891,7 @@ async function runFullAudit(token, auditId, meta) {
           title: 'NPS score ' + nps + ' — customer sentiment below healthy threshold (benchmark: 31+)',
           description: 'B2B SaaS NPS benchmark is 31+. Scores below 20 mean more detractors than promoters. Detractors churn faster and share negative experiences more than promoters share positive ones.',
           impact: 'Churn risk elevated · expansion revenue blocked · referral pipeline damaged',
-          dimension: 'Service',
+          dimension: 'Service Health',
           npsData: { score: nps, promoters, detractors, total: scores2.length },
           guide: ['Close loop with every detractor within 48 hours', 'Build churn-risk workflow triggered by NPS < 7', 'Track NPS monthly and tie to renewal risk scoring']
         });
@@ -7910,7 +7923,7 @@ async function runFullAudit(token, auditId, meta) {
         title: superAdminUsers.length + ' super admins — too many users with full portal access',
         description: 'You have ' + superAdminUsers.length + ' super admins. HubSpot best practice is 2-3 maximum. Super admins can delete records, change billing, modify all settings, and access all data. Each unnecessary super admin is a security and compliance risk.',
         impact: superAdminUsers.length + ' users with unrestricted portal access · security risk · compliance concern',
-        dimension: 'Configuration',
+        dimension: 'Configuration & Security',
         guide: [
           'Settings → Users & Teams → filter by Super Admin',
           'Review each: does this person actually need super admin?',
@@ -7960,7 +7973,7 @@ async function runFullAudit(token, auditId, meta) {
         title: 'Low rep activity logging — avg ' + avgPerUser + ' engagements per user in last 30 days',
         description: 'Across ' + users.length + ' users, FixOps found an average of ' + avgPerUser + ' logged engagements (calls, emails, meetings, notes) per user. Low logging means your CRM does not reflect reality — pipeline data is unreliable and managers cannot coach from actual activity.',
         impact: 'Pipeline forecasting unreliable · manager coaching blind · deal risk invisible',
-        dimension: 'Sales',
+        dimension: 'Pipeline Integrity',
         activityData: {
           emailsLogged: emailEngs.length,
           notesLogged: notes.length,
@@ -7992,7 +8005,7 @@ async function runFullAudit(token, auditId, meta) {
         title: expiredGoals.length + ' expired sales goal' + (expiredGoals.length!==1?'s':'') + ' — rep targets not updated',
         description: 'Sales goals past their end date without replacement mean reps are working without active targets. Pipeline discipline and accountability drop without current goals.',
         impact: 'No active targets · pipeline discipline drops · forecasting accuracy suffers',
-        dimension: 'Sales',
+        dimension: 'Pipeline Integrity',
         guide: ['Sales Goals — review expired entries', 'Set new quarterly targets per rep', 'Add goal reporting to team dashboards']
       });
     }
@@ -8026,7 +8039,7 @@ async function runFullAudit(token, auditId, meta) {
         title: stalledLeads.length + ' lead' + (stalledLeads.length!==1?'s':'') + ' stuck in New status for 14+ days',
         description: 'Leads in New status for over 2 weeks are either forgotten or being worked without updates. Healthy conversion time is 3-5 days for qualified leads.',
         impact: stalledLeads.length + ' stalled leads · pipeline velocity destroyed',
-        dimension: 'Pipeline',
+        dimension: 'Pipeline Integrity',
         guide: ['Review each stalled lead', 'Update status to Qualified, Unqualified, or Attempted Contact', 'Build escalation: Lead >7 days New → manager notification task']
       });
     }
@@ -8059,7 +8072,7 @@ async function runFullAudit(token, auditId, meta) {
           'Create a workflow: new ticket created → check if matching KB article exists → send to customer',
           'FixOps can audit your ticket subjects against KB coverage to find the highest-impact articles to publish first',
         ],
-        dimension: 'Service',
+        dimension: 'Service Health',
       });
     }
 
@@ -8077,7 +8090,7 @@ async function runFullAudit(token, auditId, meta) {
           'Set up HubSpot Knowledge Base search analytics to see what customers search for but cannot find',
           'Archive articles with zero views after 90 days — reduce noise, improve search relevance',
         ],
-        dimension: 'Service',
+        dimension: 'Service Health',
       });
     }
   }
@@ -8105,7 +8118,7 @@ async function runFullAudit(token, auditId, meta) {
           'Add a workflow: "If contact requests a meeting → send rep booking link automatically"',
           'FixOps can set up automated meeting link insertion in all your outreach sequences',
         ],
-        dimension: 'Sales',
+        dimension: 'Pipeline Integrity',
       });
     }
   }
@@ -8127,7 +8140,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'Your team has no shared email templates in HubSpot. Every rep writes individual emails from scratch, leading to inconsistent messaging, longer ramp time for new hires, and zero visibility into which messages perform best.',
       detail: 'Top-performing sales teams use templates for 60-70% of their outreach, customizing the final 30% per prospect. Templates also enable A/B testing subject lines and tracking open rates by message type.',
       impact: 'Inconsistent messaging · slower rep ramp · no message performance data',
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Go to Sales → Templates → Create templates for your top 5 most common email types',
         'Build a "New Lead Introduction", "Follow Up #1", "Breakup Email", and "Demo Request" at minimum',
@@ -8145,7 +8158,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'HubSpot Playbooks give reps structured call scripts, discovery frameworks, and objection handling guides right inside the CRM. With zero playbooks, every rep runs their own process — making it impossible to replicate what your top performers do.',
       detail: 'Playbooks are available on Sales Hub Professional and above. They appear as a panel during calls and deal views, prompting reps to capture qualification data consistently.',
       impact: 'Inconsistent discovery · best practices not captured · coaching harder',
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Sales → Playbooks → Create a Discovery Playbook with your MEDDIC or SPICED questions',
         'Add an Objection Handling playbook with your top 5 objections and proven responses',
@@ -8170,7 +8183,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'Without a "Never Log" list configured in HubSpot, your email integration may log internal emails (sent between team members) as contact activity. This pollutes contact timelines with irrelevant data and makes rep activity reports inaccurate.',
       detail: 'The Never Log list tells HubSpot which email addresses to exclude from automatic CRM logging. At minimum it should include your own domain so internal emails never appear on contact records.',
       impact: 'Internal emails logging as prospect activity · contact timelines polluted · rep activity data inaccurate',
-      dimension: 'Configuration',
+      dimension: 'Configuration & Security',
       guide: [
         'Settings → General → Email → scroll to "Never log" → add your company domain(s)',
         'Add any executive, legal, or finance email addresses that should never appear in the CRM',
@@ -8190,7 +8203,7 @@ async function runFullAudit(token, auditId, meta) {
       description: 'With one pipeline, every deal type — new business, renewal, upsell, partnership — follows the same stage progression. This makes it impossible to measure conversion rates accurately by deal type or optimize your process for different selling motions.',
       detail: 'Best practice: create one pipeline per distinct sales motion. New business follows different stages than renewal. Enterprise deals move differently than SMB. Mixing them in one pipeline corrupts your win rate, average cycle time, and stage conversion data.',
       impact: 'Mixed deal types distort win rate · pipeline forecasting inaccurate · coaching blind spot by deal type',
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Settings → Pipelines → Create separate pipelines for New Business, Renewals, and Upsells',
         'Move existing deals to the appropriate pipeline based on deal type',
@@ -8220,7 +8233,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `HubSpot's AI tools (Breeze) require foundational data to function. ${breezeMissing.length} key prerequisites are missing from your portal: ${breezeMissing.join('; ')}. Without these, Breeze Agents cannot answer customer questions, prospect effectively, or generate insights from your data.`,
       detail: 'Breeze Customer Agent requires KB articles to answer questions. Breeze Prospecting Agent requires sequences and contact data. Content Agent requires forms and conversion data. Setting up these foundations also improves your portal score and team effectiveness independently of AI.',
       impact: 'Breeze AI features unavailable · HubSpot AI investment not being used · competitive disadvantage',
-      dimension: 'Configuration',
+      dimension: 'Configuration & Security',
       guide: [
         'Start with Knowledge Base: Service Hub → Knowledge Base → create articles for your top 10 support questions',
         'Create at least one prospecting sequence in Sequences → New Sequence',
@@ -8267,7 +8280,7 @@ async function runFullAudit(token, auditId, meta) {
           'Compare their deal close rates vs high-activity teams — is low activity correlated with lower revenue?',
           'Set up a team activity leaderboard visible to all reps — visibility drives behavior',
         ],
-        dimension: 'Sales',
+        dimension: 'Pipeline Integrity',
       });
     }
   }
@@ -8300,7 +8313,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `Email authentication (SPF, DKIM, DMARC) tells receiving mail servers your emails are legitimate. Without it, emails land in spam, get blocked, and your sender reputation degrades over time. This affects every marketing email, every sales sequence, and every notification you send.`,
         detail: `SPF authorizes HubSpot to send on your domain's behalf. DKIM cryptographically signs each email. DMARC tells receiving servers what to do when either check fails. Missing any of these is an immediate deliverability risk.`,
         impact: `Email deliverability at risk — campaigns may be landing in spam across your entire list`,
-        dimension: 'Configuration',
+        dimension: 'Configuration & Security',
         guide: [
           'Settings → Website → Domains & URLs → click your domain → check authentication status',
           'Add the HubSpot SPF record to your DNS: include:_spf.hubspot.com in your TXT record',
@@ -8330,7 +8343,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Without Gmail or Outlook connected, reps must manually log every email, call, and meeting. Most don\'t. That means your CRM timeline is incomplete, rep activity reports are inaccurate, and managers have no real visibility into what's happening.`,
       detail: `HubSpot's email integration auto-logs sent and received emails, links them to contacts and deals, and populates the contact timeline without any rep action. Without it, you\'re flying blind on rep activity.`,
       impact: `Activity reporting incomplete · rep coaching impossible · deal progression invisible`,
-      dimension: 'Sales',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Each rep: Settings → General → Email → Connect your inbox (Google or Outlook)',
         'Managers: create a workflow that alerts you when a rep hasn\'t logged any activity in 7 days',
@@ -8360,7 +8373,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `${lowReplySeqs.length} of your active sequences have reply rates under 3% with 50+ enrollments. Industry benchmark is 8-12% for well-targeted sequences. Low reply rates mean your messaging, targeting, or send timing needs a rewrite — continuing to enroll contacts is burning your domain reputation.`,
       detail: `Low reply rate sequences are often the result of: wrong ICP targeting, generic copy with no personalization, sending too many steps too quickly, or contacting people who aren\'t in a buying moment. Each matters equally.`,
       impact: `Contacts being burned through poorly performing sequences · domain reputation at risk`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       guide: [
         'Sequences → review each low-performer → check enrollment source (are you targeting the right people?)',
         'A/B test subject lines — a 2-word subject often outperforms a sentence',
@@ -8398,7 +8411,7 @@ async function runFullAudit(token, auditId, meta) {
         description: `${sharedTriggers.length} pairs of active workflows enroll from the same trigger condition. When two workflows run simultaneously on the same contact or deal, the order they execute is not guaranteed. If they both write to the same property, the result is unpredictable — you can\'t know which value will stick.`,
         detail: `Workflow collisions are one of the hardest CRM bugs to diagnose because they\'re intermittent. Records look correct most of the time but fail in specific timing windows. They compound as your workflow count grows.`,
         impact: `Unpredictable data writes · intermittent automation failures · hard-to-reproduce bugs`,
-        dimension: 'Automation',
+        dimension: 'Automation Health',
         guide: [
           'Automation → map all workflows sharing triggers → identify which set the same properties',
           'Consolidate colliding workflows into a single workflow with branching logic instead',
@@ -8432,7 +8445,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `${noSourceContacts.length} of your ${recentContacts.length} contacts created in the last 90 days have no analytics source recorded. You're acquiring leads you can\'t trace back to a campaign, channel, or ad. Every budget decision you make about marketing spend is based on incomplete data.`,
       detail: `Missing source attribution usually means: HubSpot tracking code not on all pages, direct traffic not being captured, offline form submissions not tagged, or manual contact creation without source property. Each has a different fix.`,
       impact: `Marketing ROI unmeasurable · budget allocation decisions based on incomplete data`,
-      dimension: 'Marketing',
+      dimension: 'Marketing Health',
       guide: [
         'Settings → Tracking Code → verify the HubSpot tracking code is installed on all site pages',
         'For offline sources: create a contact property "Original Source Override" and populate it on import',
@@ -8460,7 +8473,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `${pastDueNoTask.length} open deals have passed their close date with no tasks scheduled and no recent notes. These aren\'t just stalled — they\'re actively being ignored. In competitive sales, deals with no follow-up action within 72 hours of going overdue are 60% less likely to close.`,
       detail: `This pattern indicates either: reps aren\'t using tasks for deal management, close dates are set as placeholder dates and not maintained, or deals have been mentally written off but not marked lost. All three are pipeline accuracy problems.`,
       impact: `${pastDueNoTask.length} deals going cold · forecast inflation · coaching opportunity missed`,
-      dimension: 'Pipeline',
+      dimension: 'Pipeline Integrity',
       guide: [
         'Pull these deals: Deals → filter "Close date is before today" + "Number of notes = 0"',
         'For each: either create a follow-up task, update the close date, or mark as Closed Lost with reason',
@@ -8537,7 +8550,7 @@ async function runFullAudit(token, auditId, meta) {
       description: `Based on your portal data, ${featureChecks.length} features included in your HubSpot subscription have zero usage. You're paying for capabilities your team either hasn\'t been set up on or doesn\'t know exist. Each unused feature represents both a cost and a competitive gap.`,
       detail: `Unused features: ${featureChecks.join('; ')}.`,
       impact: `HubSpot subscription ROI below potential · team missing productivity tools they already pay for`,
-      dimension: 'Configuration',
+      dimension: 'Configuration & Security',
       guide: [
         'Audit each unused feature — is it a training gap, a setup gap, or genuinely not needed?',
         'Prioritize: Workflows first (highest ROI), then Sequences, then KB articles',
@@ -8629,7 +8642,7 @@ async function runFullAudit(token, auditId, meta) {
           'Set up campaign association in workflows: "If contact fills form from Campaign X → associate with campaign"',
           'Use HubSpot Revenue Attribution reports to see first/last touch across campaigns',
         ],
-        dimension: 'Marketing',
+        dimension: 'Marketing Health',
       });
     }
   }
@@ -8659,7 +8672,7 @@ async function runFullAudit(token, auditId, meta) {
           'Set up a SLA workflow: "If conversation open > 8hrs → notify manager"',
           'Create a "24hr response" automation that sends an acknowledgment to any new conversation instantly',
         ],
-        dimension: 'Service',
+        dimension: 'Service Health',
       });
     }
   }
@@ -8692,7 +8705,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Revenue forecast is unreliable — ${noCloseDatePct}% of deals missing close dates, ${noAmountPct}% missing amounts`,
           description: `Your pipeline forecast is built on incomplete data. ${noCloseDatePct}% of open deals have no close date and ${noAmountPct}% have no dollar value. This means your weighted pipeline forecast — the number your CEO and board see — could be off by six figures or more. HubSpot's forecast tool multiplies amount × probability × close date timing. Missing any one of these makes the entire number meaningless.`,
           impact: `Weighted forecast unreliable · board reporting inaccurate · quota tracking broken`,
-          dimension: 'Pipeline',
+          dimension: 'Pipeline Integrity',
           guide: [
             `Priority 1: Require close date before a deal can advance past your first active stage`,
             `Priority 2: Require amount before a deal leaves "Prospect" or "Qualification" stage`,
@@ -8712,7 +8725,7 @@ async function runFullAudit(token, auditId, meta) {
             title: `Pipeline Forecast: ~$${q90.toLocaleString()} weighted pipeline at ${winPct}% historical win rate`,
             description: `Based on your current pipeline and historical close rates, your weighted forecast is $${q90.toLocaleString()}. Your team closes ${winPct}% of opportunities — ${winPct >= 30 ? 'above' : 'below'} the 25-35% industry benchmark for B2B sales. Pipeline velocity is healthy when deals move through stages in under 30 days average.`,
             impact: `$${q90.toLocaleString()} weighted pipeline · ${winPct}% win rate · pipeline data is ${noCloseDatePct < 15 && noAmountPct < 10 ? 'reliable' : 'moderately reliable'}`,
-            dimension: 'Pipeline',
+            dimension: 'Pipeline Integrity',
             guide: [
               `To improve forecast accuracy further: reduce the ${noCloseDatePct}% of deals missing close dates`,
               `Win rate improvement: review your last 20 lost deals — 3 common objections will surface immediately`,
@@ -8818,7 +8831,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `${brokenForms.length} form${brokenForms.length!==1?'s':''} with <1% conversion rate — lead capture silently failing`,
           description: `${brokenForms.length} high-traffic forms are receiving significant views but almost zero submissions. A form with 500 views and 2 submissions (0.4% conversion) either has a technical problem, asks too many friction-heavy fields, or is embedded on a page where visitors aren\'t ready to convert. Industry benchmark for a well-optimized HubSpot form is 15-25% conversion rate.`,
           impact: `Broken forms causing unknown lead loss · ad spend driving traffic to non-converting pages`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             'Test each affected form yourself right now — submit it and verify you receive the confirmation email',
             'Check form embed code: is the form still live on the page? Use HubSpot\'s page performance view to confirm',
@@ -8847,7 +8860,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `Form conversion gap: best form ${best.rate}% vs worst ${worst.rate}% — ${Math.round(best.rate - worst.rate)}pp spread`,
           description: `Your top-performing form "${best.name}" converts at ${best.rate}% while "${worst.name}" converts at ${worst.rate}%. The ${Math.round(best.rate-worst.rate)} percentage point gap suggests the best form has something the worst doesn\'t — shorter length, better placement, stronger CTA, or better audience targeting. Applying the same approach to your worst performers could double their lead volume.`,
           impact: `${Math.round(best.rate - worst.rate)}pp conversion gap · significant lead volume left on table`,
-          dimension: 'Marketing',
+          dimension: 'Marketing Health',
           guide: [
             `Study "${best.name}" — how many fields? What's the CTA copy? Where is it placed?`,
             `Apply the same structure to "${worst.name}" — test 1 change at a time`,
@@ -8879,7 +8892,7 @@ async function runFullAudit(token, auditId, meta) {
           title: `${unknownPct}% of closed won revenue has no source attribution — marketing ROI invisible`,
           description: `$${Math.round(unknownRev).toLocaleString()} of your closed won revenue (${unknownPct}%) shows "Unknown" as the original source. This means your marketing team can\'t prove which channels are generating revenue, can\'t defend their budget, and can\'t double down on what's working. UTM parameters aren\'t being captured or the HubSpot tracking code isn\'t installed on your website.`,
           impact: `${unknownPct}% revenue unattributed · marketing budget decisions made without data`,
-          dimension: 'Reporting',
+          dimension: 'Reporting Quality',
           guide: [
             'Install the HubSpot tracking code on ALL pages of your website (not just landing pages)',
             'Add UTM parameters to every paid ad, email, and social link: utm_source, utm_medium, utm_campaign',
@@ -8897,7 +8910,7 @@ async function runFullAudit(token, auditId, meta) {
             title: `Top revenue source: "${topSrc[0]}" generated $${Math.round(topSrc[1]).toLocaleString()} in closed won deals`,
             description: `Your source attribution data is healthy. "${topSrc[0]}" is your highest-revenue channel, accounting for $${Math.round(topSrc[1]).toLocaleString()} of closed won revenue. Use this data to double down on what's working and reduce spend on lower-performing channels.`,
             impact: `Attribution data available for ${100-unknownPct}% of closed revenue · optimization data actionable`,
-            dimension: 'Reporting',
+            dimension: 'Reporting Quality',
             guide: [
               `Review your top 3 sources and compare their average deal sizes — not just volume`,
               `Organic and referral sources typically have higher deal values than paid — verify this holds for your portal`,
@@ -8925,7 +8938,7 @@ async function runFullAudit(token, auditId, meta) {
         title: `${highTicketCompanies} customer${highTicketCompanies!==1?'s have':' has'} 5+ open tickets — churn risk elevated`,
         description: `High ticket volume from individual customers is the clearest leading indicator of churn in B2B SaaS. A customer submitting 5+ support tickets signals product friction, implementation problems, or unmet expectations. By the time they mention it on a renewal call, it\'s often too late.`,
         impact: `High-risk customers generating repeat tickets · renewal conversations starting from a deficit`,
-        dimension: 'Service',
+        dimension: 'Service Health',
         guide: [
           'Immediately: identify which customers have the most open tickets → assign a CSM to each for a check-in call',
           'Run a Customer Health review: high ticket volume + declining email engagement + no recent meetings = churn signal',
@@ -11251,6 +11264,50 @@ async function runFullAudit(token, auditId, meta) {
         })(),
         inactiveUserNames: inactiveUsers.slice(0,5).map(u=>u.name),
         darkRepNames: darkReps ? darkReps.slice(0,5).map(r=>r.name||r) : [],
+
+        // ── Aliases and computed fields for reporting views ─────────────────
+        totalContacts:         contacts.length,
+        totalWorkflows:        workflows.length,
+        totalForms:            forms.length,
+        totalLists:            lists.length,
+        totalSequences:        sequences.length,
+        totalTickets:          tickets.length,
+        totalUsers:            users.length,
+        totalQuotes:           quotes.length,
+        userCount:             users.length,
+        users:                 users.slice(0, 100).map(u => ({
+          id: u.id,
+          email: u.properties?.email || u.email || '',
+          firstName: u.properties?.firstName || u.firstName || '',
+          lastName: u.properties?.lastName || u.lastName || '',
+          lastActive: u.properties?.lastActive || u.lastActive || null,
+          roleType: u.roleType || 'user',
+        })),
+        companies:             companies.length,
+        forms:                 forms.length,
+        tickets:               tickets.length,
+        quotes:                quotes.length,
+        lineItems:             lineItems.length,
+        orders:                orders.length,
+        meetingLinks:          meetingLinks.length,
+        kbArticles:            kbArticles.filter(a => a.state === 'PUBLISHED').length,
+        landingPagesTotal:     landingPages.length,
+        landingPagesDraft:     landingPages.filter(p => p.state === 'DRAFT').length,
+        emailTemplatesTotal:   emailTemplates.length,
+        contactsMissingEmail:  contacts.filter(c => !c.properties?.email).length,
+        erroredWorkflows:      workflows.filter(w => w.status === 'ERROR' || w.internalProcessingState === 'SUSPENDED').length,
+        workflowsMissingGoals: workflows.filter(w => (w.enabled||w.isEnabled) && (!w.goalCriteria || w.goalCriteria.length === 0)).length,
+        forecastEnabled:       deals.length > 5,
+        unusedCustomProperties: (undocumentedProps||[]).length,
+        dealPropsUnused:       Math.max(0, 0),
+        propertyUsagePct:      propertyUsage?.coverageScore || 0,
+        stageVelocity:         pipelineVelocity || {},
+        revenueIntel:          { mrrTotal, closedWonMtd, closedWonQtd, avgDealSize },
+        ticketsSampled:        Math.min(tickets.length, 10000),
+        appointmentsTotal:     meetings.length,
+        appointmentsUpcoming:  meetings.filter(m => m.properties?.hs_meeting_outcome === 'SCHEDULED').length,
+        commercePaymentsTotal: 0,
+        commercePaymentsFailed:0,
 
       // ── Intelligence Engines (moved inside portalStats so ps.engineName works) ──
       revenueIntel,
