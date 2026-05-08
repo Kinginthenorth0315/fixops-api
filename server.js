@@ -8986,43 +8986,6 @@ async function runFullAudit(token, auditId, meta) {
   
 
   // ── All-objects property health issues ────────────────────────────────────
-  if (allPropsEngine) {
-    // Bloated objects - many never-used custom properties
-    allPropsEngine.objects.forEach(obj => {
-      if (obj.neverUsedCount >= 10) {
-        issues.push({
-          dimension: 'Data Integrity',
-          severity: obj.neverUsedCount >= 25 ? 'critical' : 'warning',
-          title: obj.object + ' has ' + obj.neverUsedCount + ' custom propert' + (obj.neverUsedCount===1?'y':'ies') + ' never filled in — property bloat',
-          description: 'Properties that are never filled in clutter your forms, slow your team, and make data analysis unreliable. They also consume your property limit.',
-          impact: 'Medium — bloated property lists slow onboarding and reduce data quality',
-          fix: 'CRM → Properties → ' + obj.object + ' → filter by Created By = you/your team → sort by usage → archive any never-filled custom properties. Check no workflows reference them first.',
-        });
-      }
-      if (obj.dupeCount >= 3) {
-        issues.push({
-          dimension: 'Data Integrity',
-          severity: 'warning',
-          title: obj.object + ' has ' + obj.dupeCount + ' sets of duplicate properties with identical or near-identical labels',
-          description: 'Duplicate properties split your data across fields, making segmentation and reporting unreliable. Different team members fill different versions of the same field.',
-          impact: 'High — duplicate properties corrupt reporting and personalization',
-          fix: 'CRM → Properties → ' + obj.object + ' → review duplicates → pick the primary field, migrate data from the other, then archive the duplicate. Update all forms and workflows referencing the archived field.',
-        });
-      }
-    });
-
-    // Cross-object property name conflicts
-    if (allPropsEngine.crossObjectPropCount > 5) {
-      issues.push({
-        dimension: 'Data Integrity',
-        severity: 'info',
-        title: allPropsEngine.crossObjectPropCount + ' properties share the same name across multiple objects — naming collision risk',
-        description: 'Properties with the same name on different objects (Contacts, Deals, Companies) create confusion in workflows, APIs, and reports. A workflow updating "status" may be ambiguous about which object it targets.',
-        impact: 'Low-Medium — causes confusion in workflow configuration and API integrations',
-        fix: 'Review shared property names and consider adding object-specific prefixes: contact_status, deal_status rather than just status on both objects.',
-      });
-    }
-  }
 
 // ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
   dataScore       = Math.max(10, dataScore);
@@ -9709,6 +9672,43 @@ async function runFullAudit(token, auditId, meta) {
     };
   })();
 
+  if (allPropsEngine) {
+    // Bloated objects - many never-used custom properties
+    allPropsEngine.objects.forEach(obj => {
+      if (obj.neverUsedCount >= 10) {
+        issues.push({
+          dimension: 'Data Integrity',
+          severity: obj.neverUsedCount >= 25 ? 'critical' : 'warning',
+          title: obj.object + ' has ' + obj.neverUsedCount + ' custom propert' + (obj.neverUsedCount===1?'y':'ies') + ' never filled in — property bloat',
+          description: 'Properties that are never filled in clutter your forms, slow your team, and make data analysis unreliable. They also consume your property limit.',
+          impact: 'Medium — bloated property lists slow onboarding and reduce data quality',
+          fix: 'CRM → Properties → ' + obj.object + ' → filter by Created By = you/your team → sort by usage → archive any never-filled custom properties. Check no workflows reference them first.',
+        });
+      }
+      if (obj.dupeCount >= 3) {
+        issues.push({
+          dimension: 'Data Integrity',
+          severity: 'warning',
+          title: obj.object + ' has ' + obj.dupeCount + ' sets of duplicate properties with identical or near-identical labels',
+          description: 'Duplicate properties split your data across fields, making segmentation and reporting unreliable. Different team members fill different versions of the same field.',
+          impact: 'High — duplicate properties corrupt reporting and personalization',
+          fix: 'CRM → Properties → ' + obj.object + ' → review duplicates → pick the primary field, migrate data from the other, then archive the duplicate. Update all forms and workflows referencing the archived field.',
+        });
+      }
+    });
+
+    // Cross-object property name conflicts
+    if (allPropsEngine.crossObjectPropCount > 5) {
+      issues.push({
+        dimension: 'Data Integrity',
+        severity: 'info',
+        title: allPropsEngine.crossObjectPropCount + ' properties share the same name across multiple objects — naming collision risk',
+        description: 'Properties with the same name on different objects (Contacts, Deals, Companies) create confusion in workflows, APIs, and reports. A workflow updating "status" may be ambiguous about which object it targets.',
+        impact: 'Low-Medium — causes confusion in workflow configuration and API integrations',
+        fix: 'Review shared property names and consider adding object-specific prefixes: contact_status, deal_status rather than just status on both objects.',
+      });
+    }
+  }
   // ══════════════════════════════════════════════════════════════════════════
   // ✦ SETUP HEALTH ENGINE — What Portal IQ charges $2,000 to check manually
   // Checks: domain auth, tracking code, teams, user roles, import errors,
