@@ -5452,8 +5452,8 @@ async function runFullAudit(token, auditId, meta) {
   // Workflows and forms — attempt with Public App scope, fall back gracefully
   // workflows already fetched in parallel above via wfRes
   // workflowsRaw kept as alias for compatibility
-  const workflowsRaw = wfRes.data?.workflows || [];
-  const workflowsR = wfRes
+  const workflowsRaw = await paginate('/automation/v3/workflows', 9999);
+  const workflowsR = { data: { workflows: Array.isArray(workflowsRaw) ? workflowsRaw : [] } }
   // Paginate forms (portals can have 200+)
   const formsR = await safe(
     () => paginate('/marketing/v3/forms', smallLimit),
