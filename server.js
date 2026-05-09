@@ -2424,7 +2424,7 @@ app.get('/audit/deal-risk', async (req, res) => {
 
       return {
         id: deal.id,
-        name: deal.properties?.dealname || 'Unnamed Deal',
+        name: deal.name || deal.deal || deal.properties?.dealname || ('Deal #' + deal.id),
         amount,
         stage,
         owner,
@@ -8989,45 +8989,45 @@ async function runFullAudit(token, auditId, meta) {
 
   // ── All-objects property health issues ────────────────────────────────────
 
-// ── SCORE CLAMPING — prevent any dimension from going below 10 ─────────────
-  dataScore       = Math.max(10, dataScore);
-  autoScore       = Math.max(10, autoScore);
-  pipelineScore   = Math.max(10, pipelineScore);
-  marketingScore  = Math.max(10, marketingScore);
-  configScore     = Math.max(10, configScore);
-  teamScore       = Math.max(10, teamScore);
-  serviceScore    = Math.max(10, serviceScore);
-  reportingScore  = Math.max(10, reportingScore);
+// ── SCORE CLAMPING — prevent any dimension from going below floor values ────
+  dataScore       = Math.max(15, dataScore);
+  autoScore       = Math.max(15, autoScore);
+  pipelineScore   = Math.max(12, pipelineScore);
+  marketingScore  = Math.max(12, marketingScore);
+  configScore     = Math.max(20, configScore);
+  teamScore       = Math.max(15, teamScore);
+  serviceScore    = Math.max(15, serviceScore);
+  reportingScore  = Math.max(15, reportingScore);
 
   const scoreMap = {
     dataIntegrity:     contacts.length > 0
-      ? scoreFloor(dataScore, 10)
+      ? scoreFloor(dataScore, 15)
       : null,
 
     automationHealth:  (workflows.length > 0 || sequences.length > 0)
-      ? scoreFloor(autoScore, 10)
+      ? scoreFloor(autoScore, 15)
       : null,
 
     pipelineIntegrity: deals.length > 0
-      ? scoreFloor(pipelineScore, 10)
+      ? scoreFloor(pipelineScore, 12)
       : null,
 
     marketingHealth:   hasMarketingData
-      ? scoreFloor(marketingScore, 10)
+      ? scoreFloor(marketingScore, 12)
       : null,
 
-    configSecurity:    scoreFloor(configScore, 10),
+    configSecurity:    scoreFloor(configScore, 20),
 
     reportingQuality:  deals.length > 5
-      ? scoreFloor(reportingScore, 10)
+      ? scoreFloor(reportingScore, 15)
       : null,
 
     teamAdoption:      users.length > 0
-      ? scoreFloor(teamScore, 10)
+      ? scoreFloor(teamScore, 15)
       : null,
 
     serviceHealth:     tickets.length > 0
-      ? scoreFloor(serviceScore, 10)
+      ? scoreFloor(serviceScore, 15)
       : null,
   };
   // Filter to only scored dimensions, build scores object
@@ -9067,9 +9067,11 @@ async function runFullAudit(token, auditId, meta) {
   const critPenalty = Math.min(15, Math.round(criticalCount * 1.5));
   // Warning penalty: each warning drops overall by 0.5pt (max -8)
   const warnPenalty = Math.min(8, Math.round(warningCount * 0.5));
-  overallScore = Math.max(12, overallScore - critPenalty - warnPenalty);
+  overallScore = Math.max(20, overallScore - critPenalty - warnPenalty);
   // Hard grade caps based on critical issue count
-  if (criticalCount > 0 && overallScore > 84) overallScore = 84;
+  if (criticalCount >= 15 && overallScore > 49) overallScore = 49;
+  else if (criticalCount >= 8 && overallScore > 59) overallScore = 59;
+  else if (criticalCount > 0 && overallScore > 79) overallScore = 79;
   if (criticalCount >= 3 && overallScore > 71) overallScore = 71;
   if (criticalCount >= 6 && overallScore > 59) overallScore = 59;
 
@@ -10717,6 +10719,7 @@ async function runFullAudit(token, auditId, meta) {
         // Store open deals for deal-risk endpoint (capped to avoid storage bloat)
         dealList: deals.filter(d => d.properties?.hs_is_closed !== 'true').slice(0, 500).map(d => ({
           id: d.id,
+          ownerName: ownerMap[d.properties?.hubspot_owner_id] || null,
           deal: d.properties?.dealname || ('Deal #' + d.id),
           name: d.properties?.dealname || ('Deal #' + d.id),
           recordId: d.id,
