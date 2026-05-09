@@ -11526,7 +11526,7 @@ async function runFullAudit(token, auditId, meta) {
         }).length,
         workflowsMissingGoals: workflows.filter(w => (w.enabled||w.isEnabled) && (!w.goalCriteria || (Array.isArray(w.goalCriteria) && w.goalCriteria.length === 0))).length,
         forecastEnabled:       deals.length > 5,
-        unusedCustomProperties: (undocumentedProps||[]).length,
+        unusedCustomProperties: contactProps.filter(p => (p.createdUserId || p.hubspotOwned === false) && !p.description).length,
         dealPropsUnused:       Math.max(0, 0),
         propertyUsagePct:      propertyUsage?.coverageScore || 0,
         stageVelocity:         pipelineVelocity || {},
