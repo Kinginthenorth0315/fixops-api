@@ -2391,7 +2391,7 @@ app.get('/audit/deal-risk', async (req, res) => {
       let risk = 0;
       const flags = [];
 
-      const lastActivity = deal.properties?.notes_last_updated || deal.properties?.hs_lastmodifieddate;
+      const lastActivity = deal.notesLastUpdated || deal.lastModified;
       const daysSinceActivity = lastActivity ? Math.floor((now - new Date(lastActivity).getTime()) / DAY) : 999;
 
       const closeDate = deal.properties?.closedate;
@@ -5777,7 +5777,7 @@ async function runFullAudit(token, auditId, meta) {
   const importHistory   = importsR.data?.results||[];
   const accountInfo     = accountInfoR.data||{};
   // Integration data
-  const connectedIntegrations = integrationsR.data?.results || [];
+  const connectedIntegrations = integrationsR.data?.identities || integrationsR.data?.results || [];
   const timelineApps    = timelineAppsR.data?.results || [];
   // leadScoreProperty already set above from new lead scoring tool detection
   const emailEngs       = emailEngR.data?.results||[];
@@ -10732,8 +10732,8 @@ async function runFullAudit(token, auditId, meta) {
         dealList: deals.filter(d => d.properties?.hs_is_closed !== 'true').slice(0, 500).map(d => ({
           id: d.id,
           ownerName: ownerMap[d.properties?.hubspot_owner_id] || null,
-          deal: d.properties?.dealname || ('Deal #' + d.id),
-          name: d.properties?.dealname || ('Deal #' + d.id),
+          deal: d.properties?.dealname || d.properties?.subject || ('Transaction #' + d.id),
+          name: d.properties?.dealname || d.properties?.subject || d.properties?.hs_object_id_string || ('Transaction #' + d.id),
           recordId: d.id,
           amount: d.properties?.amount,
           value: d.properties?.amount ? '$' + Math.round(parseFloat(d.properties.amount)||0).toLocaleString() : '$0',
@@ -10743,6 +10743,12 @@ async function runFullAudit(token, auditId, meta) {
           daysStalled: d.properties?.hs_lastmodifieddate
             ? Math.floor((Date.now() - new Date(d.properties.hs_lastmodifieddate).getTime()) / 86400000)
             : 0,
+          lastModified: d.properties?.hs_lastmodifieddate || null,
+          notesLastUpdated: d.properties?.notes_last_updated || null,
+          probability: d.properties?.hs_deal_stage_probability || null,
+          lastModified: d.properties?.hs_lastmodifieddate || null,
+          notesLastUpdated: d.properties?.notes_last_updated || null,
+          probability: d.properties?.hs_deal_stage_probability || null,
           properties: {
             dealname: d.properties?.dealname,
             amount: d.properties?.amount,
@@ -11719,6 +11725,14 @@ app.get('/audit/history', async (req, res) => {
     console.error('History error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+
+// ── Alias for backwards compat ───────────────────────────────────────────────
+app.get('/history', (req, res) => {
+  const portalId = req.query.portal_id || req.query.portalId || req.query.email;
+  if (!portalId) return res.status(400).json({ error: 'portalId required' });
+  res.redirect('/audit/history?portalId=' + encodeURIComponent(portalId));
 });
 
 
