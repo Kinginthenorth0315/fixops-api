@@ -3214,7 +3214,7 @@ const runSentinelCheck = async (customer) => {
     const contactCount = contactsRes.data?.total || 0;
 
     // Check 1: Workflow errors
-    const erroredWfs = workflows.filter(w => (w.enabled || w.isEnabled) && (w.status === 'ERROR' || w.errorCount > 0));
+    const erroredWfs = _workflowsInitial.filter(w => (w.enabled || w.isEnabled) && (w.status === 'ERROR' || w.errorCount > 0));
 
     // Check 2: New ghost seats since last check (users inactive 90+ days)
     const ninetyDaysAgo = Date.now() - (90 * 86400000);
@@ -9811,7 +9811,7 @@ async function runFullAudit(token, auditId, meta) {
     const features = [];
 
     // CRM Core (always available)
-    features.push({ hub: 'CRM', name: 'Contacts', using: contacts.length > 0, value: contacts.length > 0 ? fmt(contacts.length) + ' contacts' : 'Empty', tip: contacts.length === 0 ? 'Import your contacts to activate the CRM' : null });
+    features.push({ hub: 'CRM', name: 'Contacts', using: contacts.length > 0, value: contacts.length > 0 ? fmt(contacts.length) + ' contacts' : 'Empty', tip: contacts.length === 0 ? 'Import or manually add your contacts to activate the CRM' : null, how: 'Contacts → Import → Upload CSV' });
     features.push({ hub: 'CRM', name: 'Companies', using: companies.length > 0, value: companies.length > 0 ? fmt(companies.length) + ' companies' : 'Not used', tip: companies.length === 0 ? 'Associate contacts with companies for B2B reporting' : null });
     features.push({ hub: 'CRM', name: 'Deals', using: deals.length > 0, value: deals.length > 0 ? fmt(deals.length) + ' deals' : 'Not used', tip: deals.length === 0 ? 'Create deals to track revenue pipeline' : null });
     features.push({ hub: 'CRM', name: 'Tasks & Activities', using: tasks.length > 10, value: tasks.length > 0 ? fmt(tasks.length) + ' tasks logged' : 'Not used', tip: tasks.length === 0 ? 'Reps should log tasks in HubSpot to track follow-ups' : null });
@@ -9819,7 +9819,7 @@ async function runFullAudit(token, auditId, meta) {
     // Sales Hub
       // activeSeqs already declared above
     const seqsWithEnrollments = sequences.filter(s => parseInt(s.enrollmentCount||s.hs_num_enrolled||0) > 0);
-    features.push({ hub: 'Sales', name: 'Sequences', using: seqsWithEnrollments.length > 0, value: seqsWithEnrollments.length > 0 ? seqsWithEnrollments.length + ' sequences with enrollments' : sequences.length > 0 ? sequences.length + ' sequences, 0 enrollments' : 'Not configured', tip: sequences.length > 0 && seqsWithEnrollments.length === 0 ? 'Sequences exist but nobody enrolled — reps are not using them for outreach' : sequences.length === 0 ? 'Create sequences for repeatable sales outreach' : null });
+    features.push({ hub: 'Sales', name: 'Sequences', using: seqsWithEnrollments.length > 0, value: seqsWithEnrollments.length > 0 ? seqsWithEnrollments.length + ' sequences with enrollments' : sequences.length > 0 ? sequences.length + ' sequences, 0 enrollments' : 'Not configured', tip: sequences.length > 0 && seqsWithEnrollments.length === 0 ? 'Sequences exist but nobody enrolled — reps are not using them for outreach' : sequences.length === 0 ? 'Create sequences for repeatable sales outreach' : null , how: 'Sales → Sequences → Create Sequence' });
     features.push({ hub: 'Sales', name: 'Meeting Links', using: meetingLinks.length > 0, value: meetingLinks.length > 0 ? meetingLinks.length + ' meeting links' : 'None configured', tip: meetingLinks.length === 0 ? 'Create meeting scheduling pages so prospects can self-book' : null });
     features.push({ hub: 'Sales', name: 'Products Library', using: products.length > 0, value: products.length > 0 ? products.length + ' products' : 'Empty', tip: products.length === 0 ? 'Add products to speed up quote creation and standardize pricing' : null });
     features.push({ hub: 'Sales', name: 'Quotes', using: quotes.length > 0, value: quotes.length > 0 ? fmt(quotes.length) + ' quotes created' : 'Not used', tip: quotes.length === 0 ? 'Use HubSpot Quotes to generate proposals directly from deals' : null });
@@ -10291,63 +10291,69 @@ async function runFullAudit(token, auditId, meta) {
   // ✦ INTEGRATION HEALTH ENGINE
   // ════════════════════════════════════════════════════════
   const integrationHealthEngine = (() => {
-    const total = connectedIntegrations.length;
-    if (total === 0) return { total:0, healthy:0, errors:0, stale:0, apiUsagePct:0, grade:'N/A', deepIssues:[] };
+    // Use timeline event types to detect installed integrations
+    // Each integration that writes to CRM creates a timeline event type
+    const installedViaTimeline = timelineApps.map(app => ({
+      name: app.name || app.applicationName || ('App ' + app.applicationId),
+      id: app.applicationId,
+      type: 'timeline',
+      status: 'active',
+    }));
 
-    const deepIssues = [];
-    const integrationsWithTimeline = new Set(timelineApps.map(a => String(a.appId || a.id)));
+    // Use connectedIntegrations for OAuth apps
+    const installedViaOAuth = connectedIntegrations.map(ci => ({
+      name: ci.portalName || ci.name || ci.type || 'Connected App',
+      id: ci.clientId || ci.id,
+      type: 'oauth',
+      status: String(ci.status || ci.authStatus || 'active').toLowerCase(),
+    }));
 
-    // Auth failures from existing integrationErrors
-    integrationErrors
-      .filter(e => e.type === 'auth_failure')
-      .forEach(e => deepIssues.push({
-        name: e.name, type: 'auth_failure', severity: 'critical',
-        detail: 'Authentication expired — no data is syncing from this integration.',
-        fix: 'Settings → Integrations → Connected Apps → ' + e.name + ' → Reconnect'
-      }));
-
-    // Stale integrations (connected but no timeline events)
-    connectedIntegrations.forEach(i => {
-      const appId = String(i.appId || i.id || '');
-      const name  = i.portalName || i.name || i.type || 'Unknown Integration';
-      if (appId && !integrationsWithTimeline.has(appId)) {
-        deepIssues.push({
-          name, type: 'stale', severity: 'warning',
-          detail: name + ' is connected but hasn\'t written data to HubSpot in 30+ days. It may be misconfigured or abandoned.',
-          fix: 'Review ' + name + ' in Settings → Connected Apps. Verify sync rules are active and the connection is healthy.'
-        });
+    // Combine and deduplicate
+    const allIntegrations = [...installedViaOAuth];
+    installedViaTimeline.forEach(t => {
+      if (!allIntegrations.find(a => a.id === t.id)) {
+        allIntegrations.push(t);
       }
     });
 
-    // API quota
-    if (apiUsagePct >= 90) {
-      deepIssues.push({
-        name: 'API Quota', type: 'quota_critical', severity: 'critical',
-        detail: 'Portal is using ' + apiUsagePct + '% of its daily API quota. Integrations will start throttling and failing before end of day.',
-        fix: 'Identify the integration hammering the API. Common causes: broken Salesforce sync retrying on errors, Zapier polling too frequently, or a custom integration without rate limiting.'
-      });
-    } else if (apiUsagePct >= 70) {
-      deepIssues.push({
-        name: 'API Quota', type: 'quota_warning', severity: 'warning',
-        detail: 'Portal is using ' + apiUsagePct + '% of its daily API quota. Usage is trending high — monitor closely.',
-        fix: 'Review API-heavy integrations in Settings → Connected Apps. Reduce polling frequency where possible.'
-      });
-    }
+    // Detect errors
+    const errorStatuses = ['error','failed','disconnected','expired','unauthorized','invalid'];
+    integrationErrors.forEach(ie => {
+      if (!allIntegrations.find(a => a.name === ie.name)) {
+        allIntegrations.push({ name: ie.name, type: 'error', status: 'error' });
+      }
+    });
 
-    const errorCount   = deepIssues.filter(i => i.severity === 'critical').length;
-    const warnCount    = deepIssues.filter(i => i.severity === 'warning').length;
-    const staleCount   = deepIssues.filter(i => i.type === 'stale').length;
-    const authErrCount = deepIssues.filter(i => i.type === 'auth_failure').length;
-    const healthyCount = Math.max(0, total - authErrCount - staleCount);
+    const withErrors = allIntegrations.filter(i => errorStatuses.some(s => i.status?.includes(s)));
+    const healthy = allIntegrations.filter(i => !errorStatuses.some(s => i.status?.includes(s)));
+
+    // API usage
+    const apiUsagePct = apiRateLimit?.usageLimit > 0
+      ? Math.round(apiRateLimit.currentUsage / apiRateLimit.usageLimit * 100)
+      : 0;
+
+    // Grade
+    const errPct = allIntegrations.length > 0 ? withErrors.length / allIntegrations.length : 0;
+    const grade = errPct === 0 ? 'A' : errPct < 0.1 ? 'B' : errPct < 0.25 ? 'C' : 'D';
 
     return {
-      total, healthy: healthyCount,
-      errors: errorCount, warnings: warnCount,
-      stale: staleCount, apiUsagePct,
-      grade: errorCount > 0 ? 'Critical' : warnCount > 2 ? 'Needs Attention' : warnCount > 0 ? 'Good' : 'Excellent',
-      deepIssues: deepIssues.slice(0, 15),
+      total: allIntegrations.length,
+      healthy: healthy.length,
+      errors: withErrors.length,
+      stale: 0,
+      apiUsagePct,
+      grade,
+      integrationList: allIntegrations.slice(0, 30),
+      errorList: withErrors.slice(0, 10),
+      deepIssues: withErrors.map(i => ({
+        name: i.name,
+        type: 'auth_failure',
+        message: 'Authentication failed or integration disconnected',
+        severity: 'critical',
+        fix: 'Settings → Integrations → Connected Apps → ' + i.name + ' → Reconnect',
+      })),
     };
-  })();
+  })()
 
   // ════════════════════════════════════════════════════════
   // ✦ IMPORT HEALTH ENGINE
@@ -10425,7 +10431,13 @@ async function runFullAudit(token, auditId, meta) {
 
     const batchCount     = marketingEmails.filter(e => String(e.emailType||'').toUpperCase().includes('BATCH')).length;
     const automatedCount = marketingEmails.filter(e => String(e.emailType||'').toUpperCase().includes('AUTOMATED')).length;
-    const noAutomated    = batchCount > 5 && automatedCount === 0;
+    // Also count workflows that send emails as automated email count
+    const workflowEmailCount = workflows.filter(wf => {
+      const json = JSON.stringify(wf.actions||wf);
+      return json.includes('SEND_EMAIL') || json.includes('sendEmail') || json.includes('email_action') || json.includes('MARKETING_EMAIL');
+    }).length;
+    const totalAutomatedCount = automatedCount + workflowEmailCount;
+    const noAutomated    = batchCount > 5 && totalAutomatedCount === 0;
 
     const senderIssues = [];
     if (multiDomain) senderIssues.push({
@@ -11419,6 +11431,7 @@ async function runFullAudit(token, auditId, meta) {
           return enhanced;
         })(),
         ghostSeats: inactiveUsers.length,
+        inactiveUserCount: inactiveUsers.length,
         ticketResolutionRate: (() => { const c = tickets.filter(t=>!!t.properties?.hs_ticket_closed_date).length; return tickets.length>0?Math.round(c/tickets.length*100):0; })(),
         ticketTopCategories: (() => { const m={}; tickets.forEach(t=>{const k=t.properties?.hs_ticket_category||'Uncategorized'; m[k]=(m[k]||0)+1;}); return Object.entries(m).sort((a,b)=>b[1]-a[1]).slice(0,5); })(),
         ticketRepCount: (() => { const s=new Set(tickets.filter(t=>t.properties?.hubspot_owner_id).map(t=>t.properties.hubspot_owner_id)); return s.size; })(),
@@ -11657,6 +11670,7 @@ async function runFullAudit(token, auditId, meta) {
   await new Promise(r => setTimeout(r, 2000));
   const cleanResult = cleanText(finalResult);
   await saveResult(auditId, cleanResult);
+  console.log(`[${auditId}] 📊 Scores: data=${dataScore} auto=${autoScore} pipeline=${pipelineScore} marketing=${marketingScore} config=${configScore} report=${reportingScore} team=${teamScore} service=${serviceScore} | overall=${overallScore} | critical=${criticalCount} warn=${warningCount}`);
   console.log(`✅ Audit saved: ${auditId} | Score: ${overallScore} | ${criticalCount} critical | ${issues.length} total issues`);
   return cleanResult;
 }
@@ -11664,6 +11678,50 @@ async function runFullAudit(token, auditId, meta) {
 // ── Emails ────────────────────────────────────────────────────
 
 // ── Start ────────────────────────────────────────────────────────────────────
+// ── Audit History (for trends/ROI in Portal Snapshot) ────────────────────────
+app.get('/audit/history', async (req, res) => {
+  try {
+    const { portalId, limit = 10 } = req.query;
+    if (!portalId) return res.status(400).json({ error: 'portalId required' });
+
+    const rows = await db.query(
+      `SELECT id, created_at, score, critical_count, issue_count,
+              (result->'portalInfo'->'portalStats'->>'contacts')::int as contacts,
+              (result->'portalInfo'->'portalStats'->>'deals')::int as deals,
+              (result->'portalInfo'->'portalStats'->>'openPipelineValue')::numeric as pipeline
+       FROM audits
+       WHERE portal_id = $1 AND status = 'complete'
+       ORDER BY created_at DESC
+       LIMIT $2`,
+      [portalId, parseInt(limit)]
+    );
+
+    const history = rows.rows.map(r => ({
+      id: r.id,
+      date: r.created_at,
+      score: r.score,
+      critical: r.critical_count,
+      issues: r.issue_count,
+      contacts: r.contacts || 0,
+      deals: r.deals || 0,
+      pipeline: r.pipeline || 0,
+    }));
+
+    // Calculate trends vs previous audit
+    const trend = history.length >= 2 ? {
+      scoreDelta: history[0].score - history[1].score,
+      issuesDelta: history[0].issues - history[1].issues,
+      criticalDelta: history[0].critical - history[1].critical,
+    } : null;
+
+    res.json({ history, trend });
+  } catch (e) {
+    console.error('History error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 app.listen(PORT, () => console.log(`⚡ FixOps API v5 running on port ${PORT}`));
 
 initDb().catch((err) => {
